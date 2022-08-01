@@ -10,8 +10,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/kagurazakayashi/evernight-realm/internal/config"
-	"github.com/kagurazakayashi/evernight-realm/internal/idgen"
+	"github.com/kagurazakayashi/EvernightRealm/internal/config"
+	"github.com/kagurazakayashi/EvernightRealm/internal/idgen"
 )
 
 // decodeEnvelope 讀取回應並解析為統一錯誤信封，同時回傳原始回應內容。

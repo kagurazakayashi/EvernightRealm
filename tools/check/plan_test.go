@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/kagurazakayashi/evernight-realm/internal/devkit"
+	"github.com/kagurazakayashi/EvernightRealm/internal/devkit"
 )
 
 // fakeModule 建立一個含 go.mod 的最小目錄，當作 Go 側倉庫根的假目標。
@@ -64,10 +64,10 @@ func TestMakePlanReportsMissingGoMod(t *testing.T) {
 func fakeFrontendTree(t *testing.T) (root, appDir, flutterExe string) {
 	t.Helper()
 	root = t.TempDir()
-	writeExec(t, root, devkit.GitmodulesFile, `[submodule "evernight-realm-app"]`+"\n\tpath = evernight-realm-app\n")
+	writeExec(t, root, devkit.GitmodulesFile, `[submodule "EvernightRealmAPP"]`+"\n\tpath = EvernightRealmAPP\n")
 
-	appDir = filepath.Join(root, "evernight-realm-app")
-	writeExec(t, appDir, devkit.PubspecFile, "name: evernight_realm\n")
+	appDir = filepath.Join(root, "EvernightRealmAPP")
+	writeExec(t, appDir, devkit.PubspecFile, "name: evernightrealm\n")
 	writeExec(t, appDir, filepath.Join("tools", "check", "check.dart"), "void main() {}\n")
 	writeExec(t, appDir, filepath.Join(".dart_tool", "package_config.json"), "{}\n")
 
@@ -109,7 +109,7 @@ func TestMakePlanAppScopeCallsFrontendEntry(t *testing.T) {
 		t.Errorf("前端側的修正提示由它自己給，根側不應加: %q", step.hint)
 	}
 	joined := strings.Join(summary, "\n")
-	for _, want := range []string{"範圍：app", "evernight-realm-app", "轉發 2 筆參數"} {
+	for _, want := range []string{"範圍：app", "EvernightRealmAPP", "轉發 2 筆參數"} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("摘要應包含 %q，實際:\n%s", want, joined)
 		}

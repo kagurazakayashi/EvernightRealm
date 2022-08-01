@@ -16,7 +16,7 @@ import (
 	"io/fs"
 	"sync"
 
-	"github.com/kagurazakayashi/evernight-realm/internal/webassets/bundle"
+	"github.com/kagurazakayashi/EvernightRealm/internal/webassets/bundle"
 )
 
 // distDir 是產物在本套件目錄下的子目錄名（斜線寫法，與 go:embed 樣式一致）。

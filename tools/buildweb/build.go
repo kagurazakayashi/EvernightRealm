@@ -7,8 +7,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/kagurazakayashi/evernight-realm/internal/devkit"
-	"github.com/kagurazakayashi/evernight-realm/internal/webassets/bundle"
+	"github.com/kagurazakayashi/EvernightRealm/internal/devkit"
+	"github.com/kagurazakayashi/EvernightRealm/internal/webassets/bundle"
 )
 
 // noWebResourcesCDN 是本工具存在的理由：少了它，release 產物的 CanvasKit 會改向

@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/kagurazakayashi/evernight-realm/internal/devkit"
+	"github.com/kagurazakayashi/EvernightRealm/internal/devkit"
 )
 
 // appSteps 產生前端側的執行步驟：定位子模組，然後叫起前端倉庫自有的品質入口。

@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kagurazakayashi/evernight-realm/internal/database"
+	"github.com/kagurazakayashi/EvernightRealm/internal/database"
 )
 
 // createForeignDatabase 以驅動層建立「他人的資料庫」：有使用者資料表但沒有版本表。

@@ -6,7 +6,7 @@ import (
 	"testing"
 	"testing/fstest"
 
-	"github.com/kagurazakayashi/evernight-realm/internal/webassets/bundle"
+	"github.com/kagurazakayashi/EvernightRealm/internal/webassets/bundle"
 )
 
 // bundleSource 組出一份含 dist 子目錄的檔案樹，讓判定可在不動到實際內嵌內容的情況下重現。

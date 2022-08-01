@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kagurazakayashi/evernight-realm/internal/database"
-	"github.com/kagurazakayashi/evernight-realm/internal/timeutil"
+	"github.com/kagurazakayashi/EvernightRealm/internal/database"
+	"github.com/kagurazakayashi/EvernightRealm/internal/timeutil"
 )
 
 // mustOpen 開啟指定路徑的測試資料庫（含單寫入實例鎖）。

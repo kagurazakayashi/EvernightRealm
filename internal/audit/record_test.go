@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kagurazakayashi/evernight-realm/internal/idgen"
-	"github.com/kagurazakayashi/evernight-realm/internal/redact"
+	"github.com/kagurazakayashi/EvernightRealm/internal/idgen"
+	"github.com/kagurazakayashi/EvernightRealm/internal/redact"
 )
 
 // validActivityRecord 是一筆合法的活動審計記錄（測試逐條偏離它來驗證校驗規則）。

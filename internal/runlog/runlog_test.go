@@ -5,7 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"github.com/kagurazakayashi/evernight-realm/internal/redact"
+	"github.com/kagurazakayashi/EvernightRealm/internal/redact"
 	"io"
 	"log"
 	"log/slog"

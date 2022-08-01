@@ -42,7 +42,7 @@ func fakeRepo(t *testing.T, gitmodules string) (string, string) {
 }
 
 // realGitmodules 是這個倉庫實際使用的那份記錄，測試直接拿它當作真實格式的代表。
-const realGitmodules = `[submodule "evernight-realm-app"]
-	path = evernight-realm-app
-	url = git@github.com:kagurazakayashi/evernight-realm-app.git
+const realGitmodules = `[submodule "EvernightRealmAPP"]
+	path = EvernightRealmAPP
+	url = git@github.com:kagurazakayashi/EvernightRealmAPP.git
 `

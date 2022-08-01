@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/kagurazakayashi/evernight-realm/internal/devkit"
+	"github.com/kagurazakayashi/EvernightRealm/internal/devkit"
 )
 
 // writeFile 在指定目錄建立檔案（含父目錄），回傳路徑。
@@ -37,7 +37,7 @@ func fakeRepo(t *testing.T) (string, string) {
 }
 
 // realGitmodules 是這個倉庫實際使用的那份記錄。
-const realGitmodules = `[submodule "evernight-realm-app"]
-	path = evernight-realm-app
-	url = git@github.com:kagurazakayashi/evernight-realm-app.git
+const realGitmodules = `[submodule "EvernightRealmAPP"]
+	path = EvernightRealmAPP
+	url = git@github.com:kagurazakayashi/EvernightRealmAPP.git
 `

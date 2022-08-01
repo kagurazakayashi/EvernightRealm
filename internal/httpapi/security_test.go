@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/kagurazakayashi/evernight-realm/internal/config"
+	"github.com/kagurazakayashi/EvernightRealm/internal/config"
 )
 
 // assertBaselineSecurityHeaders 檢查回應帶有內建基線安全標頭（非 TLS 連線不應有 HSTS）。

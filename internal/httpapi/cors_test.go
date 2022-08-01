@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/kagurazakayashi/evernight-realm/internal/config"
+	"github.com/kagurazakayashi/EvernightRealm/internal/config"
 )
 
 // corsTestServer 以指定跨域組態建出完整路由樹（與正式路徑同一中介層鏈）。

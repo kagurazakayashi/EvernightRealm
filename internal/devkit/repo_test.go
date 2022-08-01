@@ -16,7 +16,7 @@ func TestParseGitmodules(t *testing.T) {
 		{
 			name:    "真實格式",
 			content: realGitmodules,
-			want:    []SubmoduleEntry{{Name: "evernight-realm-app", Path: "evernight-realm-app"}},
+			want:    []SubmoduleEntry{{Name: "EvernightRealmAPP", Path: "EvernightRealmAPP"}},
 		},
 		{
 			name: "多筆依順序回傳",

@@ -9,7 +9,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/kagurazakayashi/evernight-realm/internal/runlog"
+	"github.com/kagurazakayashi/EvernightRealm/internal/runlog"
 )
 
 // 寫入臨時組態檔並回傳路徑。

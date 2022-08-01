@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/kagurazakayashi/evernight-realm/internal/webassets/bundle"
+	"github.com/kagurazakayashi/EvernightRealm/internal/webassets/bundle"
 )
 
 // requiredWebFiles 是判定「這是一份可用的 Flutter Web 產物」的必要檔案清單。

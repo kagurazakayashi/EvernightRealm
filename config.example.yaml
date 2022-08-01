@@ -1,4 +1,4 @@
-# Evernight Realm 服務端配置示例（脫敏模板）
+# EvernightRealm 服務端配置示例（脫敏模板）
 #
 # 使用方法：複製本檔案為執行資料目錄中的 config.yaml 後按需修改。
 # 本檔案不含任何真實憑據；真實金鑰與配置只存在於 evernight-data/config.yaml，

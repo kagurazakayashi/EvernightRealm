@@ -14,8 +14,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kagurazakayashi/evernight-realm/internal/database"
-	"github.com/kagurazakayashi/evernight-realm/internal/database/migrate"
+	"github.com/kagurazakayashi/EvernightRealm/internal/database"
+	"github.com/kagurazakayashi/EvernightRealm/internal/database/migrate"
 )
 
 // digestOf 回傳檔案 SHA-256；檔案不存在時回傳固定字串。

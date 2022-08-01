@@ -1,0 +1,97 @@
+# ========== 项目意图忽略 ==========
+/doc
+cmd_out.txt
+A*.md
+.w*
+
+# ========== 技术验证探针的结果报告（探针源码仍追踪，报告不进版本库） ==========
+tools/verify/**/*.md
+
+# ========== Dart / Flutter 工具缓存 ==========
+.dart_tool/
+
+# ========== 运行时数据目录（规格 §26.4，含配置/数据库/媒体/日志） ==========
+/evernight-data/
+
+# ========== SQLite 数据库与本地配置（防手滑提交真实数据） ==========
+*.db
+*.db-wal
+*.db-shm
+config.yaml
+
+# ========== Go 构建与测试产物 ==========
+# 产物名与源码目录 cmd/evernight-server 同名，必须锚定根目录，避免误忽略源码
+/evernight-server
+/evernight-server.exe
+# Flutter Web 產物：由 tools/buildweb 產生，以 go:embed 內嵌（不入版本庫）
+# 忽略採「目錄內全部檔案」而非目錄本身：目錄被整體忽略時 Git 不會進入該目錄，佔位檔的例外規則就不會生效
+/internal/webassets/dist/*
+# 佔位檔：讓前端尚未建置時 go:embed 仍可編譯；產物可用性由 internal/webassets 啟動時判定
+!/internal/webassets/dist/.keep
+*.test
+*.out
+coverage.out
+coverage.html
+*.prof
+/bin/
+/build/
+/dist/
+/tmp/
+
+# ========== 证书与密钥（TLS 本地 CA / 管理员证书模式生成物） ==========
+*.pem
+*.key
+*.p12
+*.pfx
+
+# ========== 环境变量 ==========
+.env
+.env.*
+!.env.example
+
+# ========== 编辑器 / IDE ==========
+.idea/
+.vscode/
+.fleet/
+*.iml
+*.ipr
+*.iws
+.settings/
+.project
+.classpath
+
+# ========== 通用临时文件 ==========
+*.swp
+*.swo
+*~
+*.bak
+*.tmp
+*.log
+
+# ========== Windows ==========
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# ========== macOS ==========
+.DS_Store
+.AppleDouble
+.LSOverride
+.AppleDB
+.AppleDesktop
+._*
+
+# ========== Linux ==========
+.directory
+.fuse_hidden*
+
+# ========== 其他语言常见产物（脚本/辅助工具） ==========
+__pycache__/
+*.py[cod]
+node_modules/
+.npm/
+.yarn/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*

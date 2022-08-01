@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/kagurazakayashi/evernight-realm/internal/devkit"
+	"github.com/kagurazakayashi/EvernightRealm/internal/devkit"
 )
 
 // resolveOutput 決定產物目錄，並確認它是一個本工具可以有條件清空的目錄。

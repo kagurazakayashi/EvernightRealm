@@ -16,11 +16,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kagurazakayashi/evernight-realm/internal/config"
-	"github.com/kagurazakayashi/evernight-realm/internal/database"
-	"github.com/kagurazakayashi/evernight-realm/internal/database/migrate"
-	"github.com/kagurazakayashi/evernight-realm/internal/runlog"
-	"github.com/kagurazakayashi/evernight-realm/internal/webassets"
+	"github.com/kagurazakayashi/EvernightRealm/internal/config"
+	"github.com/kagurazakayashi/EvernightRealm/internal/database"
+	"github.com/kagurazakayashi/EvernightRealm/internal/database/migrate"
+	"github.com/kagurazakayashi/EvernightRealm/internal/runlog"
+	"github.com/kagurazakayashi/EvernightRealm/internal/webassets"
 )
 
 // syncBuffer 為可跨 goroutine 讀寫的輸出緩衝（run 在背景寫入，測試同步讀取）。

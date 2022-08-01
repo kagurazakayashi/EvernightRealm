@@ -5,7 +5,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/kagurazakayashi/evernight-realm/internal/config"
+	"github.com/kagurazakayashi/EvernightRealm/internal/config"
 )
 
 // 跨域（CORS）標頭名稱常數。

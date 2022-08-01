@@ -29,7 +29,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/kagurazakayashi/evernight-realm/internal/devkit"
+	"github.com/kagurazakayashi/EvernightRealm/internal/devkit"
 )
 
 // 退出碼沿用既有後端命令的慣例：0 成功、1 一般失敗、2 命令列參數錯誤。

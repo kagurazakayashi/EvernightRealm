@@ -9,11 +9,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kagurazakayashi/evernight-realm/internal/database"
-	"github.com/kagurazakayashi/evernight-realm/internal/database/migrate"
-	"github.com/kagurazakayashi/evernight-realm/internal/idgen"
-	"github.com/kagurazakayashi/evernight-realm/internal/redact"
-	"github.com/kagurazakayashi/evernight-realm/internal/timeutil"
+	"github.com/kagurazakayashi/EvernightRealm/internal/database"
+	"github.com/kagurazakayashi/EvernightRealm/internal/database/migrate"
+	"github.com/kagurazakayashi/EvernightRealm/internal/idgen"
+	"github.com/kagurazakayashi/EvernightRealm/internal/redact"
+	"github.com/kagurazakayashi/EvernightRealm/internal/timeutil"
 )
 
 // fixedClock 為可設定的時鐘：審計時刻必須取自伺服器時鐘且不採信呼叫端（DEC-015、§27.2）。

@@ -851,7 +851,7 @@ func applyEnv(cfg *Config) error {
 }
 
 // ExampleYAML 為首次啟動時寫入資料目錄的脫敏範例組態（不含任何真實憑據）。
-const ExampleYAML = `# Evernight Realm 服務端組態（首次啟動自動建立）
+const ExampleYAML = `# EvernightRealm 服務端組態（首次啟動自動建立）
 #
 # 本檔案不含真實憑據；root_password_hash 若未設定，系統將於初始化流程產生。
 # 修改後重啟服務端生效。

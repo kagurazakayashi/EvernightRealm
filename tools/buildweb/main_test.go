@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/kagurazakayashi/evernight-realm/internal/devkit"
+	"github.com/kagurazakayashi/EvernightRealm/internal/devkit"
 )
 
 func TestParseOptionsDefaults(t *testing.T) {
@@ -32,8 +32,8 @@ func TestParseOptionsDefaults(t *testing.T) {
 func TestParseOptionsFlags(t *testing.T) {
 	var stdout, stderr strings.Builder
 	opts, err := parseOptions([]string{
-		"--repo-root", `D:\share\evernight-realm`,
-		"--module", "evernight-realm-app",
+		"--repo-root", `D:\share\evernightrealm`,
+		"--module", "EvernightRealmAPP",
 		"--output", "tmp-dist",
 		"--flutter", `D:\SDK\flutter\bin\flutter.bat`,
 		"--dart-define", "ER_SERVER_BASE_URL=http://127.0.0.1:5299",
@@ -105,7 +105,7 @@ func TestFrontendCheckStopsWhenEntryMissing(t *testing.T) {
 	root, appDir := fakeRepo(t)
 	target := buildTarget{
 		root: root,
-		app:  devkit.Frontend{Module: "evernight-realm-app", Dir: appDir, FlutterExe: "flutter"},
+		app:  devkit.Frontend{Module: "EvernightRealmAPP", Dir: appDir, FlutterExe: "flutter"},
 		out:  filepath.Join(root, filepath.FromSlash(defaultOutputRel)),
 	}
 

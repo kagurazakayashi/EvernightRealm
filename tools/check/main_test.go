@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/kagurazakayashi/evernight-realm/internal/devkit"
+	"github.com/kagurazakayashi/EvernightRealm/internal/devkit"
 )
 
 func TestParseInvocationDefaults(t *testing.T) {
@@ -75,7 +75,7 @@ func TestParseInvocationFlagsAnywhere(t *testing.T) {
 	var stdout, stderr strings.Builder
 	in, err := parseInvocation([]string{
 		"go", "./internal/httpapi", "--run", "TestCors", "--verbose",
-		"--repo-root=D:\\share\\evernight-realm", "--module", "evernight-realm-app",
+		"--repo-root=D:\\share\\evernightrealm", "--module", "EvernightRealmAPP",
 		"--flutter", `D:\SDK\flutter\bin\flutter.bat`, "--go", `D:\SDK\go\bin\go.exe`,
 	}, &stdout, &stderr)
 	if err != nil {

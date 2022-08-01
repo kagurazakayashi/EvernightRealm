@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/kagurazakayashi/evernight-realm/internal/config"
+	"github.com/kagurazakayashi/EvernightRealm/internal/config"
 )
 
 // 內建安全回應頭策略（SEC-007）：組態留空時即採用這些值，也是本專案的安全基線。

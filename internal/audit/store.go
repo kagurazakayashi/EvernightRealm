@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/kagurazakayashi/evernight-realm/internal/database"
-	"github.com/kagurazakayashi/evernight-realm/internal/idgen"
-	"github.com/kagurazakayashi/evernight-realm/internal/timeutil"
+	"github.com/kagurazakayashi/EvernightRealm/internal/database"
+	"github.com/kagurazakayashi/EvernightRealm/internal/idgen"
+	"github.com/kagurazakayashi/EvernightRealm/internal/timeutil"
 )
 
 // 分頁參數（DEC-013：一套合同同時覆蓋追加型資料流與深度分頁）。

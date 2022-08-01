@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kagurazakayashi/evernight-realm/internal/config"
-	"github.com/kagurazakayashi/evernight-realm/internal/timeutil"
+	"github.com/kagurazakayashi/EvernightRealm/internal/config"
+	"github.com/kagurazakayashi/EvernightRealm/internal/timeutil"
 )
 
 // rfc3339UTC 為時間回應的已發布格式：恆含三位毫秒、以 Z 結尾、長度固定 24 字元。

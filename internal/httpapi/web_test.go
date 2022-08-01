@@ -13,12 +13,12 @@ import (
 	"testing"
 	"testing/fstest"
 
-	"github.com/kagurazakayashi/evernight-realm/internal/config"
-	"github.com/kagurazakayashi/evernight-realm/internal/webassets/bundle"
+	"github.com/kagurazakayashi/EvernightRealm/internal/config"
+	"github.com/kagurazakayashi/EvernightRealm/internal/webassets/bundle"
 )
 
 const (
-	testShellBody     = `<!DOCTYPE html><html><base href="/"><title>Evernight Realm</title></html>`
+	testShellBody     = `<!DOCTYPE html><html><base href="/"><title>EvernightRealm</title></html>`
 	testScriptBody    = "console.log('evernight realm bootstrapping');"
 	testWasmBody      = "\x00asm\x01\x00\x00\x00"
 	testBootstrapBody = `const e={"useLocalCanvasKit":true};`

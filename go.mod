@@ -1,4 +1,4 @@
-module github.com/kagurazakayashi/evernight-realm
+module github.com/kagurazakayashi/EvernightRealm
 
 go 1.27.1
 

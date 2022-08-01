@@ -23,7 +23,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/kagurazakayashi/evernight-realm/internal/timeutil"
+	"github.com/kagurazakayashi/EvernightRealm/internal/timeutil"
 )
 
 // Options 為 Open 的輸入；零值欄位採用註解所述預設。

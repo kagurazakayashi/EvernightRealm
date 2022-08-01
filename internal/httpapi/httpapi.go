@@ -24,9 +24,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/kagurazakayashi/evernight-realm/internal/config"
-	"github.com/kagurazakayashi/evernight-realm/internal/idgen"
-	"github.com/kagurazakayashi/evernight-realm/internal/timeutil"
+	"github.com/kagurazakayashi/EvernightRealm/internal/config"
+	"github.com/kagurazakayashi/EvernightRealm/internal/idgen"
+	"github.com/kagurazakayashi/EvernightRealm/internal/timeutil"
 )
 
 // Deps 為 HTTP 服務層的外部依賴；零值表示沒有外部依賴。

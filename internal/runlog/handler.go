@@ -10,8 +10,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/kagurazakayashi/evernight-realm/internal/redact"
-	"github.com/kagurazakayashi/evernight-realm/internal/timeutil"
+	"github.com/kagurazakayashi/EvernightRealm/internal/redact"
+	"github.com/kagurazakayashi/EvernightRealm/internal/timeutil"
 )
 
 // redactingHandler 是日誌鏈的最外層：把記錄的時間正規化為 UTC、

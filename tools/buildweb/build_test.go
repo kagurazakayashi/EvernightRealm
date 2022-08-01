@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/kagurazakayashi/evernight-realm/internal/devkit"
-	"github.com/kagurazakayashi/evernight-realm/internal/webassets/bundle"
+	"github.com/kagurazakayashi/EvernightRealm/internal/devkit"
+	"github.com/kagurazakayashi/EvernightRealm/internal/webassets/bundle"
 )
 
 func TestBuildArgs(t *testing.T) {
@@ -61,7 +61,7 @@ func TestBuildArgs(t *testing.T) {
 }
 
 func TestBuildCommandUsesFrontendToolchain(t *testing.T) {
-	app := devkit.Frontend{Dir: `D:\repo\evernight-realm-app`, FlutterExe: `D:\SDK\flutter\bin\flutter.bat`}
+	app := devkit.Frontend{Dir: `D:\repo\EvernightRealmAPP`, FlutterExe: `D:\SDK\flutter\bin\flutter.bat`}
 	cmd := buildCommand(app, `D:\repo\internal\webassets\dist`, options{})
 
 	if cmd.Exe != app.FlutterExe {

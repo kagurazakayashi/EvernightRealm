@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kagurazakayashi/evernight-realm/internal/config"
+	"github.com/kagurazakayashi/EvernightRealm/internal/config"
 )
 
 // lifecycleServer 建立供生命週期測試使用的 Server：自訂路由與監聽埠（0 表示由系統指派）。

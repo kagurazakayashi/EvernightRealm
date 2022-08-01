@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/kagurazakayashi/evernight-realm/internal/redact"
+	"github.com/kagurazakayashi/EvernightRealm/internal/redact"
 )
 
 // changeWire 是變更摘要在資料庫裡的單筆形状（欄位名 + 遮罩後的前後值）。

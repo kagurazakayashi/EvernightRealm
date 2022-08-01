@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/kagurazakayashi/evernight-realm/internal/devkit"
+	"github.com/kagurazakayashi/EvernightRealm/internal/devkit"
 )
 
 // Go 側三道閘的名稱。清單只在這裡出現一次：過濾、錯誤訊息與說明文字都從它推得。

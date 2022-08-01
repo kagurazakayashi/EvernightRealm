@@ -21,8 +21,8 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/kagurazakayashi/evernight-realm/internal/idgen"
-	"github.com/kagurazakayashi/evernight-realm/internal/redact"
+	"github.com/kagurazakayashi/EvernightRealm/internal/idgen"
+	"github.com/kagurazakayashi/EvernightRealm/internal/redact"
 )
 
 // Scope 決定一筆審計記錄落在哪張表，也決定查詢讀哪張表。

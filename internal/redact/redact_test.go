@@ -160,7 +160,7 @@ func TestRedactTextKeepsDiagnostics(t *testing.T) {
 		"attempt to write a readonly database (8)",
 		"listen tcp 127.0.0.1:5206: bind: 只能每次使用一個位址",
 		"goroutine 22 [running]:",
-		"D:\\share\\evernight-realm\\internal\\database\\database.go:198",
+		"D:\\share\\evernightrealm\\internal\\database\\database.go:198",
 		"/usr/lib/x86_64-linux-gnu/libc.so.6",
 		"內容型別必須為 application/json，實際為 text/plain",
 		"請求體超過上限 1048576 位元組",
@@ -218,7 +218,7 @@ func TestMaskBeforeTruncate(t *testing.T) {
 // TestSummarizeStack 驗證堆疊摘要保留前段、標明省略行數，並仍走同一條遮罩。
 func TestSummarizeStack(t *testing.T) {
 	stack := "goroutine 1 [running]:\n" +
-		"main.boom(0x1)\n\tD:/share/evernight-realm/main.go:12 +0x20\n" +
+		"main.boom(0x1)\n\tD:/share/evernightrealm/main.go:12 +0x20\n" +
 		"runtime.main()\n\t/usr/local/go/src/runtime/proc.go:250 +0xc0\n" +
 		"created token=supersecretvalue1 於此處\n"
 	got := SummarizeStack(stack, 3)

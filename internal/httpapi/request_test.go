@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kagurazakayashi/evernight-realm/internal/config"
+	"github.com/kagurazakayashi/EvernightRealm/internal/config"
 )
 
 // testJSONPayload 為測試端點的解碼目標：含兩個欄位以驗證型別與未知欄位判定。

@@ -31,7 +31,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/kagurazakayashi/evernight-realm/internal/devkit"
+	"github.com/kagurazakayashi/EvernightRealm/internal/devkit"
 )
 
 // 退出碼與倉庫內其他工具命令一致：0 通過、1 有閘未過、2 命令列參數錯誤。
@@ -134,7 +134,7 @@ func usageText() string {
 		"  -h, --help        顯示本說明",
 		"",
 		"位置參數是 Go 側的套件或目錄（以倉庫根為基準）。前端側的定向一律放在 `-- ` 之後，",
-		"原樣交給 evernight-realm-app/tools/check/check.dart 解釋——兩側的閘名不同，硬翻成",
+		"原樣交給 EvernightRealmAPP/tools/check/check.dart 解釋——兩側的閘名不同，硬翻成",
 		"同一套旗標只會出現第二份規則。",
 		"",
 		"範例：",

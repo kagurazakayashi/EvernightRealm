@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kagurazakayashi/evernight-realm/internal/config"
-	"github.com/kagurazakayashi/evernight-realm/internal/runlog"
+	"github.com/kagurazakayashi/EvernightRealm/internal/config"
+	"github.com/kagurazakayashi/EvernightRealm/internal/runlog"
 )
 
 // accessMessageOf 回傳日誌文字裡的訪問記錄行（不含其他記錄）。

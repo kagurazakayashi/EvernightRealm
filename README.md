@@ -1,12 +1,12 @@
-# Evernight Realm
+# EvernightRealm
 
 > Host your own private world for your group — immersive activities, characters and virtual assets on a machine you own.
 
 [English](./README.md) · [简体中文](./README.zh-CN.md) · [繁體中文（台灣）](./README.zh-TW.md) · [日本語](./README.ja-JP.md)
 
-## What is Evernight Realm?
+## What is EvernightRealm?
 
-Evernight Realm is a self-hosted, offline-first platform for a small group of players: run immersive activities together, play characters, and trade virtual assets — all on a local network, with no internet, cloud accounts or telemetry.
+EvernightRealm is a self-hosted, offline-first platform for a small group of players: run immersive activities together, play characters, and trade virtual assets — all on a local network, with no internet, cloud accounts or telemetry.
 
 ## Features (under development)
 
@@ -18,7 +18,7 @@ Evernight Realm is a self-hosted, offline-first platform for a small group of pl
 
 ## Current status
 
-Evernight Realm is under active development and no stable release is available yet. The server can already be built as a **single executable**: one port serves both the web interface (so far the app shell — switchable UI language and a server connectivity probe, with business features still in development) and the API endpoints, so a browser pointed at that address is all you need — no separate static hosting.
+EvernightRealm is under active development and no stable release is available yet. The server can already be built as a **single executable**: one port serves both the web interface (so far the app shell — switchable UI language and a server connectivity probe, with business features still in development) and the API endpoints, so a browser pointed at that address is all you need — no separate static hosting.
 
 ## How it will work (once released)
 

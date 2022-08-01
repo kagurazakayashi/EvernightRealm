@@ -15,13 +15,13 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/kagurazakayashi/evernight-realm/internal/config"
-	"github.com/kagurazakayashi/evernight-realm/internal/database"
-	"github.com/kagurazakayashi/evernight-realm/internal/database/migrate"
-	"github.com/kagurazakayashi/evernight-realm/internal/httpapi"
-	"github.com/kagurazakayashi/evernight-realm/internal/runlog"
-	"github.com/kagurazakayashi/evernight-realm/internal/timeutil"
-	"github.com/kagurazakayashi/evernight-realm/internal/webassets"
+	"github.com/kagurazakayashi/EvernightRealm/internal/config"
+	"github.com/kagurazakayashi/EvernightRealm/internal/database"
+	"github.com/kagurazakayashi/EvernightRealm/internal/database/migrate"
+	"github.com/kagurazakayashi/EvernightRealm/internal/httpapi"
+	"github.com/kagurazakayashi/EvernightRealm/internal/runlog"
+	"github.com/kagurazakayashi/EvernightRealm/internal/timeutil"
+	"github.com/kagurazakayashi/EvernightRealm/internal/webassets"
 )
 
 // Version 為目前開發版本。正式版號策略待發布流程定案後統一管理。

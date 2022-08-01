@@ -29,7 +29,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/kagurazakayashi/evernight-realm/internal/timeutil"
+	"github.com/kagurazakayashi/EvernightRealm/internal/timeutil"
 )
 
 //go:embed migrations/*.sql

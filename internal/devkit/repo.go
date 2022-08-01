@@ -165,7 +165,7 @@ func ParseGitmodules(content string) []SubmoduleEntry {
 	return entries
 }
 
-// sectionName 取 [submodule "evernight-realm-app"] 裡的引號內容；取不到回傳空字串。
+// sectionName 取 [submodule "EvernightRealmAPP"] 裡的引號內容；取不到回傳空字串。
 func sectionName(line string) string {
 	parts := strings.Split(line, `"`)
 	if len(parts) < 2 {
