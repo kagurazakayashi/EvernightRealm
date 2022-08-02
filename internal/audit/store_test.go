@@ -54,7 +54,7 @@ func TestAppendAndQueryRoundTrip(t *testing.T) {
 		t.Error("Append 未回傳記錄標識")
 	}
 
-	page, err := store.Query(ctx, db.SQL(), Filter{Scope: ScopeActivity, ActivityID: rec.ActivityID})
+	page, err := store.Query(ctx, db.SQL(), rootViewer(), Filter{Scope: ScopeActivity, ActivityID: rec.ActivityID})
 	if err != nil {
 		t.Fatalf("Query 失敗：%v", err)
 	}
@@ -137,7 +137,7 @@ func TestAppendRejectsInvalidRecordBeforeTouchingDatabase(t *testing.T) {
 	assertRowCount(t, db, "activity_audit", 0)
 }
 
-// TestAppendInRolledBackTransactionLeavesNothing 是 DEV-1-10 的驗收項目：
+// TestAppendInRolledBackTransactionLeavesNothing 是 DEV-1-10 的驗收專案：
 // 「業務事務失敗時不會留下虛假成功審計」。審計與業務變更同交易，靠回滾保證，
 // 而不是事後補寫一條「剛剛那筆不算」。
 func TestAppendInRolledBackTransactionLeavesNothing(t *testing.T) {
@@ -163,7 +163,7 @@ func TestAppendInRolledBackTransactionLeavesNothing(t *testing.T) {
 }
 
 // TestAppendOnlyTablesRejectUpdateAndDelete 固定 AUD-003／§25.3 的資料庫層把關：
-// 不是只有我們的代碼不改不刪，而是透過 SQL 改刪會被觸發器擋下。
+// 不是隻有我們的程式碼不改不刪，而是透過 SQL 改刪會被觸發器擋下。
 func TestAppendOnlyTablesRejectUpdateAndDelete(t *testing.T) {
 	store, db, _ := newTestStore(t)
 	ctx := context.Background()
@@ -197,7 +197,7 @@ func TestAppendOnlyTablesRejectUpdateAndDelete(t *testing.T) {
 		}
 	}
 	// 被拒的語句不能留下半改狀態：原記錄仍要完整讀得回來。
-	page, err := store.Query(ctx, db.SQL(), Filter{Scope: ScopeActivity, ActivityID: rec.ActivityID})
+	page, err := store.Query(ctx, db.SQL(), rootViewer(), Filter{Scope: ScopeActivity, ActivityID: rec.ActivityID})
 	if err != nil || len(page.Records) != 1 {
 		t.Fatalf("觸發器拒絕後查不到原記錄：%v / %+v", err, page.Records)
 	}
@@ -254,7 +254,7 @@ func TestQueryPaginatesWithoutGapsOrRepeats(t *testing.T) {
 	ctx := context.Background()
 	rec := validActivityRecord()
 	const total = 25
-	// 同一毫秒也要能穩定排序：靠 UUIDv7 的遞增前綴破平（DEC-014）。
+	// 同一毫秒也要能穩定排序：靠 UUIDv7 的遞增字首破平（DEC-014）。
 	for i := 0; i < total; i++ {
 		if _, err := store.Append(ctx, db.SQL(), rec); err != nil {
 			t.Fatalf("第 %d 筆寫入失敗：%v", i, err)
@@ -265,7 +265,7 @@ func TestQueryPaginatesWithoutGapsOrRepeats(t *testing.T) {
 	cursor := ""
 	pages := 0
 	for {
-		page, err := store.Query(ctx, db.SQL(), Filter{Scope: ScopeActivity, ActivityID: rec.ActivityID, Limit: 10, Cursor: cursor})
+		page, err := store.Query(ctx, db.SQL(), rootViewer(), Filter{Scope: ScopeActivity, ActivityID: rec.ActivityID, Limit: 10, Cursor: cursor})
 		if err != nil {
 			t.Fatalf("分頁失敗：%v", err)
 		}
@@ -313,7 +313,7 @@ func TestQueryFilters(t *testing.T) {
 		}
 	}
 
-	byAction, err := store.Query(ctx, db.SQL(), Filter{Scope: ScopeActivity,
+	byAction, err := store.Query(ctx, db.SQL(), rootViewer(), Filter{Scope: ScopeActivity,
 		ActivityID: otherActivity.ActivityID, Action: "phase.change"})
 	if err != nil {
 		t.Fatal(err)
@@ -322,12 +322,12 @@ func TestQueryFilters(t *testing.T) {
 		t.Errorf("按動作過濾不符：%+v", byAction.Records)
 	}
 	// 動作碼過濾不能把活動條件擠掉：A 活動裡沒有 phase.change，就算 B 活動有也不該出現。
-	if page, err := store.Query(ctx, db.SQL(), Filter{Scope: ScopeActivity,
+	if page, err := store.Query(ctx, db.SQL(), rootViewer(), Filter{Scope: ScopeActivity,
 		ActivityID: recA.ActivityID, Action: "phase.change"}); err != nil || len(page.Records) != 0 {
 		t.Errorf("A 活動不該有 B 活動的動作：%d 筆 / %v", len(page.Records), err)
 	}
 
-	byTarget, err := store.Query(ctx, db.SQL(), Filter{Scope: ScopeActivity,
+	byTarget, err := store.Query(ctx, db.SQL(), rootViewer(), Filter{Scope: ScopeActivity,
 		ActivityID: otherActivity.ActivityID, Target: &otherActivity.Target})
 	if err != nil {
 		t.Fatal(err)
@@ -337,7 +337,7 @@ func TestQueryFilters(t *testing.T) {
 	}
 
 	// 活動隔離的技術基礎：查 A 活動查不到 B 活動的記錄。
-	cross, err := store.Query(ctx, db.SQL(), Filter{Scope: ScopeActivity, ActivityID: recA.ActivityID})
+	cross, err := store.Query(ctx, db.SQL(), rootViewer(), Filter{Scope: ScopeActivity, ActivityID: recA.ActivityID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -346,27 +346,27 @@ func TestQueryFilters(t *testing.T) {
 	}
 
 	// 時間窗：未來視窗查不到，含當前時刻的視窗查得到。
-	if page, err := store.Query(ctx, db.SQL(), Filter{Scope: ScopeRoot,
+	if page, err := store.Query(ctx, db.SQL(), rootViewer(), Filter{Scope: ScopeRoot,
 		Since: time.Now().Add(24 * time.Hour)}); err != nil || len(page.Records) != 0 {
 		t.Errorf("未來的時間窗應查不到：%d 筆 / %v", len(page.Records), err)
 	}
-	if page, err := store.Query(ctx, db.SQL(), Filter{Scope: ScopeRoot, Until: time.Now()}); err != nil || len(page.Records) != 1 {
+	if page, err := store.Query(ctx, db.SQL(), rootViewer(), Filter{Scope: ScopeRoot, Until: time.Now()}); err != nil || len(page.Records) != 1 {
 		t.Errorf("Root 查詢應取得 1 筆：%d 筆 / %v", len(page.Records), err)
 	}
 	// Root 表沒有 activity_id：帶進來一定是呼叫端搞錯作用域，不能靜默忽略。
-	if _, err := store.Query(ctx, db.SQL(), Filter{Scope: ScopeRoot, ActivityID: mustID(t3)}); err == nil {
+	if _, err := store.Query(ctx, db.SQL(), rootViewer(), Filter{Scope: ScopeRoot, ActivityID: mustID(t3)}); err == nil {
 		t.Error("root 作用域帶 activity_id 應被拒絕")
 	}
-	if _, err := store.Query(ctx, db.SQL(), Filter{Scope: ScopeActivity}); err == nil {
+	if _, err := store.Query(ctx, db.SQL(), rootViewer(), Filter{Scope: ScopeActivity}); err == nil {
 		t.Error("activity 作用域未帶 activity_id 應被拒絕（否則會撈出全部活動）")
 	}
-	if _, err := store.Query(ctx, db.SQL(), Filter{Scope: "session", ActivityID: mustID(t3)}); err == nil {
+	if _, err := store.Query(ctx, db.SQL(), rootViewer(), Filter{Scope: "session", ActivityID: mustID(t3)}); err == nil {
 		t.Error("未知作用域應被拒絕")
 	}
-	if _, err := store.Query(ctx, db.SQL(), Filter{Scope: ScopeActivity, ActivityID: mustID(t3), Limit: MaxLimit + 1}); !errors.Is(err, ErrLimitTooLarge) {
+	if _, err := store.Query(ctx, db.SQL(), rootViewer(), Filter{Scope: ScopeActivity, ActivityID: mustID(t3), Limit: MaxLimit + 1}); !errors.Is(err, ErrLimitTooLarge) {
 		t.Errorf("超過上限應回 ErrLimitTooLarge，實際 %v", err)
 	}
-	if _, err := store.Query(ctx, db.SQL(), Filter{Scope: ScopeActivity, ActivityID: mustID(t3), Cursor: "胡亂寫的"}); !errors.Is(err, ErrInvalidCursor) {
+	if _, err := store.Query(ctx, db.SQL(), rootViewer(), Filter{Scope: ScopeActivity, ActivityID: mustID(t3), Cursor: "胡亂寫的"}); !errors.Is(err, ErrInvalidCursor) {
 		t.Errorf("非法游標應回 ErrInvalidCursor（不退回第一頁），實際 %v", err)
 	}
 }
@@ -402,7 +402,7 @@ func TestAppendOnlyStorageSurvivesReopen(t *testing.T) {
 		t.Fatalf("重開失敗：%v", err)
 	}
 	defer reopened.Close()
-	page, err := NewStore(fixedClock{at: at}).Query(ctx, reopened.SQL(),
+	page, err := NewStore(fixedClock{at: at}).Query(ctx, reopened.SQL(), rootViewer(),
 		Filter{Scope: ScopeActivity, ActivityID: rec.ActivityID})
 	if err != nil {
 		t.Fatal(err)

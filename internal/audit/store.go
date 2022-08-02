@@ -14,12 +14,12 @@ import (
 	"github.com/kagurazakayashi/EvernightRealm/internal/timeutil"
 )
 
-// 分頁參數（DEC-013：一套合同同時覆蓋追加型資料流與深度分頁）。
+// 分頁引數（DEC-013：一套合同同時覆蓋追加型資料流與深度分頁）。
 const (
 	// DefaultLimit 是 Filter.Limit 為 0 時的每頁筆數。
 	DefaultLimit = 50
 	// MaxLimit 是單頁上限：審計是人工回看，不是一次拉十萬筆的匯出通道
-	//（匯出屬後續的導出與備份步驟）。
+	//（匯出屬後續的匯出與備份步驟）。
 	MaxLimit = 500
 )
 
@@ -54,7 +54,7 @@ func NewStore(clock timeutil.Clock) *Store {
 // Append 寫入一筆審計記錄，回傳落庫時實際使用的記錄標識。
 //
 // q 讓呼叫端把審計與業務變更放進同一個交易（DEC-013 的 Querier 介面由 *sql.DB 與 *Tx
-// 共同滿足）：DEV-1-10 要求「業務事務失敗時不會留下虛假成功審計」，這件事由同一交易的自然回滾保證，而不是靠「事後補一筆回滾記錄」這種有窗口的手法。
+// 共同滿足）：DEV-1-10 要求「業務事務失敗時不會留下虛假成功審計」，這件事由同一交易的自然回滾保證，而不是靠「事後補一筆回滾記錄」這種有視窗的手法。
 // 記錄非法、標識產生失敗時一律回傳錯誤且不降級（不換成 UUIDv4、不用空值頂替）。
 // 標識採回傳而不改寫呼叫端的記錄：Record 按值傳入，偷填引數會變成看不見的副作用。
 func (s *Store) Append(ctx context.Context, q database.Querier, rec Record) (idgen.ID, error) {
@@ -82,7 +82,7 @@ func (s *Store) Append(ctx context.Context, q database.Querier, rec Record) (idg
 	}
 
 	// 表名來自 Scope 那個封閉集合（不是字串拼接），因此這裡的 Sprintf 沒有注入面；
-	// 所有值一律走參數綁定。
+	// 所有值一律走引數繫結。
 	columns := auditColumns(rec.Scope)
 	args := []any{id.String(), timeutil.ToMillis(s.clock.Now())}
 	if rec.Scope == ScopeActivity {
@@ -128,9 +128,9 @@ type Page struct {
 
 // Filter 是審計查詢條件。
 //
-// ScopeActivity 一律要給 ActivityID：作用域隔離的技術基礎在這裡，
-// 「誰有權查哪個活動」屬授權判定（下一步的作用域隔離）。沒有這個條件時，
+// ScopeActivity 一律要給 ActivityID：作用域隔離的技術基礎在這裡。沒有這個條件時，
 // 一個忘了帶過濾的查詢就會靜默地撈出全部活動的記錄——那不是「查不到」而是「查錯」。
+// 這條條件與「誰有權查哪個活動」都由 Authorize 把關，本結構不重複寫一份。
 type Filter struct {
 	Scope      Scope
 	ActivityID idgen.ID
@@ -147,24 +147,24 @@ type Filter struct {
 	Cursor string
 }
 
-// Query 按鍵集（keyset）倒序分頁讀取審計記錄。
+// Query 按鍵集（keyset）倒序分頁讀取審計記錄，讀取範圍由 v 決定。
 //
-// 順序是 created_at DESC, id DESC：UUIDv7 的前綴按產生時刻遞增（DEC-014），
+// 身分是必要引數而不是可選的 Filter 欄位：後者留著一條「不帶身分也能查」的通路，
+// 就等於把授權做成約定。Authorize 在發出任何 SQL 之前判定，拒絕時不留下半成品結果，
+// 呼叫端也就無法把「查到了別人的活動」誤讀為成功。
+//
+// 順序是 created_at DESC, id DESC：UUIDv7 的字首按產生時刻遞增（DEC-014），
 // 同一毫秒內也能靠 id 穩定破平，因此OFFSET 那種「翻到深處會看到重複或漏筆」的問題不存在。
-func (s *Store) Query(ctx context.Context, q database.Querier, f Filter) (Page, error) {
+func (s *Store) Query(ctx context.Context, q database.Querier, v Viewer, f Filter) (Page, error) {
 	if q == nil {
 		return Page{}, errors.New("audit: 需要可用的資料庫連線或交易")
+	}
+	if err := Authorize(v, f.Scope, f.ActivityID); err != nil {
+		return Page{}, err
 	}
 	table, err := f.Scope.table()
 	if err != nil {
 		return Page{}, err
-	}
-	if f.Scope == ScopeActivity && f.ActivityID.IsNil() {
-		return Page{}, errors.New("audit: 查詢 activity 審計必須指定 activity_id")
-	}
-	if f.Scope == ScopeRoot && !f.ActivityID.IsNil() {
-		// 靜默忽略會被當成「已經過濾了」：Root 表裡本來就沒有 activity_id 這個欄位。
-		return Page{}, errors.New("audit: root 作用域的查詢不接受 activity_id")
 	}
 	limit := f.Limit
 	switch {
@@ -253,7 +253,7 @@ type rowScanner interface {
 // scanRecord 把一列讀回成記錄。
 //
 // 標識讀不回來時一律報錯：那代表資料庫被繞過寫入了東西（觸發器只管改刪），
-// 靜默跳過會讓那筆記錄在界面上徹底消失。
+// 靜默跳過會讓那筆記錄在介面上徹底消失。
 func scanRecord(scope Scope, rows rowScanner) (Record, error) {
 	var (
 		rec                 Record
