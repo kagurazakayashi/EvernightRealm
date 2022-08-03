@@ -244,6 +244,48 @@ type readyResponse struct {
 	RequestID string `json:"request_id"`
 }
 
+// UnreadyError 讓注入的就緒檢查能同時表達「不就緒」與「該回哪個機器碼」。
+//
+// 傳輸層不認識磁碟或資料庫（與 Deps.Ready、Deps.Web 同一條邊界：DEC-016、DEC-025），
+// 因此具體原因由注入方包裝帶進來，handler 只問「有沒有指定碼」。
+// 這樣做換來的是用戶端能區分「等一下就可能會好」與「得有人去清磁碟」——
+// 兩者在前端是兩句不同的話（機器碼映射 ARB，DEC-020），合併成 1007 就只剩一句。
+type UnreadyError struct {
+	// Code 為要回給用戶端的機器碼；0 表示沿用 CodeNotReady。
+	Code ErrorCode
+	// Err 是底層原因，只進伺服器端日誌，不會出現在回應裡。
+	Err error
+}
+
+// Error 回傳底層原因：讓這個包裝對人也是可讀的一行，不是一個空殼。
+func (e *UnreadyError) Error() string {
+	if e == nil || e.Err == nil {
+		return "service is not ready"
+	}
+	return e.Err.Error()
+}
+
+// Unwrap 讓 errors.Is/As 仍能穿透到底層原因，日誌與測試據此判定真正的失敗點。
+func (e *UnreadyError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
+// readyErrorCode 從就緒錯誤裡取出注入方指定的機器碼；未指定時沿用 CodeNotReady。
+//
+// unready != nil 這一道檢查不是防禦性贅字：errors.As 對「型別對但值為 nil」的指標
+// 一樣回報匹配成功，少了它就會在解引用 Code 時 panic，而 panic 的位置在寫日誌的路上，
+// 比原本那個未就緒原因更難查。
+func readyErrorCode(err error) ErrorCode {
+	var unready *UnreadyError
+	if errors.As(err, &unready) && unready != nil && unready.Code != 0 {
+		return unready.Code
+	}
+	return CodeNotReady
+}
+
 // handleReady 提供就緒檢查：外部依賴無法回應時回 503 與穩定錯誤碼，
 // 不對外報告業務可用（規格 §27.2 的時間與資料來源須確實可用）。
 //
@@ -254,8 +296,9 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), readyCheckTimeout)
 		defer cancel()
 		if err := s.ready(ctx); err != nil {
-			s.logger.Error("就緒檢查失敗", "request_id", requestIDFromRequest(r), "err", err)
-			writeError(w, r, CodeNotReady, http.StatusServiceUnavailable)
+			code := readyErrorCode(err)
+			s.logger.Error("就緒檢查失敗", "request_id", requestIDFromRequest(r), "err", err, "code", code)
+			writeError(w, r, code, http.StatusServiceUnavailable)
 			return
 		}
 	}

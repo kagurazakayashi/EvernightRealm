@@ -5,8 +5,8 @@
 //   - 回呼式：InTx 取得交易、執行回呼、依回呼結果提交或整體回滾。
 //     回呼回傳錯誤或 panic 一律整體回滾，呼叫方無需（也無法）自行提交，
 //     避免忘記回滾而長期持有寫入鎖（規格 NFR-010、TRX-004）。
-//   - 显式注入：仓储方法一律接受 Querier，*sql.DB 與 *Tx 皆滿足，
-//     因此同一組仓储方法既可用於 autocommit，也可在同一交易內組合多個仓储。
+//   - 顯式注入：倉儲方法一律接受 Querier，*sql.DB 與 *Tx 皆滿足，
+//     因此同一組倉儲方法既可用於 autocommit，也可在同一交易內組合多個倉儲。
 //   - 寫入交易以 BEGIN IMMEDIATE 開始（可配置）：失敗點固定於交易開始前，
 //     不會在回呼執行到一半才發現拿不到寫入鎖（實證見 tools/verify/step041-tx）。
 //   - 只讀交易走物理唯讀連線池（mode=ro），不會佔用寫入鎖，也不依賴易洩漏的 PRAGMA。
@@ -19,7 +19,7 @@
 //     | deferred（首次寫入才取鎖，較容易在回呼中途失敗，不建議）。
 //   - nested：reject（預設）| savepoint（真嵌套，內層可獨立回滾）| reuse（加入外層）。
 //   - busy_retry_max / busy_retry_backoff_ms：忙鎖重試次數與線性退避（預設 0 / 50ms；
-//     重試會重跑整個回呼，僅在交易幂等時開啟）。
+//     重試會重跑整個回呼，僅在交易冪等時開啟）。
 //   - timeout_ms：單一交易執行期限（預設 10000ms；逾時整體回滾並回報 ErrTxTimeout）。
 //   - schema_guard：startup（預設，僅啟動時把關）| transaction（另於交易邊界複驗）。
 //
@@ -40,10 +40,10 @@ import (
 	"time"
 )
 
-// Querier 為仓储可用的最小資料庫介面。
+// Querier 為倉儲可用的最小資料庫介面。
 //
 // *sql.DB（autocommit）與 *Tx（交易內）皆滿足此介面，
-// 使同一組仓储方法能同時服務兩種情境，並讓「同一交易內多個仓储」成為型別保證。
+// 使同一組倉儲方法能同時服務兩種情境，並讓「同一交易內多個倉儲」成為型別保證。
 type Querier interface {
 	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
 	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
@@ -191,7 +191,7 @@ func IsBusyError(err error) bool {
 		strings.Contains(message, "sqlite_locked")
 }
 
-// Tx 為一個進行中的交易，實作 Querier，供仓储在交易內執行語句。
+// Tx 為一個進行中的交易，實作 Querier，供倉儲在交易內執行語句。
 //
 // 提交與回滾由 InTx 統一負責（回呼式），因此 Tx 不提供 Commit/Rollback，
 // 呼叫方無法讓交易處於「既不提交也不回滾」的狀態。
@@ -324,12 +324,12 @@ func withTx(ctx context.Context, tx *Tx) context.Context {
 // InTx 在一個寫入交易內執行 fn：fn 回傳錯誤或 panic 時整體回滾。
 //
 // 行為由 TxPolicy 決定：BEGIN 模式、嵌套策略、忙鎖重試與交易逾時。
-// 忙鎖重試會重新執行整個 fn，因此僅適用於幂等交易（policy.BusyRetryMax 預設 0）。
+// 忙鎖重試會重新執行整個 fn，因此僅適用於冪等交易（policy.BusyRetryMax 預設 0）。
 func (db *DB) InTx(ctx context.Context, fn TxFunc) error {
 	return db.inTx(ctx, false, fn)
 }
 
-// InTxReadOnly 在一個唯讀交易內執行 fn：用於需要一致快照的多個仓储讀取。
+// InTxReadOnly 在一個唯讀交易內執行 fn：用於需要一致快照的多個倉儲讀取。
 //
 // 走物理唯讀連線池（mode=ro），不佔用寫入鎖；交易以 deferred 開始，
 // 因此期間其他連線的提交不會改變本交易看到的快照（實證見 tools/verify/step041-tx）。
@@ -374,6 +374,15 @@ func (db *DB) inTx(ctx context.Context, readOnly bool, fn TxFunc) error {
 	}
 	if pool == nil {
 		return errors.New("database: 唯讀連線池未建立")
+	}
+
+	// 寫入前門：可用空間不足時不開始交易（規格 AT-020「不得在空間不足時留下已確認
+	// 但未持久化的交易」）。唯讀交易不經此門——它不落盤，攔它只會讓人連現況都看不到。
+	// 位置在 BEGIN 之前而不是之中：交易已開始才拒絕，會白拿一次寫入鎖再回滾。
+	if !readOnly && db.writeGuard != nil {
+		if err := db.writeGuard(); err != nil {
+			return err
+		}
 	}
 
 	attempts := db.policy.BusyRetryMax + 1

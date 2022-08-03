@@ -28,6 +28,12 @@ const (
 	CodeRequestTimeout ErrorCode = 1006
 	// CodeNotReady 表示服務尚未就緒（依賴的資料庫無法回應），業務操作暫不可執行。
 	CodeNotReady ErrorCode = 1007
+	// CodeNoSpace 表示資料目錄所在卷的可用空間已低於設定下限：新的寫入被暫停。
+	//
+	// 與 CodeNotReady 分開是因為用戶端的處置不同：一個是「等一會兒再試」，
+	// 另一個要有人去清磁碟或改下限，重試不會讓它自己變好（規格 AT-020）。
+	// 下限未設時這個碼永遠不會出現。
+	CodeNoSpace ErrorCode = 1008
 )
 
 // ErrorEnvelope 是所有錯誤回應的統一信封，也是錯誤回應格式的唯一權威定義。

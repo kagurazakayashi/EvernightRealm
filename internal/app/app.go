@@ -18,6 +18,7 @@ import (
 	"github.com/kagurazakayashi/EvernightRealm/internal/config"
 	"github.com/kagurazakayashi/EvernightRealm/internal/database"
 	"github.com/kagurazakayashi/EvernightRealm/internal/database/migrate"
+	"github.com/kagurazakayashi/EvernightRealm/internal/disk"
 	"github.com/kagurazakayashi/EvernightRealm/internal/httpapi"
 	"github.com/kagurazakayashi/EvernightRealm/internal/runlog"
 	"github.com/kagurazakayashi/EvernightRealm/internal/timeutil"
@@ -53,7 +54,7 @@ func Migrate(ctx context.Context, args []string, out io.Writer) error {
 	dryRun, verify, rest := parseMigrateArgs(args)
 	// migrate 是一次性命令：報告走 out、結束碼表達成敗，人類可讀日誌因此丟棄，
 	// 免得終端同時出現兩種格式的同一句話。日誌檔案仍照常記錄（含失敗原因）。
-	cfg, lg, db, err := prepare(ctx, rest, io.Discard)
+	cfg, lg, db, space, err := prepare(ctx, rest, io.Discard)
 	if err != nil {
 		if lg != nil {
 			_ = lg.Close()
@@ -82,6 +83,13 @@ func Migrate(ctx context.Context, args []string, out io.Writer) error {
 		fmt.Fprintln(out, "資料庫自檢：integrity_check=ok，foreign_key_check=無違規")
 		dryRun = true
 	}
+	// 只有會真的改結構時才問磁碟：--dry-run 與 --verify 不落盤，
+	// 讓它們在空間不足時仍能報告版本，才是排錯時想要的那個行為。
+	if !dryRun {
+		if err := checkSpaceBeforeWrite(space, lg.Logger); err != nil {
+			return err
+		}
+	}
 	res, err := migrate.Apply(ctx, db.SQL(), migrate.Options{DryRun: dryRun, Clock: timeutil.System()})
 	if err != nil {
 		lg.Error("資料庫遷移失敗", "err", err, "dry_run", dryRun)
@@ -105,6 +113,99 @@ func Migrate(ctx context.Context, args []string, out io.Writer) error {
 	fmt.Fprintln(out, migrationSummary(res))
 	for _, m := range res.Applied {
 		fmt.Fprintf(out, "  - %s\n", m)
+	}
+	return nil
+}
+
+// diskMonitor 依組態建立磁碟空間監測器，判定依據是資料目錄所在的卷。
+//
+// 兩個下限全為 0 時，Monitor.Verify 一律回 StatusOK 且**不發任何系統呼叫**，
+// 因此「沒啟用」的代價是一條比較分支，不是每筆寫入多一次磁碟查詢。
+func diskMonitor(cfg config.Config) *disk.Monitor {
+	return disk.New(cfg.Server.DataDir, disk.Thresholds{
+		MinFreeBytes:   uint64(maxInt64(cfg.Disk.MinFreeBytes, 0)),
+		MinFreePercent: cfg.Disk.MinFreePercent,
+	}, time.Duration(cfg.Disk.CheckIntervalMS)*time.Millisecond, timeutil.System())
+}
+
+// maxInt64 把負數夾成 0：config.Validate 已拒絕負值下限，這裡只是讓 uint64 轉換
+// 不會在繞過校驗的測試路徑上把 -1 變成 18446744073709551615（那會讓服務永久拒寫）。
+func maxInt64(v int64, floor int64) int64 {
+	if v < floor {
+		return floor
+	}
+	return v
+}
+
+// readinessCheck 把「依賴可用否」的判據組合起來交給傳輸層。
+//
+// 順序是資料庫先、磁碟後：資料庫問了就有答案，磁碟判定自帶快取；而 Ping 失敗時
+// 已足以判定不就緒，不必再多問一次。
+//
+// 兩種失敗回不同的碼：空間不足要用 1008（重試不會讓它自己變好，得有人去清盤），
+// 其餘情況沿用 1007。「查不出來」（StatusUnknown）刻意回 1007 而不是放行——
+// /ready 回答的是「我能不能確認一切正常」，確認不了就說確認不了，這比假裝正常誠實；
+// 但它不影響寫入（寫入門只認 StatusLow），所以不會因為一次探測失敗就把服務弄停。
+func readinessCheck(db *database.DB, space *disk.Monitor) func(context.Context) error {
+	return func(ctx context.Context) error {
+		if err := db.Ping(ctx); err != nil {
+			return err
+		}
+		verdict, err := space.Verify()
+		if err != nil {
+			return err
+		}
+		switch verdict.Status {
+		case disk.StatusLow:
+			return &httpapi.UnreadyError{Code: httpapi.CodeNoSpace,
+				Err: fmt.Errorf("%w：%s", disk.ErrNoSpace, verdict.Reason)}
+		case disk.StatusUnknown:
+			return fmt.Errorf("就緒檢查無法判定磁碟狀態：%s", verdict.Reason)
+		default:
+			return nil
+		}
+	}
+}
+
+// diskNote 產生啟動摘要裡關於磁碟寫保護的一行。
+//
+// 未啟用時必須說得出來：下限預設為 0，如果摘要不寫，部署者會以為內建就有保護。
+// 這與日誌保留天數的處理同一取向（DEC-028）。
+func diskNote(cfg config.Config) string {
+	effective := make([]string, 0, 2)
+	if cfg.Disk.MinFreeBytes > 0 {
+		effective = append(effective, "剩餘低於 "+disk.HumanBytes(uint64(cfg.Disk.MinFreeBytes)))
+	}
+	if cfg.Disk.MinFreePercent > 0 {
+		effective = append(effective, fmt.Sprintf("剩餘比例低於 %g%%", cfg.Disk.MinFreePercent))
+	}
+	if len(effective) == 0 {
+		return "磁碟寫保護：未啟用（disk.min_free_bytes 與 min_free_percent 皆為 0）"
+	}
+	// 只列實際生效的那幾條：把 0 也印出來會被讀成「設了一個 0% 的下限」，
+	// 而 0 在這裡的意思是「這條沒開」。
+	return fmt.Sprintf("磁碟寫保護：資料目錄 %s，%s（任一命中即暫停新的寫入）",
+		cfg.Server.DataDir, strings.Join(effective, " 或 "))
+}
+
+// checkSpaceBeforeWrite 在啟動期寫入（遷移）之前問一次磁碟。
+//
+// 空間不足時回錯誤讓啟動中止：遷移會改結構並寫 WAL，是典型的「不完整就更糟」的寫入，
+// 而在還沒開放監聽器之前停下，用戶端就不會拿到一個「已確認但未持久化」的結果。
+func checkSpaceBeforeWrite(space *disk.Monitor, lg *slog.Logger) error {
+	verdict, err := space.Verify()
+	if err != nil {
+		return err
+	}
+	// 只在真的做過探測時留痕：未啟用時那份 StatusOK 不含任何事實，
+	// 記成「status=ok free=0 total=0」會讓人以為讀到過一個零容量的卷。
+	if space.Enabled() {
+		lg.Info("磁碟空間檢查", "status", verdict.Status.String(), "path", verdict.Usage.Path,
+			"free", verdict.Usage.Free, "total", verdict.Usage.Total)
+	}
+	if verdict.Status == disk.StatusLow {
+		lg.Error("磁碟空間不足，拒絕開始遷移", "reason", verdict.Reason)
+		return fmt.Errorf("%w：%s", disk.ErrNoSpace, verdict.Reason)
 	}
 	return nil
 }
@@ -175,16 +276,17 @@ func endpointsNote(status webassets.Status) string {
 // 資料庫開啟即取得單寫入實例鎖；呼叫端負責在結束時關閉連線（釋放鎖）與關閉日誌（釋放檔案）。
 // 已知 schema 版本由內嵌遷移推導，用於開庫前預檢的版本比較。
 // 回傳的 Logger 在非 nil 時一律由呼叫端負責 Close，即使資料庫開啟失敗也一樣。
-func prepare(ctx context.Context, args []string, logStderr io.Writer) (config.Config, *runlog.Logger, *database.DB, error) {
+func prepare(ctx context.Context, args []string, logStderr io.Writer) (config.Config, *runlog.Logger, *database.DB, *disk.Monitor, error) {
 	cfg, lg, err := openConfig(args, logStderr)
 	if err != nil {
-		return config.Config{}, nil, nil, err
+		return config.Config{}, nil, nil, nil, err
 	}
-	db, err := openDatabase(ctx, cfg, lg)
+	space := diskMonitor(cfg)
+	db, err := openDatabase(ctx, cfg, lg, space)
 	if err != nil {
-		return config.Config{}, lg, nil, err
+		return config.Config{}, lg, nil, space, err
 	}
-	return cfg, lg, db, nil
+	return cfg, lg, db, space, nil
 }
 
 // openConfig 解析命令列與組態、準備資料目錄並開啟日誌；失敗時日誌可能尚未開啟，
@@ -223,7 +325,7 @@ func openConfig(args []string, logStderr io.Writer) (config.Config, *runlog.Logg
 // openDatabase 依已解析的組態開啟資料庫連線（含單寫入實例鎖與開庫前預檢）。
 //
 // 失敗一律記一筆後原樣回傳錯誤：錯誤訊息本身已由 config/database 保證不含機密。
-func openDatabase(ctx context.Context, cfg config.Config, lg *runlog.Logger) (*database.DB, error) {
+func openDatabase(ctx context.Context, cfg config.Config, lg *runlog.Logger, space *disk.Monitor) (*database.DB, error) {
 	knownVersion, err := migrate.MaxVersion()
 	if err != nil {
 		return nil, err
@@ -238,12 +340,15 @@ func openDatabase(ctx context.Context, cfg config.Config, lg *runlog.Logger) (*d
 	}
 
 	// 資料庫先於監聽器開啟：單寫入實例鎖、預檢或 WAL 無法生效時直接失敗，不佔用連接埠。
+	// 寫入門由監測器給出：空間不足時寫入交易根本不開始（規格 AT-020），
+	// 儲存層因此不需要認識磁碟（與傳輸層不認識日誌管線同條邊界）。
 	db, err := database.Open(ctx, database.Options{
 		Path:               cfg.Database.Path,
 		BusyTimeout:        time.Duration(cfg.Database.BusyTimeoutMS) * time.Millisecond,
 		KnownSchemaVersion: knownVersion,
 		Preflight:          preflight,
 		TxPolicy:           policy,
+		WriteGuard:         space.Guard(),
 	})
 	if err != nil {
 		lg.Error("資料庫開啟失敗", "path", cfg.Database.Path, "err", err)
@@ -287,7 +392,7 @@ func txPolicy(cfg config.Config) (database.TxPolicy, error) {
 // out 為啟動/停止摘要的去處，logStderr 為人類可讀日誌的去處（正式路徑兩者皆標準輸出串，
 // 但分別是 stdout 與 stderr；測試把後者給 io.Discard 以保持輸出乾淨）。
 func run(ctx context.Context, releaseSignals func(), args []string, out io.Writer, logStderr io.Writer) error {
-	cfg, lg, db, err := prepare(ctx, args, logStderr)
+	cfg, lg, db, space, err := prepare(ctx, args, logStderr)
 	if err != nil {
 		if lg != nil {
 			_ = lg.Close()
@@ -309,6 +414,9 @@ func run(ctx context.Context, releaseSignals func(), args []string, out io.Write
 
 	// 遷移先於監聽器：遷移失敗即中止啟動，不提供服務，
 	// 也不留下半套用的結構（失敗的遷移已整體回滾）。
+	if err := checkSpaceBeforeWrite(space, lg.Logger); err != nil {
+		return err
+	}
 	if cfg.Database.IntegrityCheck {
 		if err := db.CheckIntegrity(ctx); err != nil {
 			lg.Error("資料庫完整性自檢失敗", "path", cfg.Database.Path, "err", err)
@@ -334,7 +442,7 @@ func run(ctx context.Context, releaseSignals func(), args []string, out io.Write
 	// （判定由 internal/webassets 完成，傳輸層只收到一份檔案系統或 nil）。
 	webFS, webStatus := webassets.Dist()
 	srv := httpapi.New(&cfg, Version, httpapi.Deps{
-		Ready:    db.Ping,
+		Ready:    readinessCheck(db, space),
 		Clock:    timeutil.System(),
 		Web:      webFS,
 		Log:      lg.Logger,
@@ -350,6 +458,7 @@ func run(ctx context.Context, releaseSignals func(), args []string, out io.Write
 	fmt.Fprintln(out, cfg.Redacted())
 	fmt.Fprintf(out, "運行日誌：%s（層級=%s，按 %s 的自然日分檔，保留=%s；人類可讀一份同時寫入標準錯誤輸出）\n",
 		lg.Path(), cfg.Logs.Level, cfg.Server.DisplayTimezone, retentionNote(cfg.Logs.RetentionDays))
+	fmt.Fprintln(out, diskNote(cfg))
 	if note := db.PreflightNote(); note != "" {
 		fmt.Fprintf(out, "資料庫預檢提示：%s\n", note)
 	}

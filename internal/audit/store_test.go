@@ -163,7 +163,7 @@ func TestAppendInRolledBackTransactionLeavesNothing(t *testing.T) {
 }
 
 // TestAppendOnlyTablesRejectUpdateAndDelete 固定 AUD-003／§25.3 的資料庫層把關：
-// 不是隻有我們的程式碼不改不刪，而是透過 SQL 改刪會被觸發器擋下。
+// 不是只有我們的程式碼不改不刪，而是透過 SQL 改刪會被觸發器擋下。
 func TestAppendOnlyTablesRejectUpdateAndDelete(t *testing.T) {
 	store, db, _ := newTestStore(t)
 	ctx := context.Background()

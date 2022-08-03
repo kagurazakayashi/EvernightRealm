@@ -47,6 +47,12 @@ type Options struct {
 	// TxPolicy 為交易邊界的預設行為（STEP-041）；
 	// 零值為 BeginImmediate + NestedReject + 不重試 + 無期限 + 不在交易邊界複驗 schema。
 	TxPolicy TxPolicy
+	// WriteGuard 在每個寫入交易 BEGIN 之前呼叫，回傳錯誤即不開始交易。
+	//
+	// nil（預設）表示沒有門。這裡的 nil 與「安全判定可選」不同類：磁碟保護的開關由
+	// 組態的兩個下限決定（全為 0 即不啟用），呼叫方在沒啟用時注入 nil 是如實反映設定，
+	// 不是留了一條繞過檢查的路。
+	WriteGuard func() error
 }
 
 // DB 為服務端的資料庫存取入口，持有連線池與單寫入實例鎖。
@@ -62,6 +68,11 @@ type DB struct {
 	// knownVersion 為執行檔已知的 schema 版本（0 表示不做版本比較），
 	// 供交易邊界的 schema 把關使用（schema_guard=transaction）。
 	knownVersion int
+	// writeGuard 是寫入交易開始前的前置檢查（nil 表示沒有門）。
+	//
+	// 由呼叫方（internal/app）注入，本套件因此不需要 import 任何監測實作：
+	// 儲存層不認識磁碟，正如傳輸層不認識日誌管線（DEC-016、DEC-025 同一條邊界）。
+	writeGuard func() error
 }
 
 // Open 取得單寫入實例鎖、執行開庫前預檢、建立連線池，並驗證 PRAGMA 實際生效。
@@ -108,6 +119,7 @@ func Open(ctx context.Context, opts Options) (*DB, error) {
 		header:       header,
 		preflight:    note,
 		policy:       opts.TxPolicy,
+		writeGuard:   opts.WriteGuard,
 		knownVersion: opts.KnownSchemaVersion,
 	}
 	journal, err := db.verify(ctx, busyTimeout)
@@ -250,7 +262,7 @@ func dsnReadOnly(path string, busyTimeout time.Duration) string {
 		"&_txlock=deferred"
 }
 
-// SQL 回傳底層連線池，供遷移、仓储與就緒檢查使用。
+// SQL 回傳底層連線池，供遷移、倉儲與就緒檢查使用。
 func (d *DB) SQL() *sql.DB {
 	if d == nil {
 		return nil

@@ -39,6 +39,7 @@ type Config struct {
 	Attachments string         `yaml:"attachments"`
 	Backups     string         `yaml:"backups"`
 	Logs        LogsConfig     `yaml:"logs"`
+	Disk        DiskConfig     `yaml:"disk"`
 	Security    SecurityConfig `yaml:"security"`
 }
 
@@ -96,7 +97,7 @@ type TransactionConfig struct {
 	// reuse 加入外層交易（內層失敗需由外層決定是否整體回滾）。
 	Nested string `yaml:"nested"`
 	// BusyRetryMax 為遇到忙鎖（SQLITE_BUSY/LOCKED）時自動重試整個交易的次數；
-	// 0（預設）不重試。重試會重跑回呼，故僅適用於幂等交易。
+	// 0（預設）不重試。重試會重跑回呼，故僅適用於冪等交易。
 	BusyRetryMax int `yaml:"busy_retry_max"`
 	// BusyRetryBackoffMS 為重試的線性退避基數（毫秒）；0 表示立即重試。
 	BusyRetryBackoffMS int `yaml:"busy_retry_backoff_ms"`
@@ -121,6 +122,29 @@ type LogsConfig struct {
 	RetentionDays int `yaml:"retention_days"`
 }
 
+// DiskConfig 為磁碟空間監測與寫保護組態（規格 OPS-009、AT-020）。
+//
+// 兩個下限是「取較嚴者」：任一命中即判定空間不足。預設全為 0＝不設限，
+// 與日誌保留天數同取向（DEC-028）——「設了正值才有上限」必須寫進啟動摘要與維運手冊，
+// 不在程式碼裡偷偷給一個看起來比較安全的預設值。
+//
+// 不在這裡給預設值的理由與日誌相同：自動攔截寫入在活動進行中可能是把「還在進行的事」
+// 停掉，那個後果比讓 SQLite 自己因為空間耗盡而失敗更難預料，因此由部署者明確開啟。
+type DiskConfig struct {
+	// MinFreeBytes 是剩餘空間的絕對下限（位元組）；0 表示不按絕對值設限。
+	MinFreeBytes int64 `yaml:"min_free_bytes"`
+	// MinFreePercent 是剩餘空間佔卷總容量的下限百分比（如 5 代表 5%）；0 表示不按比例設限。
+	//
+	// 大卷上 5% 可能是 50 GiB，會過早拒寫；小卷上 512 MiB 卻已經太晚——所以兩條都給，
+	// 取較嚴的那條。
+	MinFreePercent float64 `yaml:"min_free_percent"`
+	// CheckIntervalMS 是可用空間讀值的快取期限（毫秒）；0 表示每個寫入前都實測。
+	//
+	// 這是效能與新鮮度的折衷，不是安全開關：預設 10 秒只影響「剛清完空間後多久恢復放行」，
+	// 下限本身仍是上面兩個值決定。
+	CheckIntervalMS int `yaml:"check_interval_ms"`
+}
+
 // SecurityConfig 為安全相關組態。
 type SecurityConfig struct {
 	SessionTTLHours int `yaml:"session_ttl_hours"`
@@ -141,7 +165,7 @@ type SecurityConfig struct {
 // 的實作——正式組態裡沒有這一段，就沒有跨域出口。
 //
 // 校驗刻意嚴格：來源只收 `*` 或 `scheme://host[:port]` 的精確寫法（不接受路徑、
-// 不接受萬用子網域），標頭與方法名稱必须是 HTTP token。原因有兩個：回應值會
+// 不接受萬用子網域），標頭與方法名稱必須是 HTTP token。原因有兩個：回應值會
 // 直接反射到標頭裡，任何可注入字元（CR/LF）都會變成回應分割；而 `*.example`
 // 這類半萬用寫法的實際放行範圍常被部署者誤解。
 type CORSConfig struct {
@@ -211,6 +235,13 @@ func Default() Config {
 			Level:         "info",
 			FilePrefix:    "evernight-run",
 			RetentionDays: 0,
+		},
+		// 磁碟寫保護預設關閉：兩個下限都明確寫 0（是決定，不是遺漏），
+		// 只有 check_interval_ms 給一個純效能預設值。
+		Disk: DiskConfig{
+			MinFreeBytes:    0,
+			MinFreePercent:  0,
+			CheckIntervalMS: 10000,
 		},
 		Security: SecurityConfig{
 			SessionTTLHours: 24,
@@ -427,6 +458,21 @@ func (c *Config) Validate() error {
 			maxLogRetentionDays, c.Logs.RetentionDays)
 	}
 
+	// 磁碟寫保護的兩個下限：要嘛 0（不設限），要嘛在可用範圍內。
+	// 負數拒絕而不是歸零：負的下限永遠不會命中，靜默接受會讓一個打錯的數字變成
+	// 「保護看起來開著、其實沒有效」，那比啟動失敗難查得多。
+	if c.Disk.MinFreeBytes < 0 {
+		return fmt.Errorf("config: disk.min_free_bytes 需為 0（不設限）或正整數，實際為 %d", c.Disk.MinFreeBytes)
+	}
+	if c.Disk.MinFreePercent < 0 || c.Disk.MinFreePercent > maxDiskFreePercent {
+		return fmt.Errorf("config: disk.min_free_percent 需為 0（不設限）或 0..%g，實際為 %v",
+			maxDiskFreePercent, c.Disk.MinFreePercent)
+	}
+	if c.Disk.CheckIntervalMS < 0 || c.Disk.CheckIntervalMS > maxDiskCheckIntervalMS {
+		return fmt.Errorf("config: disk.check_interval_ms 需介於 0..%d，實際為 %d",
+			maxDiskCheckIntervalMS, c.Disk.CheckIntervalMS)
+	}
+
 	if c.Security.SessionTTLHours < 1 {
 		return errors.New("config: security.session_ttl_hours 必須為正整數")
 	}
@@ -506,7 +552,7 @@ func (c *CORSConfig) Validate() error {
 	return c.normalizeLists()
 }
 
-// normalizeLists 正規化方法與標頭清單並逐項校驗形状。
+// normalizeLists 正規化方法與標頭清單並逐項校驗形狀。
 func (c *CORSConfig) normalizeLists() error {
 	methods := make([]string, 0, len(c.AllowedMethods))
 	for _, raw := range c.AllowedMethods {
@@ -596,7 +642,7 @@ func isHTTPToken(value string) bool {
 // isHTTPSeparator 為 RFC 7230 的 separator 集合（含水平定位字元與空格）。
 //
 // 逐字元列出而非塞進字串常數：這個集合本身含反斜線與雙引號，
-// 写成字串常數會需要一層容易看錯的跳脫。
+// 寫成字串常數會需要一層容易看錯的跳脫。
 func isHTTPSeparator(c byte) bool {
 	switch c {
 	case '(', ')', '<', '>', '@', ',', ';', ':', '\\', '"', '/', '[', ']', '?', '=', '{', '}', 0x09, ' ':
@@ -613,6 +659,12 @@ const (
 	// maxLogFilePrefixLen 為日誌檔名前綴長度上限：檔案名還要裝下日期與副檔名，
 	// 過長的前綴在舊版檔案系統上會直接讓建立失敗。
 	maxLogFilePrefixLen = 64
+	// maxDiskFreePercent 是剩餘空間百分比下限的上界。100 是刻意允許的：要求整個卷都空著
+	// 等於永久拒寫，那是部署者自己拉的閘，不是打錯數字的形態——會打錯的是 5000 這種。
+	maxDiskFreePercent = 100.0
+	// maxDiskCheckIntervalMS 是可用空間讀值快取期限的上限（一小時）。超過它，
+	// 「清完空間後恢復放行」會慢到像卡死，那時攔截造成的問題比它要防的那個更大。
+	maxDiskCheckIntervalMS = 3_600_000
 )
 
 // illegalFileNameChars 為檔案名禁忌字元：路徑分隔符、Windows 保留字元與 DEL。
@@ -687,7 +739,7 @@ func (c Config) DisplayLocation() *time.Location {
 
 // Redacted 回傳組態的脫敏摘要（供啟動日誌），機密欄位一律顯示 [REDACTED]。
 func (c Config) Redacted() string {
-	return fmt.Sprintf("組態摘要：listen=%s data_dir=%s timezone=%s db=%s busy_timeout_ms=%d media=%s documents=%s attachments=%s backups=%s logs_dir=%s logs_level=%s logs_prefix=%s logs_retention_days=%d session_ttl_hours=%d root_password_hash=%s http_timeouts_ms=[read_header=%d read=%d write=%d idle=%d request=%d shutdown=%d] max_body_bytes=%d security_headers=[frame_options=%s csp=%s referrer_policy=%s permissions_policy=%s] cors=[%s] tx=[begin_mode=%s nested=%s busy_retry_max=%d busy_retry_backoff_ms=%d timeout_ms=%d schema_guard=%s]",
+	return fmt.Sprintf("組態摘要：listen=%s data_dir=%s timezone=%s db=%s busy_timeout_ms=%d media=%s documents=%s attachments=%s backups=%s logs_dir=%s logs_level=%s logs_prefix=%s logs_retention_days=%d session_ttl_hours=%d root_password_hash=%s http_timeouts_ms=[read_header=%d read=%d write=%d idle=%d request=%d shutdown=%d] max_body_bytes=%d security_headers=[frame_options=%s csp=%s referrer_policy=%s permissions_policy=%s] cors=[%s] disk=[%s] tx=[begin_mode=%s nested=%s busy_retry_max=%d busy_retry_backoff_ms=%d timeout_ms=%d schema_guard=%s]",
 		c.Server.Listen, c.Server.DataDir, c.Server.DisplayTimezone,
 		c.Database.Path, c.Database.BusyTimeoutMS,
 		c.Media, c.Documents, c.Attachments, c.Backups,
@@ -700,6 +752,7 @@ func (c Config) Redacted() string {
 		presence(c.Security.Headers.ReferrerPolicy),
 		presence(c.Security.Headers.PermissionsPolicy),
 		c.Security.CORS.summary(),
+		c.Disk.summary(),
 		c.Database.Transaction.BeginMode, c.Database.Transaction.Nested,
 		c.Database.Transaction.BusyRetryMax, c.Database.Transaction.BusyRetryBackoffMS,
 		c.Database.Transaction.TimeoutMS, c.Database.SchemaGuard)
@@ -740,6 +793,18 @@ func (c CORSConfig) summary() string {
 	}
 	return fmt.Sprintf("origins=%s credentials=%t max_age=%d",
 		strings.Join(c.AllowedOrigins, "|"), c.AllowCredentials, c.MaxAgeSeconds)
+}
+
+// summary 回傳磁碟寫保護在啟動摘要裡的樣子。
+//
+// 未設下限時要說得明顯：這是 DEC-028 定下的取向——「設了正值才有上限」這件事必須讓部署者
+// 在啟動輸出裡看得見，而不是藏在一份可能永遠不會被讀的組態檔註解裡。
+func (d DiskConfig) summary() string {
+	if d.MinFreeBytes == 0 && d.MinFreePercent <= 0 {
+		return "未啟用（未設下限，不做寫保護）"
+	}
+	return fmt.Sprintf("min_free_bytes=%d min_free_percent=%g cache_ttl_ms=%d",
+		d.MinFreeBytes, d.MinFreePercent, d.CheckIntervalMS)
 }
 
 // presence 將安全回應頭的覆寫值表示為「自訂」或「(預設)」，避免摘要輸出整段策略。
@@ -822,6 +887,7 @@ func applyEnv(cfg *Config) error {
 		{&cfg.Database.Transaction.TimeoutMS, "ER_DATABASE_TRANSACTION_TIMEOUT_MS"},
 		{&cfg.Security.SessionTTLHours, "ER_SECURITY_SESSION_TTL_HOURS"},
 		{&cfg.Logs.RetentionDays, "ER_LOGS_RETENTION_DAYS"},
+		{&cfg.Disk.CheckIntervalMS, "ER_DISK_CHECK_INTERVAL_MS"},
 		{&cfg.Server.ReadHeaderTimeoutMS, "ER_SERVER_READ_HEADER_TIMEOUT_MS"},
 		{&cfg.Server.ReadTimeoutMS, "ER_SERVER_READ_TIMEOUT_MS"},
 		{&cfg.Server.WriteTimeoutMS, "ER_SERVER_WRITE_TIMEOUT_MS"},
@@ -846,6 +912,22 @@ func applyEnv(cfg *Config) error {
 			return fmt.Errorf("config: 環境變數 ER_SERVER_MAX_BODY_BYTES 需為整數，實際為 %q", v)
 		}
 		cfg.Server.MaxBodyBytes = n
+	}
+	// 磁碟下限同理：min_free_bytes 動輒數十 GiB，放 int 會在 32 位元平台溢位；
+	// min_free_percent 允許小數（5.5 這種寫法在 TB 級卷上才有意義），兩者都進不了上面那份 int 清單。
+	if v := os.Getenv("ER_DISK_MIN_FREE_BYTES"); v != "" {
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			return fmt.Errorf("config: 環境變數 ER_DISK_MIN_FREE_BYTES 需為整數，實際為 %q", v)
+		}
+		cfg.Disk.MinFreeBytes = n
+	}
+	if v := os.Getenv("ER_DISK_MIN_FREE_PERCENT"); v != "" {
+		n, err := strconv.ParseFloat(v, 64)
+		if err != nil {
+			return fmt.Errorf("config: 環境變數 ER_DISK_MIN_FREE_PERCENT 需為數字，實際為 %q", v)
+		}
+		cfg.Disk.MinFreePercent = n
 	}
 	return nil
 }
@@ -882,6 +964,12 @@ logs:
   file_prefix: "evernight-run"      # 當日檔案名為 <前綴>.<YYYY-MM-DD>.log（依顯示時區的自然日分檔）
   retention_days: 0                 # 保留天數（含當日）；0 = 不限制、永不自動刪除
                                     # 要「日誌不會無限增大」必須在這裡設一個正值；淘汰只認得本服務的日誌檔名
+
+disk:
+  min_free_bytes: 0                 # 剩餘空間的絕對下限（位元組）；0 = 不按絕對值設限
+  min_free_percent: 0               # 剩餘空間占卷總容量的下限百分比（如 5 = 5%）；0 = 不按比例設限
+                                    # 兩條任一命中即判定空間不足（取較嚴者）；全為 0 時不做寫保護
+  check_interval_ms: 10000          # 可用空間讀值的快取期限；0 = 每個寫入前都實測
 
 security:
   session_ttl_hours: 24

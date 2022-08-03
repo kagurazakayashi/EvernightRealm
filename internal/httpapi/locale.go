@@ -72,6 +72,12 @@ var errorMessages = map[ErrorCode]map[string]string{
 		LocaleEnUS: "The service is not ready yet and cannot handle business operations. Please try again later.",
 		LocaleJaJP: "サービスはまだ準備ができておらず、操作を処理できません。しばらくしてからもう一度お試しください。",
 	},
+	CodeNoSpace: {
+		LocaleZhCN: "服务器存储空间不足，已暂停新的写入操作，请清理磁盘后重试。",
+		LocaleZhTW: "伺服器儲存空間不足，已暫停新的寫入操作，請清理磁碟後重試。",
+		LocaleEnUS: "The server is low on storage space and has paused new write operations. Free up disk space, then try again.",
+		LocaleJaJP: "サーバーのストレージ容量が不足しているため、新しい書き込み操作を一時停止しています。ディスク領域を確保してから再試行してください。",
+	},
 }
 
 // messageFor 取得錯誤碼在指定語言的使用者訊息；語言未支援或訊息為空時回退 defaultLocale。
