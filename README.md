@@ -20,6 +20,8 @@ EvernightRealm is a self-hosted, offline-first platform for a small group of pla
 
 EvernightRealm is under active development and no stable release is available yet. The server can already be built as a **single executable**: one port serves both the web interface (so far the app shell — switchable UI language and a server connectivity probe, with business features still in development) and the API endpoints, so a browser pointed at that address is all you need — no separate static hosting.
 
+The server also ships a maintenance command that produces a **consistent backup package**: a single-file database snapshot — taken while the server keeps running, and not a copy of the live write-ahead-log file — together with the config file and the media, document and upload directories, each file recorded with its size and SHA-256 in a manifest. The restore entry point is the next step, so a backup can currently only be verified by hand.
+
 ## How it will work (once released)
 
 - One person hosts the server on their machine (Windows or Linux)

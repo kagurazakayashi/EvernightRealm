@@ -1047,6 +1047,14 @@ func joinWithin(base, p string) (string, error) {
 	return resolved, nil
 }
 
+// ConfigFile 回傳組態檔的絕對路徑（資料目錄下的 config.yaml）。
+//
+// 這是「組態檔在哪」的唯一定義點：Prepare 用它建立範例組態，備份用它決定要收錄哪一份——
+// 兩處各拼一次字串時，改動其中一處會讓備份收錄到一個不存在（或不是同一份）的檔案。
+func (c Config) ConfigFile() string {
+	return filepath.Join(c.Server.DataDir, "config.yaml")
+}
+
 // Prepare 建立資料目錄與子目錄、探測可寫性，並在缺少組態檔時寫入範例組態。
 // 重複執行（重複啟動）為冪等操作。
 func (c *Config) Prepare() error {
@@ -1073,7 +1081,7 @@ func (c *Config) Prepare() error {
 		return fmt.Errorf("config: 資料目錄清理失敗: %w", err)
 	}
 
-	configPath := filepath.Join(c.Server.DataDir, "config.yaml")
+	configPath := c.ConfigFile()
 	if _, err := os.Stat(configPath); errors.Is(err, os.ErrNotExist) {
 		if err := os.WriteFile(configPath, []byte(ExampleYAML), 0o600); err != nil {
 			return fmt.Errorf("config: 建立範例組態 %s 失敗: %w", configPath, err)

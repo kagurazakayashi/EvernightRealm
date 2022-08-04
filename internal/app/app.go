@@ -30,7 +30,8 @@ const Version = "0.1.0-dev"
 
 // Run 啟動服務端，阻塞至收到停止信號（Ctrl+C、SIGTERM）或發生錯誤。
 //
-// 第一個參數為 `migrate` 時改執行遷移子命令（見 Migrate），不啟動 HTTP 服務。
+// 第一個參數為 `migrate` 時改執行遷移子命令（見 Migrate），為 `backup` 時改執行備份子命令
+// （見 Backup）；兩者都不啟動 HTTP 服務，也都不佔用連接埠。
 //
 // ctx 為服務的根 context，訊號取消即代表停止請求；日後的背景任務
 // （保留期清理、備份排程等）皆須以此 ctx 為取消來源並在返回前結束，
@@ -38,8 +39,13 @@ const Version = "0.1.0-dev"
 func Run(args []string) error {
 	ctx, releaseSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer releaseSignals()
-	if len(args) > 0 && args[0] == "migrate" {
-		return Migrate(ctx, args[1:], os.Stdout)
+	if len(args) > 0 {
+		switch args[0] {
+		case "migrate":
+			return Migrate(ctx, args[1:], os.Stdout)
+		case "backup":
+			return Backup(ctx, args[1:], os.Stdout)
+		}
 	}
 	return run(ctx, releaseSignals, args, os.Stdout, os.Stderr)
 }
@@ -122,7 +128,15 @@ func Migrate(ctx context.Context, args []string, out io.Writer) error {
 // 兩個下限全為 0 時，Monitor.Verify 一律回 StatusOK 且**不發任何系統呼叫**，
 // 因此「沒啟用」的代價是一條比較分支，不是每筆寫入多一次磁碟查詢。
 func diskMonitor(cfg config.Config) *disk.Monitor {
-	return disk.New(cfg.Server.DataDir, disk.Thresholds{
+	return diskMonitorAt(cfg.Server.DataDir, cfg)
+}
+
+// diskMonitorAt 以同一組閾值建立針對特定目錄所在卷的監測器。
+//
+// 存在的理由只有一個：備份包寫到哪個卷是由 backups 決定的，而預設值以外的寫法（含環境變數
+// ER_BACKUPS 指到別顆盤）很常见——拿資料卷的剩餘空間去判定備份卷會不會寫得下，判定是錯的。
+func diskMonitorAt(path string, cfg config.Config) *disk.Monitor {
+	return disk.New(path, disk.Thresholds{
 		MinFreeBytes:   uint64(maxInt64(cfg.Disk.MinFreeBytes, 0)),
 		MinFreePercent: cfg.Disk.MinFreePercent,
 	}, time.Duration(cfg.Disk.CheckIntervalMS)*time.Millisecond, timeutil.System())
