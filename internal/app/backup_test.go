@@ -110,7 +110,7 @@ func hasFile(m backup.Manifest, rel string) bool {
 }
 
 func TestBackupSubcommandProducesRestorableBundle(t *testing.T) {
-	dir := t.TempDir()
+	dir := retryTempDir(t)
 	ctx := context.Background()
 
 	if err := Migrate(ctx, []string{"--data-dir", dir}, &bytes.Buffer{}); err != nil {
@@ -126,7 +126,7 @@ func TestBackupSubcommandProducesRestorableBundle(t *testing.T) {
 	report := out.String()
 	for _, want := range []string{
 		"備份包：", "integrity=ok", "journal=delete", "application_id=0x4556524c",
-		"收錄：", "敏感性提示", "還原入口尚未提供",
+		"收錄：", "敏感性提示", "evernight-server restore",
 	} {
 		if !strings.Contains(report, want) {
 			t.Errorf("備份報告缺少 %q：\n%s", want, report)
@@ -166,7 +166,7 @@ func TestBackupSubcommandProducesRestorableBundle(t *testing.T) {
 	}
 
 	// 最小閉環（NFR-011 的起點）：把快照放進一個全新資料目錄，用正式開庫流程讀回來。
-	restoreDir := filepath.Join(t.TempDir(), "restored")
+	restoreDir := filepath.Join(retryTempDir(t), "restored")
 	if err := os.MkdirAll(restoreDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -212,7 +212,7 @@ func TestBackupSubcommandProducesRestorableBundle(t *testing.T) {
 // 本程序正以正式開庫流程使用這個庫（持單寫入實例鎖、資料還在 -wal 裡未 checkpoint），
 // backup 仍要取出快照，而且快照裡必須有那些只在 -wal 的列。
 func TestBackupRunsWhileServiceHoldsTheWriter(t *testing.T) {
-	dir := t.TempDir()
+	dir := retryTempDir(t)
 	ctx := context.Background()
 	if err := Migrate(ctx, []string{"--data-dir", dir}, &bytes.Buffer{}); err != nil {
 		t.Fatalf("migrate 失敗: %v", err)
@@ -245,7 +245,7 @@ func TestBackupRunsWhileServiceHoldsTheWriter(t *testing.T) {
 	}
 
 	bundle := onlyBundle(t, filepath.Join(dir, "backups"))
-	restored := filepath.Join(t.TempDir(), "evernight.db")
+	restored := filepath.Join(retryTempDir(t), "evernight.db")
 	data, err := os.ReadFile(filepath.Join(bundle, filepath.FromSlash(backup.DatabaseRel)))
 	if err != nil {
 		t.Fatal(err)
@@ -261,7 +261,7 @@ func TestBackupRunsWhileServiceHoldsTheWriter(t *testing.T) {
 	var value string
 	if err := pool.SQL().QueryRowContext(ctx,
 		`SELECT value FROM server_settings WHERE key = 'in_wal'`).Scan(&value); err != nil {
-		t.Fatalf("快照讀不回只在 -wal 的已提交資料（这正是備份最該保住的東西）: %v", err)
+		t.Fatalf("快照讀不回只在 -wal 的已提交資料（這正是備份最該保住的東西）: %v", err)
 	}
 	if value != "只在 WAL 裡" {
 		t.Errorf("值不對：%q", value)
@@ -269,7 +269,7 @@ func TestBackupRunsWhileServiceHoldsTheWriter(t *testing.T) {
 }
 
 func TestBackupRefusesWhenSpaceIsLow(t *testing.T) {
-	dir := t.TempDir()
+	dir := retryTempDir(t)
 	// 先把資料庫建好：空間不足這條路要在「其他前提都成立」的情況下測，
 	// 否則失敗原因可能是沒庫、可能是鎖，就不是空間判定。
 	if err := Migrate(context.Background(), []string{"--data-dir", dir}, &bytes.Buffer{}); err != nil {
@@ -299,7 +299,7 @@ func TestBackupRefusesWhenSpaceIsLow(t *testing.T) {
 }
 
 func TestBackupIncludesContentDirs(t *testing.T) {
-	dir := t.TempDir()
+	dir := retryTempDir(t)
 	ctx := context.Background()
 	if err := Migrate(ctx, []string{"--data-dir", dir}, &bytes.Buffer{}); err != nil {
 		t.Fatalf("migrate 失敗: %v", err)
@@ -341,7 +341,7 @@ func TestBackupIncludesContentDirs(t *testing.T) {
 // TestBackupNeverReachesIntoBackupsDir：備份包寫在 backups/ 裡，
 // 而 backups/ 不是被收錄的內容目錄——否則第二份備份會含第一份，一份包裡裝著一包。
 func TestBackupNeverReachesIntoBackupsDir(t *testing.T) {
-	dir := t.TempDir()
+	dir := retryTempDir(t)
 	ctx := context.Background()
 	if err := Migrate(ctx, []string{"--data-dir", dir}, &bytes.Buffer{}); err != nil {
 		t.Fatalf("migrate 失敗: %v", err)
@@ -374,7 +374,7 @@ func TestBackupNeverReachesIntoBackupsDir(t *testing.T) {
 }
 
 func TestBackupFailsWhenDatabaseMissing(t *testing.T) {
-	dir := t.TempDir()
+	dir := retryTempDir(t)
 	out := &bytes.Buffer{}
 	err := Backup(context.Background(), []string{"--data-dir", dir}, out)
 	if err == nil {

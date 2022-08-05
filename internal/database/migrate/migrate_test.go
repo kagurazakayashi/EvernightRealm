@@ -28,7 +28,7 @@ func mustOpen(t *testing.T, path string) *database.DB {
 // openTestDB 於暫存目錄開啟測試資料庫並自動關閉。
 func openTestDB(t *testing.T) (*sql.DB, string) {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "evernight.db")
+	path := filepath.Join(retryTempDir(t), "evernight.db")
 	db := mustOpen(t, path)
 	t.Cleanup(func() { _ = db.Close() })
 	return db.SQL(), path
@@ -246,7 +246,7 @@ func assertAppliedAt(t *testing.T, ctx context.Context, pool *sql.DB, millis int
 // 且先前寫入的資料仍可讀取。
 func TestApplyAcrossRestartIsIdempotent(t *testing.T) {
 	ctx := context.Background()
-	path := filepath.Join(t.TempDir(), "evernight.db")
+	path := filepath.Join(retryTempDir(t), "evernight.db")
 
 	first := mustOpen(t, path)
 	firstRes, err := Apply(ctx, first.SQL(), Options{})

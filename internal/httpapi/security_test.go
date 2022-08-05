@@ -177,7 +177,7 @@ func containsString(values []string, want string) bool {
 }
 
 func TestPermissionsPolicyAllowsSameOriginCamera(t *testing.T) {
-	// QR 掃碼（STEP-026）需要相機；僅允許同源，且不得寫成 camera=() 而誤關功能。
+	// QR 掃碼需要相機；僅允許同源，且不得寫成 camera=() 而誤關功能。
 	if !strings.Contains(defaultPermissionsPolicy, "camera=(self)") {
 		t.Errorf("權限策略應允許同源相機（QR 掃碼需要），實際 %q", defaultPermissionsPolicy)
 	}

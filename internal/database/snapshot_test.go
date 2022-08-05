@@ -114,7 +114,7 @@ func fileSize(path string) int64 {
 // 已提交但仍在 -wal 裡、尚未 checkpoint 回主檔的資料必須出現在快照裡。
 // 「複製主檔」這條路線就是在這一步失敗的。
 func TestSnapshotIncludesUncheckpointedWAL(t *testing.T) {
-	dir := t.TempDir()
+	dir := retryTempDir(t)
 	path := filepath.Join(dir, "probe.db")
 	db := openAt(t, path, 2*time.Second)
 	migrateToHead(t, db)
@@ -153,7 +153,7 @@ func TestSnapshotIncludesUncheckpointedWAL(t *testing.T) {
 // TestSnapshotLeavesSourceUntouched 要求源庫主檔與 -wal 在快照前後位元組相同：
 // 快照不寫源庫，也不順手替源庫做 checkpoint。
 func TestSnapshotLeavesSourceUntouched(t *testing.T) {
-	dir := t.TempDir()
+	dir := retryTempDir(t)
 	path := filepath.Join(dir, "probe.db")
 	db := openAt(t, path, 2*time.Second)
 	migrateToHead(t, db)
@@ -178,7 +178,7 @@ func TestSnapshotLeavesSourceUntouched(t *testing.T) {
 }
 
 func TestSnapshotRejectsExistingTarget(t *testing.T) {
-	dir := t.TempDir()
+	dir := retryTempDir(t)
 	path := filepath.Join(dir, "probe.db")
 	db := openAt(t, path, 2*time.Second)
 	migrateToHead(t, db)
@@ -209,7 +209,7 @@ func TestSnapshotRejectsExistingTarget(t *testing.T) {
 }
 
 func TestSnapshotRejectsMissingParentDirectory(t *testing.T) {
-	dir := t.TempDir()
+	dir := retryTempDir(t)
 	path := filepath.Join(dir, "probe.db")
 	db := openAt(t, path, 2*time.Second)
 	migrateToHead(t, db)
@@ -238,7 +238,7 @@ func TestSnapshotRejectsMissingParentDirectory(t *testing.T) {
 // mode=ro 只禁止寫源庫，仍允許 VACUUM INTO 寫新檔；少了這條斷言，
 // 日後有人「順手」拿這條連線去做寫入不會有任何信號。
 func TestSnapshotConnectionCannotWrite(t *testing.T) {
-	dir := t.TempDir()
+	dir := retryTempDir(t)
 	path := filepath.Join(dir, "probe.db")
 	db := openAt(t, path, 2*time.Second)
 	migrateToHead(t, db)
@@ -262,7 +262,7 @@ func TestSnapshotConnectionCannotWrite(t *testing.T) {
 // TestSnapshotOpenDoesNotTakeSingleWriterLock 是本步交付形態的根據：
 // 本程序正使用這個庫（持有單寫入實例鎖）時，快照連線仍然開得起來、也取得出快照。
 func TestSnapshotOpenDoesNotTakeSingleWriterLock(t *testing.T) {
-	dir := t.TempDir()
+	dir := retryTempDir(t)
 	path := filepath.Join(dir, "probe.db")
 	db := openAt(t, path, 2*time.Second)
 	migrateToHead(t, db)
@@ -283,7 +283,7 @@ func TestSnapshotOpenDoesNotTakeSingleWriterLock(t *testing.T) {
 
 // TestSnapshotExcludesUncommittedRows 證明快照的界線是「已提交」而不是「連線看過什麼」。
 func TestSnapshotExcludesUncommittedRows(t *testing.T) {
-	dir := t.TempDir()
+	dir := retryTempDir(t)
 	path := filepath.Join(dir, "probe.db")
 	db := openAt(t, path, 2*time.Second)
 	migrateToHead(t, db)
@@ -323,7 +323,7 @@ func TestSnapshotRejectsEmptyPathAndNilConn(t *testing.T) {
 
 // TestInspectSnapshotReportsFacts 要求清單會用到的每項事實都取自快照本身。
 func TestInspectSnapshotReportsFacts(t *testing.T) {
-	dir := t.TempDir()
+	dir := retryTempDir(t)
 	path := filepath.Join(dir, "probe.db")
 	db := openAt(t, path, 2*time.Second)
 	head := migrateToHead(t, db)
@@ -375,7 +375,7 @@ func TestInspectSnapshotReportsFacts(t *testing.T) {
 
 // TestInspectSnapshotOnEmptyDatabase：一張表都沒有時不該失敗，也不該出現 null 清單。
 func TestInspectSnapshotOnEmptyDatabase(t *testing.T) {
-	dir := t.TempDir()
+	dir := retryTempDir(t)
 	path := filepath.Join(dir, "probe.db")
 	db := openAt(t, path, 2*time.Second)
 	if _, err := db.SQL().ExecContext(context.Background(), `CREATE TABLE only_here (x INTEGER)`); err != nil {
@@ -398,7 +398,7 @@ func TestInspectSnapshotOnEmptyDatabase(t *testing.T) {
 
 // TestInspectSnapshotRejectsMissingFile 讓「檢查一份不存在的快照」變成錯誤而不是 ok。
 func TestInspectSnapshotRejectsMissingFile(t *testing.T) {
-	if _, err := InspectSnapshot(context.Background(), filepath.Join(t.TempDir(), "nope.db"), time.Second); err == nil {
+	if _, err := InspectSnapshot(context.Background(), filepath.Join(retryTempDir(t), "nope.db"), time.Second); err == nil {
 		t.Fatal("快照檔不存在時應回錯誤")
 	}
 }

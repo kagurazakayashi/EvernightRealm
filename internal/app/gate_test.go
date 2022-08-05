@@ -55,7 +55,7 @@ func writeDatabaseWithMarker(t *testing.T, dir string, appID uint32, userVersion
 
 func TestRunRefusesFutureSchemaVersionWithoutWriting(t *testing.T) {
 	// 驗收：未來版本啟動失敗，原庫保持完整（規格附錄 E.5）。
-	dir := t.TempDir()
+	dir := retryTempDir(t)
 	path := writeDatabaseWithMarker(t, dir, database.ApplicationID, 99)
 	before := map[string]string{
 		path:          digestOf(path),
@@ -83,7 +83,7 @@ func TestRunRefusesFutureSchemaVersionWithoutWriting(t *testing.T) {
 }
 
 func TestMigrateStampsApplicationIDAndRecordsVersion(t *testing.T) {
-	dir := t.TempDir()
+	dir := retryTempDir(t)
 	out := &syncBuffer{}
 	if err := Migrate(context.Background(), []string{"--data-dir", dir}, out); err != nil {
 		t.Fatalf("Migrate 失敗: %v", err)
@@ -107,7 +107,7 @@ func TestMigrateStampsApplicationIDAndRecordsVersion(t *testing.T) {
 
 func TestMigrateVerifyReportsIntegrityWithoutMigrating(t *testing.T) {
 	// 自檢模式：只做完整性與版本檢查，不套用遷移（資料庫維持未遷移狀態）。
-	dir := t.TempDir()
+	dir := retryTempDir(t)
 	out := &syncBuffer{}
 	if err := Migrate(context.Background(), []string{"--verify", "--data-dir", dir}, out); err != nil {
 		t.Fatalf("Migrate --verify 失敗: %v", err)
@@ -137,7 +137,7 @@ func TestMigrateVerifyReportsIntegrityWithoutMigrating(t *testing.T) {
 
 func TestMigrateRejectsForeignDatabase(t *testing.T) {
 	// 指向他人的 SQLite 檔時必須拒絕，且不改動該檔內容。
-	dir := t.TempDir()
+	dir := retryTempDir(t)
 	path := writeDatabaseWithMarker(t, dir, 0x12345678, 0)
 	before := digestOf(path)
 
@@ -156,7 +156,7 @@ func TestMigrateRejectsForeignDatabase(t *testing.T) {
 
 func TestRunWithIntegrityCheckAndSchemaGuardConfigured(t *testing.T) {
 	// 組態可開啟啟動時完整性自檢，並可設定寫入把關層級（transaction 於交易邊界複驗）。
-	dir := t.TempDir()
+	dir := retryTempDir(t)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatalf("建立資料目錄失敗: %v", err)
 	}
@@ -189,7 +189,7 @@ func TestRunWithIntegrityCheckAndSchemaGuardConfigured(t *testing.T) {
 	output := out.String()
 	for _, want := range []string{
 		"資料庫完整性自檢：integrity_check=ok",
-		// 交易策略預設值需在啟動輸出可見（STEP-041）。
+		// 交易策略預設值需在啟動輸出可見。
 		"資料庫交易策略：begin_mode=immediate nested=reject busy_retry_max=0 " +
 			"busy_retry_backoff_ms=50 timeout_ms=10000 schema_guard=transaction",
 		"資料庫寫入把關：schema_guard=transaction",

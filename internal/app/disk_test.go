@@ -36,7 +36,7 @@ func TestDiskNoteNamesBothStates(t *testing.T) {
 }
 
 func TestCheckSpaceBeforeWriteRejectsWhenLow(t *testing.T) {
-	space := disk.New(t.TempDir(), disk.Thresholds{MinFreeBytes: uint64(impossibleThreshold)}, 0, nil)
+	space := disk.New(retryTempDir(t), disk.Thresholds{MinFreeBytes: uint64(impossibleThreshold)}, 0, nil)
 	err := checkSpaceBeforeWrite(space, runlog.WriterLogger(io.Discard))
 	if !errors.Is(err, disk.ErrNoSpace) {
 		t.Fatalf("空間不足時應回 ErrNoSpace，實際 %v", err)
@@ -48,7 +48,7 @@ func TestCheckSpaceBeforeWriteRejectsWhenLow(t *testing.T) {
 }
 
 func TestCheckSpaceBeforeWritePassesWhenUnlimited(t *testing.T) {
-	space := disk.New(t.TempDir(), disk.Thresholds{}, time.Minute, nil)
+	space := disk.New(retryTempDir(t), disk.Thresholds{}, time.Minute, nil)
 	if err := checkSpaceBeforeWrite(space, runlog.WriterLogger(io.Discard)); err != nil {
 		t.Errorf("未設下限時不應阻擋啟動：%v", err)
 	}
@@ -58,7 +58,7 @@ func TestReadinessCheckMapsLowSpaceToNoSpaceCode(t *testing.T) {
 	db := openPlainDB(t)
 	ctx := context.Background()
 
-	low := disk.New(t.TempDir(), disk.Thresholds{MinFreeBytes: uint64(impossibleThreshold)}, time.Minute, nil)
+	low := disk.New(retryTempDir(t), disk.Thresholds{MinFreeBytes: uint64(impossibleThreshold)}, time.Minute, nil)
 	err := readinessCheck(db, low)(ctx)
 	var unready *httpapi.UnreadyError
 	if !errors.As(err, &unready) {
@@ -69,7 +69,7 @@ func TestReadinessCheckMapsLowSpaceToNoSpaceCode(t *testing.T) {
 	}
 
 	// 未設下限（預設）時，磁碟不參與判定：就緒與否仍只取決於資料庫。
-	open := disk.New(t.TempDir(), disk.Thresholds{}, time.Minute, nil)
+	open := disk.New(retryTempDir(t), disk.Thresholds{}, time.Minute, nil)
 	if err := readinessCheck(db, open)(ctx); err != nil {
 		t.Errorf("未啟用時不應報不就緒：%v", err)
 	}
@@ -96,7 +96,7 @@ func TestReadinessCheckReportsUnknownAsNotReady(t *testing.T) {
 // TestRunRefusesStartupWhenDiskLow 是「仍能診斷並安全停止」的進程級證據（單元層版）：
 // 空間不足時啟動中止、不開放監聽、也不執行任何遷移。
 func TestRunRefusesStartupWhenDiskLow(t *testing.T) {
-	dir := t.TempDir()
+	dir := retryTempDir(t)
 	t.Setenv("ER_SERVER_DATA_DIR", dir)
 	// 一個卷不可能有 2 EiB 的自由空間：這條檢查在任何機器上都成立。
 	t.Setenv("ER_DISK_MIN_FREE_BYTES", "4611686018427387904")
@@ -124,7 +124,7 @@ func TestRunRefusesStartupWhenDiskLow(t *testing.T) {
 func openPlainDB(t *testing.T) *database.DB {
 	t.Helper()
 	db, err := database.Open(context.Background(), database.Options{
-		Path: filepath.Join(t.TempDir(), "evernight.db"),
+		Path: filepath.Join(retryTempDir(t), "evernight.db"),
 	})
 	if err != nil {
 		t.Fatalf("開測試資料庫失敗：%v", err)

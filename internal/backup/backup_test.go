@@ -300,7 +300,7 @@ func TestCreateRefusesExistingName(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(names) != 1 || names[0].Name() != "keep.txt" {
-		t.Errorf("拒絕同名時不应動到既有備份包內容，實際有 %d 項：%v", len(names), names)
+		t.Errorf("拒絕同名時不應動到既有備份包內容，實際有 %d 項：%v", len(names), names)
 	}
 }
 
@@ -495,7 +495,7 @@ func TestValidateRejectsBadInput(t *testing.T) {
 	}
 }
 
-// TestManifestJSONContract 固定清單的欄位名稱與形狀：STEP-069 的恢復入口要照這份解析。
+// TestManifestJSONContract 固定清單的欄位名稱與形狀：恢復入口要照這份解析。
 // 欄位改名在這裡會讓測試失敗，而不是等到恢復那天才發現「讀到的是 null」。
 func TestManifestJSONContract(t *testing.T) {
 	f := newFixture(t)

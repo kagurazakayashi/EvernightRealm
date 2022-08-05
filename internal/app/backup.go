@@ -70,7 +70,9 @@ func Backup(ctx context.Context, args []string, out io.Writer) error {
 	fmt.Fprint(out, staleStagingNote(res.StaleStaging))
 	fmt.Fprintln(out, "敏感性提示：本備份包含組態檔原值（Argon2id 口令摘要與任何密鑰材料都在內），"+
 		"刻意不脫敏——遮罩過的值恢復出來是壞的。請按敏感檔對待它：存放位置、搬運方式與日後刪除都要當回事。")
-	fmt.Fprintln(out, "還原入口尚未提供（下一步）；本命令只產出備份包，不會動到現有資料目錄的任何檔案。")
+	fmt.Fprintln(out, "本命令只產出備份包，不會動到現有資料目錄的任何檔案；"+
+		"要拿這份包恢復，請執行 evernight-server restore --bundle <上面那個目錄> "+
+		"--into <一個新的空目錄>（恢復入口只收空目錄，不會覆蓋既有目錄）。")
 	lg.Info("備份完成", "dir", res.Dir, "files", res.Manifest.Totals.Files,
 		"bytes", res.Manifest.Totals.Bytes, "schema_version", res.Manifest.Database.SchemaVersion,
 		"created_at", res.Manifest.CreatedAt)

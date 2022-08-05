@@ -110,6 +110,10 @@ type SnapshotInfo struct {
 	JournalMode string
 	// Integrity 是 integrity_check 的回值（正常為 ok）。
 	Integrity string
+	// ForeignKeyViolations 是 foreign_key_check 回傳的違規筆數（正常為 0）。
+	// 讀取端（還原驗證）要獨立算這一個數，而不是採信備份清單裡寫過的結論：
+	// 清單是純文字自述、改得動，檔案裡的實際內容改不動。
+	ForeignKeyViolations int
 	// ApplicationID 與 HeaderSchemaVersion 是副本檔頭的標記與 user_version；
 	// 本服務的預檢靠這兩個值辨認「這是我的庫」，因此必須在備份時就記下來。
 	ApplicationID       uint32
@@ -120,8 +124,9 @@ type SnapshotInfo struct {
 
 // InspectSnapshot 以唯讀連線開啟快照並讀回可核對的事實。
 //
-// 這裡不做「寫得回去」的檢查（那是 STEP-069 還原驗證的工作），只確認取出來的這一份是好的：
-// integrity_check 必須回 ok，任何其他回值都由呼叫端據以拒絕發布這份備份。
+// 這裡不做「寫得回去」的檢查，只確認取出來的這一份是好的：integrity_check 必須回 ok，
+// 任何其他回值都由呼叫端據以拒絕發布這份備份。外鍵違規只回報筆數、不拒絕——
+// 一份含外鍵違規的庫仍值得備下來（那是現況），要不要拿它去還原由還原端判定。
 func InspectSnapshot(ctx context.Context, path string, busyTimeout time.Duration) (SnapshotInfo, error) {
 	db, err := sql.Open("sqlite", snapshotDSN(path, busyTimeout))
 	if err != nil {
@@ -137,6 +142,19 @@ func InspectSnapshot(ctx context.Context, path string, busyTimeout time.Duration
 	if err := db.QueryRowContext(ctx, `PRAGMA journal_mode`).Scan(&info.JournalMode); err != nil {
 		return info, fmt.Errorf("database: 讀取快照 journal 模式失敗: %w", err)
 	}
+	// foreign_key_check 沒有違規時不回傳任何列，因此這裡數列而不是取值。
+	foreignRows, err := db.QueryContext(ctx, `PRAGMA foreign_key_check`)
+	if err != nil {
+		return info, fmt.Errorf("database: 快照外鍵檢查無法執行（%s）: %w", path, err)
+	}
+	for foreignRows.Next() {
+		info.ForeignKeyViolations++
+	}
+	if err := foreignRows.Err(); err != nil {
+		_ = foreignRows.Close()
+		return info, fmt.Errorf("database: 快照外鍵檢查失敗（%s）: %w", path, err)
+	}
+	_ = foreignRows.Close()
 	var appID int64
 	if err := db.QueryRowContext(ctx, `PRAGMA application_id`).Scan(&appID); err != nil {
 		return info, fmt.Errorf("database: 讀取快照 application_id 失敗: %w", err)

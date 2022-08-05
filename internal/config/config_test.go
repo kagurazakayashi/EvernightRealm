@@ -219,7 +219,7 @@ database:
 }
 
 func TestValidateTransactionBoundary(t *testing.T) {
-	// 交易邊界（STEP-041）：預設值、非法值、空值回退、YAML 與環境變數覆蓋。
+	// 交易邊界：預設值、非法值、空值回退、YAML 與環境變數覆蓋。
 	t.Run("預設值", func(t *testing.T) {
 		tx := Default().Database.Transaction
 		if tx.BeginMode != "immediate" {

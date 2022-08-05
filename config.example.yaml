@@ -28,11 +28,11 @@ database:
   preflight: "header"               # 開庫前預檢：header（檔頭標記，預設）| readonly（另加唯讀連線）| off（不預檢）
   integrity_check: false            # 啟動時執行完整性自檢（大庫可能耗時）；亦可手動 `migrate --verify`
   schema_guard: "startup"           # 寫入把關層級：startup（預設，僅啟動時拒絕不相容版本）| transaction（另於每個寫入交易前複驗 schema 版本）
-  # ---- 交易邊界（STEP-041）----
+  # ---- 交易邊界 ----
   transaction:
     begin_mode: "immediate"         # 寫入交易的 BEGIN 模式：immediate（預設，失敗點固定於交易開始前）| deferred
     nested: "reject"                # 同一交易內再開交易：reject（預設）| savepoint（真嵌套）| reuse（加入外層）
-    busy_retry_max: 0               # 忙鎖時自動重試整個交易的次數（0 為預設，不重試；重試會重跑交易，需幂等）
+    busy_retry_max: 0               # 忙鎖時自動重試整個交易的次數（0 為預設，不重試；重試會重跑交易，需冪等）
     busy_retry_backoff_ms: 50       # 重試線性退避基數（毫秒）
     timeout_ms: 10000               # 單一交易執行期限（毫秒）；0 表示不限制
 
@@ -61,7 +61,7 @@ disk:
 security:
   session_ttl_hours: 24
 
-  # HTTP 安全回應頭（STEP-035）；留空即用內建預設，只有確實需要時才覆寫。
+  # HTTP 安全回應頭；留空即用內建預設，只有確實需要時才覆寫。
   # frame_options 可選 DENY | SAMEORIGIN；csp 不得含 'unsafe-eval'。
   headers:
     content_security_policy: ""       # 空 = 內建預設（相容本機 Flutter Web）
@@ -69,15 +69,15 @@ security:
     referrer_policy: ""               # 空 = no-referrer
     permissions_policy: ""            # 空 = camera=(self), microphone=(), geolocation=()
 
-  # 跨来源（CORS）策略。预设完全关闭：不放行任何来源时，服务端不下发任何跨域标头，
-  # 浏览器只能同源存取本服务（正式部署即应保持这样的状态）。
-  # 开发期要让浏览器直接调用 Go，才把「页面的来源」写进来；也可用环境变量临时给定：
+  # 跨來源（CORS）策略。預設完全關閉：不放行任何來源時，服務端不下發任何跨域標頭，
+  # 瀏覽器只能同源存取本服務（正式部署即應保持這樣的狀態）。
+  # 開發期要讓瀏覽器直接呼叫 Go，才把「頁面的來源」寫進來；也可用環境變數臨時給定：
   #   ER_SECURITY_CORS_ALLOWED_ORIGINS=http://127.0.0.1:8765
-  # 启动摘要会打印 cors=[...]，开启时还会多一行「跨域提示」，避免忘了改回来。
+  # 啟動摘要會列印 cors=[...]，開啟時還會多一列「跨域提示」，避免忘了改回來。
   cors:
-    allowed_origins: []               # 空 = 关闭；每项须为 scheme://host[:port] 精确来源，或 "*"
+    allowed_origins: []               # 空 = 關閉；每項須為 scheme://host[:port] 精確來源，或 "*"
     allowed_methods: [GET, HEAD, OPTIONS]
     allowed_headers: [Accept, Accept-Language, Content-Type, Idempotency-Key, X-Request-Id]
-    exposed_headers: [X-Request-Id]   # 允许客户端脚本读回的响应标头
-    allow_credentials: false          # 与 "*" 同时使用会被拒绝启动（浏览器本就拒绝此组合）
-    max_age_seconds: 600              # 预检结果缓存；0 = 不缓存
+    exposed_headers: [X-Request-Id]   # 允許客戶端腳本讀回的回應標頭
+    allow_credentials: false          # 與 "*" 同時使用會被拒絕啟動（瀏覽器本就拒絕此組合）
+    max_age_seconds: 600              # 預檢結果快取；0 = 不快取

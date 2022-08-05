@@ -84,7 +84,7 @@ func shortDigest(digest string) string {
 }
 
 func TestReadHeaderStates(t *testing.T) {
-	dir := t.TempDir()
+	dir := retryTempDir(t)
 
 	missing := filepath.Join(dir, "missing.db")
 	if header, err := ReadHeader(missing); err != nil || header.Exists {
@@ -181,7 +181,7 @@ func TestOpenRefusesIncompatibleDatabaseWithoutWriting(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			dir := t.TempDir()
+			dir := retryTempDir(t)
 			path := filepath.Join(dir, "evernight.db")
 			tc.setup(t, path)
 			before := snapshotFiles(path)
@@ -215,7 +215,7 @@ func TestReadOnlyPreflightCatchesVersionInWal(t *testing.T) {
 	// 檔頭標記的已知限制：WAL 已提交但未 checkpoint 時主檔檔頭會落後；
 	// 唯讀預檢（mode=ro）能看到 WAL 中的最新版本，因此可攔截這種較新版本。
 	ctx := context.Background()
-	dir := t.TempDir()
+	dir := retryTempDir(t)
 	path := filepath.Join(dir, "evernight.db")
 	createDatabaseFile(t, path, ApplicationID, 1, "CREATE TABLE probe (id INTEGER PRIMARY KEY)")
 
@@ -266,7 +266,7 @@ func TestReadOnlyPreflightCatchesVersionInWal(t *testing.T) {
 
 func TestPreflightOffSkipsChecks(t *testing.T) {
 	// off 模式直接可寫開啟：外來檔在開庫階段不攔截，改由版本表把關（取捨已記錄於組態註解）。
-	dir := t.TempDir()
+	dir := retryTempDir(t)
 	path := filepath.Join(dir, "evernight.db")
 	createDatabaseFile(t, path, 0x12345678, 1, "CREATE TABLE someone_elses (id INTEGER PRIMARY KEY)")
 
@@ -288,7 +288,7 @@ func TestStampApplicationIDAdoptsUnmarkedDatabase(t *testing.T) {
 	// 未標記的資料庫（如本步驟之前建立、或他人以預設值建立）在開啟階段不寫入標記；
 	// 只有確認資料庫為本服務所有（遷移成功）後才落標記。
 	ctx := context.Background()
-	dir := t.TempDir()
+	dir := retryTempDir(t)
 	path := filepath.Join(dir, "evernight.db")
 	createDatabaseFile(t, path, 0, 0, "CREATE TABLE legacy (id INTEGER PRIMARY KEY)")
 
@@ -336,7 +336,7 @@ func TestStampApplicationIDAdoptsUnmarkedDatabase(t *testing.T) {
 func TestSecondWriterRejectionReportsHolder(t *testing.T) {
 	// 拒絕第二個寫入者時附上持有者資訊（pid/取得時間），讓使用者直接知道是誰占用。
 	ctx := context.Background()
-	dir := t.TempDir()
+	dir := retryTempDir(t)
 	path := filepath.Join(dir, "evernight.db")
 
 	first, err := Open(ctx, Options{Path: path, BusyTimeout: time.Second})
@@ -363,7 +363,7 @@ func TestSecondWriterRejectionReportsHolder(t *testing.T) {
 
 func TestCheckIntegrityDetectsForeignKeyViolation(t *testing.T) {
 	ctx := context.Background()
-	dir := t.TempDir()
+	dir := retryTempDir(t)
 	path := filepath.Join(dir, "evernight.db")
 	createDatabaseFile(t, path, ApplicationID, 1,
 		"CREATE TABLE parent (id INTEGER PRIMARY KEY)",

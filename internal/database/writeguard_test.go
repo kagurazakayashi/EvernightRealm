@@ -18,7 +18,7 @@ func openGuardedDB(t *testing.T, guard func() error) (*DB, *int) {
 		return guard()
 	}
 	db, err := Open(context.Background(), Options{
-		Path:       filepath.Join(t.TempDir(), "evernight.db"),
+		Path:       filepath.Join(retryTempDir(t), "evernight.db"),
 		WriteGuard: wrapped,
 	})
 	if err != nil {
@@ -131,7 +131,7 @@ func TestWriteGuardDoesNotCoverAutocommit(t *testing.T) {
 // TestNilWriteGuardMeansNoGate 未注入門時一切照舊。
 func TestNilWriteGuardMeansNoGate(t *testing.T) {
 	db, err := Open(context.Background(), Options{
-		Path: filepath.Join(t.TempDir(), "evernight.db"),
+		Path: filepath.Join(retryTempDir(t), "evernight.db"),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -162,7 +162,7 @@ func TestWriteGuardRunsBeforeBegin(t *testing.T) {
 		return nil
 	}
 	db, err := Open(context.Background(), Options{
-		Path:        filepath.Join(t.TempDir(), "evernight.db"),
+		Path:        filepath.Join(retryTempDir(t), "evernight.db"),
 		BusyTimeout: 800 * time.Millisecond,
 		WriteGuard:  guard,
 	})

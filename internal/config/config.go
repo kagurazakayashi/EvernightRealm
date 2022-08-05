@@ -49,7 +49,7 @@ type ServerConfig struct {
 	DataDir         string `yaml:"data_dir"`         // 執行資料目錄；"." 或空表示預設 evernight-data
 	DisplayTimezone string `yaml:"display_timezone"` // 顯示時區（IANA 名稱）；資料庫仍以 UTC 儲存
 
-	// HTTP 層保護參數（STEP-034）：逾時單位為毫秒，請求體上限單位為位元組。
+	// HTTP 層保護參數：逾時單位為毫秒，請求體上限單位為位元組。
 	// 逾時分工：read_header 限制標頭讀取、read 限制整個請求讀取、
 	// write 限制回應寫入、request 為單次處理的處理器期限、idle 限制 keep-alive 空閒。
 	ReadHeaderTimeoutMS int   `yaml:"read_header_timeout_ms"`
@@ -59,7 +59,7 @@ type ServerConfig struct {
 	RequestTimeoutMS    int   `yaml:"request_timeout_ms"`
 	MaxBodyBytes        int64 `yaml:"max_body_bytes"` // JSON API 請求體上限；上傳路由日後單獨放寬
 
-	// ShutdownTimeoutMS 為優雅停止時等待進行中請求完成的上限（STEP-036）。
+	// ShutdownTimeoutMS 為優雅停止時等待進行中請求完成的上限。
 	// 逾時則強制關閉連線，確保程序能結束並釋放監聽資源。
 	ShutdownTimeoutMS int `yaml:"shutdown_timeout_ms"`
 }
@@ -68,7 +68,7 @@ type ServerConfig struct {
 type DatabaseConfig struct {
 	Path          string `yaml:"path"`            // 資料庫檔名（相對資料目錄）
 	BusyTimeoutMS int    `yaml:"busy_timeout_ms"` // 鎖等待超時（毫秒）
-	// Preflight 為開庫前預檢模式（STEP-040）：
+	// Preflight 為開庫前預檢模式：
 	// header（預設）只讀檔頭標記，零寫入即可攔截非本服務檔與較新版本；
 	// readonly 另以唯讀連線讀取版本（可攔截檔頭落後的較新版本）；off 不預檢。
 	Preflight string `yaml:"preflight"`
@@ -80,11 +80,11 @@ type DatabaseConfig struct {
 	// transaction 另於每個寫入交易的回呼執行前複驗版本（見 database.TxPolicy.GuardSchema），
 	// 可攔截執行期資料庫被替換或還原成其他版本。
 	SchemaGuard string `yaml:"schema_guard"`
-	// Transaction 為交易邊界行為（STEP-041）。
+	// Transaction 為交易邊界行為。
 	Transaction TransactionConfig `yaml:"transaction"`
 }
 
-// TransactionConfig 為交易邊界行為（STEP-041）。
+// TransactionConfig 為交易邊界行為。
 //
 // 回呼式交易由 database.InTx 提供：回呼回傳錯誤或 panic 時整體回滾。
 type TransactionConfig struct {
@@ -151,9 +151,9 @@ type SecurityConfig struct {
 	// Root 憑據（Argon2id 雜湊）僅存於資料目錄 config.yaml；
 	// Redacted() 與所有日誌永不輸出其明文。
 	RootPasswordHash string `yaml:"root_password_hash"`
-	// Headers 為 HTTP 安全回應頭（STEP-035）。
+	// Headers 為 HTTP 安全回應頭。
 	Headers SecurityHeadersConfig `yaml:"headers"`
-	// CORS 為跨來源存取策略（STEP-055）；預設不開放任何來源。
+	// CORS 為跨來源存取策略；預設不開放任何來源。
 	CORS CORSConfig `yaml:"cors"`
 }
 
@@ -394,7 +394,7 @@ func (c *Config) Validate() error {
 	default:
 		return fmt.Errorf("config: database.schema_guard 需為 startup|transaction，實際為 %q", c.Database.SchemaGuard)
 	}
-	// 交易邊界（STEP-041）：空值代表採用內建預設（與 Default() 一致）。
+	// 交易邊界：空值代表採用內建預設（與 Default() 一致）。
 	tx := &c.Database.Transaction
 	if tx.BeginMode == "" {
 		tx.BeginMode = "immediate"
@@ -974,7 +974,7 @@ disk:
 security:
   session_ttl_hours: 24
 
-  # HTTP 安全回應頭（STEP-035）；留空即用內建預設，只有確實需要時才覆寫。
+  # HTTP 安全回應頭；留空即用內建預設，只有確實需要時才覆寫。
   # frame_options 可選 DENY | SAMEORIGIN；csp 不得含 'unsafe-eval'。
   headers:
     content_security_policy: ""       # 空 = 內建預設（相容本機 Flutter Web）
@@ -982,7 +982,7 @@ security:
     referrer_policy: ""               # 空 = no-referrer
     permissions_policy: ""            # 空 = camera=(self), microphone=(), geolocation=()
 
-  # 跨來源（CORS）策略（STEP-055）。預設完全關閉：不放行任何來源時，
+  # 跨來源（CORS）策略。預設完全關閉：不放行任何來源時，
   # 服務端不下發任何跨域標頭，瀏覽器端只能同源存取。
   # 開發期要讓瀏覽器直接呼叫本服務，才把頁面來源寫進來（或設環境變數
   # ER_SECURITY_CORS_ALLOWED_ORIGINS=http://127.0.0.1:8765）；正式部署留空。

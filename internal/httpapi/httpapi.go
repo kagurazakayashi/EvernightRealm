@@ -102,7 +102,7 @@ func New(cfg *config.Config, version string, deps Deps) *Server {
 	s.httpSrv = &http.Server{
 		Addr:    cfg.Server.Listen,
 		Handler: s.Handler(),
-		// 連線層期限（STEP-034）：標頭、整個請求讀取、回應寫入與 keep-alive 空閒。
+		// 連線層期限：標頭、整個請求讀取、回應寫入與 keep-alive 空閒。
 		ReadHeaderTimeout: time.Duration(cfg.Server.ReadHeaderTimeoutMS) * time.Millisecond,
 		ReadTimeout:       time.Duration(cfg.Server.ReadTimeoutMS) * time.Millisecond,
 		WriteTimeout:      time.Duration(cfg.Server.WriteTimeoutMS) * time.Millisecond,

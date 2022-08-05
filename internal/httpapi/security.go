@@ -9,7 +9,7 @@ import (
 
 // 內建安全回應頭策略（SEC-007）：組態留空時即採用這些值，也是本專案的安全基線。
 //
-// defaultCSP 依 STEP-035 決策與本機 Flutter Web 相容：
+// defaultCSP 的設計同時兼顧安全基線與本機 Flutter Web 相容：
 //   - script-src 'self' 'wasm-unsafe-eval'：只載入同源指令碼；CanvasKit 為 WebAssembly，
 //     需允許 WASM 編譯，但不放 'unsafe-eval'（故仍禁止字串動態執行）。
 //   - style-src 'self' 'unsafe-inline'：Flutter Web 會注入行內樣式（文字編輯、語意樹）。

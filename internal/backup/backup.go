@@ -10,7 +10,7 @@
 // 同條邊界（DEC-016、DEC-033）。
 //
 // 本步不做：口令加密（§24.3）、自動排程與保留份數淘汰（OPS-007 為 P1）、
-// 恢復入口（STEP-069）、下載到其他機器。
+// 恢復入口、下載到其他機器。
 package backup
 
 import (
@@ -35,7 +35,7 @@ import (
 
 // FormatVersion 是備份包的內容格式版本。
 //
-// 讀取端（STEP-069 的恢復入口）依這個數字決定怎麼解析，因此欄位語意變動要在這裡遞增，
+// 讀取端（恢復入口）依這個數字決定怎麼解析，因此欄位語意變動要在這裡遞增，
 // 而不是靠「大概還讀得開」。目前為 1。
 const FormatVersion = 1
 
@@ -154,7 +154,7 @@ type DiskFact struct {
 
 // Manifest 是一份備份包的自述檔內容（寫成包內的 manifest.json）。
 //
-// 欄位一律 snake_case（與對外 JSON 同一規則）。這個結構是 STEP-069 恢復入口的解析依據，
+// 欄位一律 snake_case（與對外 JSON 同一規則）。這個結構是恢復入口的解析依據，
 // 因此只增不刪；要改語意就遞增 FormatVersion。
 type Manifest struct {
 	// FormatVersion 是內容格式版本。
@@ -216,7 +216,7 @@ func Create(ctx context.Context, opts Options) (Result, error) {
 		return Result{}, fmt.Errorf("backup: 磁碟空間判定失敗: %w", err)
 	}
 	// 不足與查不出來都拒絕：備份是主動運維動作，失敗的代價是一行錯誤加一次重跑，
-	// 而「寫到一半沒空間」的代價是一份看起來像備份的垃圾。這裡比 STEP-067 的寫入門嚴，
+	// 而「寫到一半沒空間」的代價是一份看起來像備份的垃圾。這裡比線上請求的寫入門嚴，
 	// 是因為那道門護的是線上請求能不能繼續被服務，這一層護的是這份檔能不能整份恢復。
 	if verdict.Status != disk.StatusOK {
 		return Result{}, fmt.Errorf("%w（%s）：%s", ErrSpace, verdict.Status.String(), verdict.Reason)

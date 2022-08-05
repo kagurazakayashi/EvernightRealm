@@ -67,7 +67,7 @@ func waitForListenAddr(t *testing.T, out *syncBuffer, runErr <-chan error) strin
 func TestRunStopsGracefullyOnContextCancel(t *testing.T) {
 	// 以獨立資料目錄與系統指派埠啟動，確認：服務可用 → 取消 context（等同 Ctrl+C）
 	// → run 回傳 nil（正常停止）→ 監聽資源已釋放。
-	dir := t.TempDir()
+	dir := retryTempDir(t)
 
 	// 先取一個本機可用連接埠後釋放（組態要求明確埠號，不接受 0）。
 	probe, err := net.Listen("tcp", "127.0.0.1:0")
@@ -129,7 +129,7 @@ func TestRunStopsGracefullyOnContextCancel(t *testing.T) {
 // 啟動後資料庫就緒且鎖由服務持有（第二個寫入者被拒），
 // 停止後鎖釋放（資料庫可再次開啟）。
 func TestRunOwnsDatabaseLockUntilStop(t *testing.T) {
-	dir := t.TempDir()
+	dir := retryTempDir(t)
 	dbPath := filepath.Join(dir, "evernight.db")
 	ctx := context.Background()
 
@@ -189,7 +189,7 @@ func TestRunOwnsDatabaseLockUntilStop(t *testing.T) {
 // TestRunAppliesMigrationsBeforeListening 驗證啟動流程會先完成遷移：
 // 啟動輸出帶遷移摘要，且資料庫已建立首支遷移的結構。
 func TestRunAppliesMigrationsBeforeListening(t *testing.T) {
-	dir := t.TempDir()
+	dir := retryTempDir(t)
 	dbPath := filepath.Join(dir, "evernight.db")
 
 	probe, err := net.Listen("tcp", "127.0.0.1:0")
@@ -243,7 +243,7 @@ func TestRunAppliesMigrationsBeforeListening(t *testing.T) {
 // TestMigrateSubcommandAppliesAndIsIdempotent 驗證 migrate 子命令：
 // 首次套用遷移、再次執行為冪等且不重複套用。
 func TestMigrateSubcommandAppliesAndIsIdempotent(t *testing.T) {
-	dir := t.TempDir()
+	dir := retryTempDir(t)
 	ctx := context.Background()
 
 	first := &syncBuffer{}
@@ -287,7 +287,7 @@ func TestMigrateSubcommandAppliesAndIsIdempotent(t *testing.T) {
 
 // TestMigrateDryRunDoesNotChangeDatabase 驗證檢查模式：回報待套用清單但不建立版本表與結構。
 func TestMigrateDryRunDoesNotChangeDatabase(t *testing.T) {
-	dir := t.TempDir()
+	dir := retryTempDir(t)
 	ctx := context.Background()
 
 	known, err := migrate.Load()
@@ -325,7 +325,7 @@ func TestMigrateDryRunDoesNotChangeDatabase(t *testing.T) {
 
 // TestRunReportsConfiguredTransactionPolicy 驗證交易邊界組態實際接到資料庫並出現在啟動輸出。
 func TestRunReportsConfiguredTransactionPolicy(t *testing.T) {
-	dir := t.TempDir()
+	dir := retryTempDir(t)
 	configPath := filepath.Join(dir, "config.yaml")
 	if err := os.WriteFile(configPath, []byte(`
 database:
@@ -411,7 +411,7 @@ func TestTxPolicyFromConfig(t *testing.T) {
 
 // TestMigrateRejectedWhileDatabaseInUse 驗證服務（或另一程序）持有單寫入實例鎖時無法執行遷移。
 func TestMigrateRejectedWhileDatabaseInUse(t *testing.T) {
-	dir := t.TempDir()
+	dir := retryTempDir(t)
 	ctx := context.Background()
 
 	holder, err := database.Open(ctx, database.Options{Path: filepath.Join(dir, "evernight.db"), BusyTimeout: time.Second})
@@ -455,7 +455,7 @@ func TestEndpointsNoteFollowsWebStatus(t *testing.T) {
 
 // TestRunReportsWebBundle 驗證啟動輸出把內嵌 Web 產物的狀態講清楚，且與判定結果同源。
 func TestRunReportsWebBundle(t *testing.T) {
-	dir := t.TempDir()
+	dir := retryTempDir(t)
 	probe, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("取測試連接埠失敗: %v", err)
@@ -512,7 +512,7 @@ func TestRunReportsWebBundle(t *testing.T) {
 // 產物是否內取決於工作樹裡有沒有跑過前端建置，因此兩種結果都要能被接受：
 // 可用時 / 必須回 HTML 外殼，不可用時 / 必須回統一 404 信封——兩者都不該是第三種答案。
 func TestRunServesEmbeddedWebWhenAvailable(t *testing.T) {
-	dir := t.TempDir()
+	dir := retryTempDir(t)
 	probe, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("取測試連接埠失敗: %v", err)
@@ -585,10 +585,10 @@ func TestRunServesEmbeddedWebWhenAvailable(t *testing.T) {
 // TestRunWritesStructuredRunLog 驗證「執行期間真的往日誌檔案寫結構化記錄」：
 // 啟動、每一個請求、停止都留痕，且日誌檔案落在資料目錄的 logs/ 之下。
 //
-// 這條是 STEP-063 接線的收口證據：單測裡 httpapi 的記錄出口是注入的緩衝區，
+// 這條是啟動接線的收口證據：單測裡 httpapi 的記錄出口是注入的緩衝區，
 // 只有走完整啟動流程才證明執行檔自己把出口接上了。
 func TestRunWritesStructuredRunLog(t *testing.T) {
-	dir := t.TempDir()
+	dir := retryTempDir(t)
 	probe, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("取測試連接埠失敗: %v", err)
@@ -702,7 +702,7 @@ func TestRunWritesStructuredRunLog(t *testing.T) {
 // TestMigrateWritesRunLog 驗證遷移子命令也留痕：它的報告走 stdout，
 // 但成敗必須在日誌檔案裡查得到（一次性命令的終端輸出會隨視窗關閉而消失）。
 func TestMigrateWritesRunLog(t *testing.T) {
-	dir := t.TempDir()
+	dir := retryTempDir(t)
 	var out syncBuffer
 	if err := Migrate(context.Background(), []string{"--data-dir", dir}, &out); err != nil {
 		t.Fatalf("migrate 失敗：%v（輸出：%s）", err, out.String())

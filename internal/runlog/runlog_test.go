@@ -25,7 +25,7 @@ func newTestLogger(t *testing.T, level string) (*Logger, *bytes.Buffer) {
 	t.Helper()
 	var stderr bytes.Buffer
 	logger, err := Open(Options{
-		Dir:    filepath.Join(t.TempDir(), "logs"),
+		Dir:    filepath.Join(retryTempDir(t), "logs"),
 		Level:  level,
 		Stderr: &stderr,
 		Now:    fixedClock,
@@ -327,7 +327,7 @@ func TestWithAttrsAndGroupOnRedactingChain(t *testing.T) {
 }
 
 func TestOpenRejectsBadInput(t *testing.T) {
-	dir := t.TempDir()
+	dir := retryTempDir(t)
 	blocker := filepath.Join(dir, "not-a-dir")
 	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
@@ -365,7 +365,7 @@ func TestOpenRejectsBadInput(t *testing.T) {
 }
 
 func TestOpenAppendsAcrossReopenAndClosesIdempotently(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "logs")
+	dir := filepath.Join(retryTempDir(t), "logs")
 	first, err := Open(Options{Dir: dir, Level: "info", Stderr: io.Discard, Now: fixedClock})
 	if err != nil {
 		t.Fatal(err)

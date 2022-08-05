@@ -81,7 +81,7 @@ func TestLogFileNameShape(t *testing.T) {
 
 // TestRolloverOnCalendarDayChange 驗證跨日那條記錄把檔案切過去，而不是等重啟。
 func TestRolloverOnCalendarDayChange(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "logs")
+	dir := filepath.Join(retryTempDir(t), "logs")
 	clock := &testClock{at: time.Date(2026, 9, 26, 15, 0, 0, 0, time.UTC)} // +08:00 → 23:00，仍屬 26 日
 	var stderr bytes.Buffer
 	lg := newRotatingLogger(t, dir, "run", 0, clock, &stderr)
@@ -130,7 +130,7 @@ func TestRolloverOnCalendarDayChange(t *testing.T) {
 // 這條就是「不清理永久審計帳本」的落點：普通日誌可淘汰，
 // 同一目錄裡的審計檔、別人的檔、甚至目錄本身，一個位元組都不該被碰。
 func TestRetentionDeletesOnlyOwnDatedFiles(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "logs")
+	dir := filepath.Join(retryTempDir(t), "logs")
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		t.Fatal(err)
 	}
@@ -200,7 +200,7 @@ func TestRetentionDeletesOnlyOwnDatedFiles(t *testing.T) {
 // TestRetentionUnlimitedDeletesNothing 驗證預設值（0）真的不自動刪任何東西——
 // 這是部署者選定的取向，測試要能把「不小心設成 0 就全刪光」這種反轉擋住。
 func TestRetentionUnlimitedDeletesNothing(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "logs")
+	dir := filepath.Join(retryTempDir(t), "logs")
 	old := filepath.Join(dir, "run.2010-01-01.log")
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		t.Fatal(err)
@@ -227,7 +227,7 @@ func TestRetentionUnlimitedDeletesNothing(t *testing.T) {
 // 製造方式：把「明天那份檔案」的位置先佔成一個目錄——OpenFile 必定失敗。
 // 這時正確的做法是繼續寫在還開著的檔案裡並回報，而不是讓記錄整條消失。
 func TestRolloverFailureKeepsWriting(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "logs")
+	dir := filepath.Join(retryTempDir(t), "logs")
 	clock := &testClock{at: mustDate(t, "2026-09-26")}
 	var stderr bytes.Buffer
 	lg := newRotatingLogger(t, dir, "run", 0, clock, &stderr)
@@ -256,7 +256,7 @@ func TestRolloverFailureKeepsWriting(t *testing.T) {
 
 // TestRotationConcurrentWritesKeepEveryLine 驗證跨日與併發同時發生時每條記錄都落了地。
 func TestRotationConcurrentWritesKeepEveryLine(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "logs")
+	dir := filepath.Join(retryTempDir(t), "logs")
 	clock := &testClock{at: mustDate(t, "2026-09-26")}
 	var stderr bytes.Buffer
 	lg := newRotatingLogger(t, dir, "run", 0, clock, &stderr)
@@ -292,7 +292,7 @@ func TestRotationConcurrentWritesKeepEveryLine(t *testing.T) {
 
 // TestOpenRejectsUnsafePrefix 驗證前綴直接在 runlog 這層被擋住（不依賴呼叫端先做組態校驗）。
 func TestOpenRejectsUnsafePrefix(t *testing.T) {
-	dir := t.TempDir()
+	dir := retryTempDir(t)
 	cases := []struct {
 		name   string
 		prefix string
@@ -335,7 +335,7 @@ func TestOpenRejectsUnsafePrefix(t *testing.T) {
 }
 
 func TestDaySinkCloseIsIdempotent(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "logs")
+	dir := filepath.Join(retryTempDir(t), "logs")
 	clock := &testClock{at: mustDate(t, "2026-09-26")}
 	lg := newRotatingLogger(t, dir, "run", 0, clock, io.Discard)
 	lg.Info("一條")

@@ -37,7 +37,7 @@ func createForeignDatabase(t *testing.T, path string, statements ...string) {
 // 會在別人的資料庫裡建立本服務的資料表（實證見 tools/verify/step040-preflight）。
 func TestApplyRefusesUnknownNonEmptyDatabase(t *testing.T) {
 	ctx := context.Background()
-	path := filepath.Join(t.TempDir(), "evernight.db")
+	path := filepath.Join(retryTempDir(t), "evernight.db")
 	createForeignDatabase(t, path,
 		"CREATE TABLE someone_elses (id INTEGER PRIMARY KEY, note TEXT)",
 		"INSERT INTO someone_elses (id, note) VALUES (1, '別人的資料')")
@@ -84,7 +84,7 @@ func TestApplyRefusesUnknownNonEmptyDatabase(t *testing.T) {
 // 標記與版本記錄在同一交易內寫入，供開庫前預檢在尚未接觸資料庫時判定版本。
 func TestApplyRecordsSchemaVersionInHeader(t *testing.T) {
 	ctx := context.Background()
-	path := filepath.Join(t.TempDir(), "evernight.db")
+	path := filepath.Join(retryTempDir(t), "evernight.db")
 	db := mustOpen(t, path)
 	defer func() { _ = db.Close() }()
 
@@ -129,7 +129,7 @@ func TestApplyRecordsSchemaVersionInHeader(t *testing.T) {
 // TestDatabaseOpenAcceptsMarkedDatabaseAfterMigration 驗證遷移後再次開庫（含檔頭預檢）不受影響。
 func TestDatabaseOpenAcceptsMarkedDatabaseAfterMigration(t *testing.T) {
 	ctx := context.Background()
-	path := filepath.Join(t.TempDir(), "evernight.db")
+	path := filepath.Join(retryTempDir(t), "evernight.db")
 	db := mustOpen(t, path)
 	if _, err := Apply(ctx, db.SQL(), Options{}); err != nil {
 		t.Fatalf("遷移失敗: %v", err)

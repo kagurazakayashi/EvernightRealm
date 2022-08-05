@@ -12,7 +12,7 @@ import (
 // openTestDB 於獨立暫存目錄開啟測試資料庫，測試結束時自動關閉。
 func openTestDB(t *testing.T, busyTimeout time.Duration) *DB {
 	t.Helper()
-	dir := t.TempDir()
+	dir := retryTempDir(t)
 	db, err := Open(context.Background(), Options{
 		Path:        filepath.Join(dir, "evernight.db"),
 		BusyTimeout: busyTimeout,
@@ -83,7 +83,7 @@ func TestOpenAppliesBaselinePragmas(t *testing.T) {
 
 func TestReopenReadsDataAfterRestart(t *testing.T) {
 	// 驗收：重啟可讀取資料。寫入 → 關閉（等同程序結束）→ 重新開啟 → 讀回同一筆資料。
-	dir := t.TempDir()
+	dir := retryTempDir(t)
 	path := filepath.Join(dir, "evernight.db")
 	ctx := context.Background()
 
@@ -120,7 +120,7 @@ func TestReopenReadsDataAfterRestart(t *testing.T) {
 }
 
 func TestForeignKeyEnforced(t *testing.T) {
-	// 外鍵預設關閉（STEP-024 探針），必須由 DSN 明確開啟並實際生效。
+	// 外鍵預設關閉（探針 tools/verify/step024-sqlite-wal 實證），必須由 DSN 明確開啟並實際生效。
 	db := openTestDB(t, time.Second)
 	ctx := context.Background()
 
@@ -142,7 +142,7 @@ func TestForeignKeyEnforced(t *testing.T) {
 
 func TestSecondWriterRejected(t *testing.T) {
 	// 驗收：單寫入實例約束有驗證。同一資料庫的第二個服務程序必須啟動失敗。
-	dir := t.TempDir()
+	dir := retryTempDir(t)
 	path := filepath.Join(dir, "evernight.db")
 	ctx := context.Background()
 
@@ -177,7 +177,7 @@ func TestSecondWriterRejected(t *testing.T) {
 func TestLockFileHoldsOwnerInfo(t *testing.T) {
 	// 鎖檔記錄持有者 pid 供人工診斷；Windows 的位元組範圍鎖對其他控制代碼是強制的，
 	// 因此須在釋放鎖後才讀取（也順帶驗證鎖確實已釋放）。
-	dir := t.TempDir()
+	dir := retryTempDir(t)
 	db, err := Open(context.Background(), Options{
 		Path:        filepath.Join(dir, "evernight.db"),
 		BusyTimeout: time.Second,
@@ -201,7 +201,7 @@ func TestLockFileHoldsOwnerInfo(t *testing.T) {
 
 func TestSpecialCharactersInPath(t *testing.T) {
 	// 資料目錄可能含空格、中文與 '%'、'#'；DSN 的 URI 編碼必須讓實際檔案落在預期路徑。
-	dir := filepath.Join(t.TempDir(), "資料 目錄", "pct%dir", "hash#tag")
+	dir := filepath.Join(retryTempDir(t), "資料 目錄", "pct%dir", "hash#tag")
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		t.Fatalf("建立測試目錄失敗: %v", err)
 	}
@@ -223,7 +223,7 @@ func TestSpecialCharactersInPath(t *testing.T) {
 }
 
 func TestCloseIsIdempotentAndReleasesLock(t *testing.T) {
-	dir := t.TempDir()
+	dir := retryTempDir(t)
 	path := filepath.Join(dir, "evernight.db")
 	ctx := context.Background()
 

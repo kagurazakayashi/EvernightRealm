@@ -1,5 +1,5 @@
 name: step025_id_roundtrip
-description: UUIDv7/大整数往返验证探针（可丢弃原型，不入正式包）
+description: UUIDv7/大整數往返驗證探針（可丟棄原型，不入正式包）
 publish_to: none
 environment:
   sdk: '>=3.0.0 <4.0.0'

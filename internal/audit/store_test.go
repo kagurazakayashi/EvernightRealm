@@ -27,7 +27,7 @@ func newTestStore(t *testing.T) (*Store, *database.DB, time.Time) {
 	t.Helper()
 	at := time.Date(2026, 9, 26, 12, 34, 56, 789_000_000, time.UTC)
 	db, err := database.Open(context.Background(), database.Options{
-		Path:        filepath.Join(t.TempDir(), "evernight.db"),
+		Path:        filepath.Join(retryTempDir(t), "evernight.db"),
 		BusyTimeout: time.Second,
 	})
 	if err != nil {

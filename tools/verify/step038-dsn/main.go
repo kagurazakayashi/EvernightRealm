@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/kagurazakayashi/EvernightRealm/internal/devkit"
 	_ "modernc.org/sqlite"
 )
 
@@ -87,7 +88,14 @@ func main() {
 		fmt.Println("建立暫存目錄失敗:", err)
 		os.Exit(1)
 	}
-	defer os.RemoveAll(root)
+	defer func() {
+		// 清理失敗必須單獨報告並讓探針以非零碼結束：樣本全過但目錄殘留時
+		// 不能假裝清理成功；原本已失敗的路徑在此之前已由 os.Exit 定案退出碼。
+		if err := devkit.RemoveAllWithRetry(root); err != nil {
+			fmt.Printf("暫存目錄清理失敗（殘留：%s）：%v\n", root, err)
+			os.Exit(1)
+		}
+	}()
 
 	// 四種路徑樣本：純 ASCII、含空格、含中文、含 '%' 與 '#'。
 	cases := []struct {

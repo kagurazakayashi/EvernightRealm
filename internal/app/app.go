@@ -31,7 +31,8 @@ const Version = "0.1.0-dev"
 // Run 啟動服務端，阻塞至收到停止信號（Ctrl+C、SIGTERM）或發生錯誤。
 //
 // 第一個參數為 `migrate` 時改執行遷移子命令（見 Migrate），為 `backup` 時改執行備份子命令
-// （見 Backup）；兩者都不啟動 HTTP 服務，也都不佔用連接埠。
+// （見 Backup），為 `restore` 時改執行恢復子命令（見 Restore）；
+// 三者都不啟動 HTTP 服務，也都不佔用連接埠。
 //
 // ctx 為服務的根 context，訊號取消即代表停止請求；日後的背景任務
 // （保留期清理、備份排程等）皆須以此 ctx 為取消來源並在返回前結束，
@@ -45,6 +46,8 @@ func Run(args []string) error {
 			return Migrate(ctx, args[1:], os.Stdout)
 		case "backup":
 			return Backup(ctx, args[1:], os.Stdout)
+		case "restore":
+			return Restore(ctx, args[1:], os.Stdout)
 		}
 	}
 	return run(ctx, releaseSignals, args, os.Stdout, os.Stderr)
@@ -134,7 +137,7 @@ func diskMonitor(cfg config.Config) *disk.Monitor {
 // diskMonitorAt 以同一組閾值建立針對特定目錄所在卷的監測器。
 //
 // 存在的理由只有一個：備份包寫到哪個卷是由 backups 決定的，而預設值以外的寫法（含環境變數
-// ER_BACKUPS 指到別顆盤）很常见——拿資料卷的剩餘空間去判定備份卷會不會寫得下，判定是錯的。
+// ER_BACKUPS 指到別顆盤）很常見——拿資料卷的剩餘空間去判定備份卷會不會寫得下，判定是錯的。
 func diskMonitorAt(path string, cfg config.Config) *disk.Monitor {
 	return disk.New(path, disk.Thresholds{
 		MinFreeBytes:   uint64(maxInt64(cfg.Disk.MinFreeBytes, 0)),
@@ -371,7 +374,7 @@ func openDatabase(ctx context.Context, cfg config.Config, lg *runlog.Logger, spa
 	return db, nil
 }
 
-// txPolicy 依組態建立交易策略（STEP-041）。
+// txPolicy 依組態建立交易策略。
 //
 // 組態值已在 config.Validate 限定為合法枚舉，這裡的解析錯誤屬防禦性檢查
 // （兩處清單漂移時立即在啟動階段暴露，而不是默默採用預設值）。

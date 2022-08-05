@@ -44,7 +44,7 @@ type Options struct {
 	KnownSchemaVersion int
 	// Preflight 為開庫前預檢模式；零值為 PreflightHeader。
 	Preflight Preflight
-	// TxPolicy 為交易邊界的預設行為（STEP-041）；
+	// TxPolicy 為交易邊界的預設行為；
 	// 零值為 BeginImmediate + NestedReject + 不重試 + 無期限 + 不在交易邊界複驗 schema。
 	TxPolicy TxPolicy
 	// WriteGuard 在每個寫入交易 BEGIN 之前呼叫，回傳錯誤即不開始交易。
@@ -226,7 +226,7 @@ func (d *DB) verify(ctx context.Context, busyTimeout time.Duration) (string, err
 // dsn 依 DEC-002 產生連線字串：file: + URL 編碼路徑 + PRAGMA 參數組。
 //
 // 路徑必須逐段 URL 編碼：以 "file:" 開頭的 DSN 會被 SQLite 當成 URI 解析並做 %XX 解碼，
-// 未編碼的 '%' 與 '#' 會改變實際開啟的檔案（STEP-038 探針 tools/verify/step038-dsn 實證）。
+// 未編碼的 '%' 與 '#' 會改變實際開啟的檔案（探針 tools/verify/step038-dsn 實證）。
 // 參數值為套件自產的固定字串，故直接拼接而不做查詢編碼，以維持與 DEC-002 一致的可讀形式。
 //
 // _txlock 由驅動在每次 BeginTx 時採用（實證：BEGIN IMMEDIATE 使忙鎖失敗點固定於

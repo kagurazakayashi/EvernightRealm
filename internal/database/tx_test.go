@@ -12,13 +12,13 @@ import (
 )
 
 // 編譯期契約：*sql.DB（autocommit）與 *Tx（交易內）皆滿足 Querier，
-// 因此同一組仓储方法可同時服務兩種情境，並可在同一交易內組合多個仓储。
+// 因此同一組倉儲方法可同時服務兩種情境，並可在同一交易內組合多個倉儲。
 var (
 	_ Querier = (*sql.DB)(nil)
 	_ Querier = (*Tx)(nil)
 )
 
-// 測試用仓储：只依賴 Querier，不綁定 *sql.DB 或 *Tx。
+// 測試用倉儲：只依賴 Querier，不綁定 *sql.DB 或 *Tx。
 type ledgerRepo struct{ q Querier }
 
 // Insert 新增一筆金額。
@@ -71,7 +71,7 @@ func (r noteRepo) Count(ctx context.Context) (int, error) {
 func openTxDB(t *testing.T, policy TxPolicy, busyTimeout time.Duration, knownVersion int) *DB {
 	t.Helper()
 	db, err := Open(context.Background(), Options{
-		Path:               filepath.Join(t.TempDir(), "evernight.db"),
+		Path:               filepath.Join(retryTempDir(t), "evernight.db"),
 		BusyTimeout:        busyTimeout,
 		KnownSchemaVersion: knownVersion,
 		TxPolicy:           policy,
@@ -125,11 +125,11 @@ func wantAmounts(t *testing.T, ctx context.Context, q Querier, want ...int64) {
 }
 
 func TestInTxCommitsMultipleRepositoriesTogether(t *testing.T) {
-	// 驗收（STEP-041）：服務層能在同一交易內呼叫多個仓储，且提交後外部可見。
+	// 服務層能在同一交易內呼叫多個倉儲，且提交後外部可見。
 	ctx := context.Background()
 	db := openTxDB(t, TxPolicy{Nested: NestedReject}, 2*time.Second, 0)
 
-	// autocommit：同一組仓储方法直接掛在 *sql.DB 上（不需交易）。
+	// autocommit：同一組倉儲方法直接掛在 *sql.DB 上（不需交易）。
 	if err := (ledgerRepo{db.SQL()}).Insert(ctx, 1); err != nil {
 		t.Fatalf("autocommit 寫入失敗: %v", err)
 	}
@@ -139,7 +139,7 @@ func TestInTxCommitsMultipleRepositoriesTogether(t *testing.T) {
 		if err := ledger.Insert(ctx, 10); err != nil {
 			return err
 		}
-		if err := note.Insert(ctx, "同一交易內的兩個仓储"); err != nil {
+		if err := note.Insert(ctx, "同一交易內的兩個倉儲"); err != nil {
 			return err
 		}
 		// 交易內可見彼此尚未提交的變更。
@@ -166,7 +166,7 @@ func TestInTxCommitsMultipleRepositoriesTogether(t *testing.T) {
 }
 
 func TestInTxRollsBackWholeTransactionOnError(t *testing.T) {
-	// 驗收（STEP-041）：回呼回傳錯誤時整體回滾，兩個仓储的寫入一併消失。
+	// 回呼回傳錯誤時整體回滾，兩個倉儲的寫入一併消失。
 	ctx := context.Background()
 	db := openTxDB(t, TxPolicy{Nested: NestedReject}, 2*time.Second, 0)
 	errBoom := errors.New("業務規則不成立")

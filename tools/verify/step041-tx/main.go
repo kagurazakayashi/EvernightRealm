@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kagurazakayashi/EvernightRealm/internal/devkit"
 	"modernc.org/sqlite"
 	sqlite3 "modernc.org/sqlite/lib"
 )
@@ -92,7 +93,15 @@ func main() {
 		fmt.Println("建立暫存目錄失敗：", err)
 		os.Exit(1)
 	}
-	defer func() { _ = os.RemoveAll(dir) }()
+	defer func() {
+		// 清理失敗必須單獨報告並讓探針以非零碼結束：場景全過但目錄殘留時
+		// 不能假裝清理成功；子程序崩潰模擬留下的鎖與句柄釋放有落後，正是
+		// 這道重試要吸收的競爭。原本已失敗的路徑在此之前已由 os.Exit 定案退出碼。
+		if err := devkit.RemoveAllWithRetry(dir); err != nil {
+			fmt.Printf("暫存目錄清理失敗（殘留：%s）：%v\n", dir, err)
+			os.Exit(1)
+		}
+	}()
 	dbPath := filepath.Join(dir, "tx.db")
 
 	setup := mustOpen(dbPath, "")
