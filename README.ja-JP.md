@@ -32,6 +32,14 @@
 
 簡体中文、繁体中文（台湾）、English、日本語。
 
+## ソースからのビルド
+
+Windows 実行ファイルのアイコンは生成されるもので、バージョン管理には含まれません。`cmd/evernight-server/resource_windows_*.syso` は `assets/icons/EvernightRealmBackendRounded.ico` から生成されます。クローン直後はビルドの前に
+
+    python tools/icons/generate_icons.py
+
+を実行してください。実行しないとアイコン無しの実行ファイルができあがりますが、`go build` は何も報告しません。`python tools/icons/generate_icons.py --check` は現状を照合するだけで、何も書き込みません。詳細は `tools/icons/README.md`。
+
 ## ライセンス
 
 Mulan 寛容ライセンス第 2 版（MulanPSL-2.0）。

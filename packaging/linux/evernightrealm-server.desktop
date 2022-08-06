@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=EvernightRealm Server
+Comment=Self-hosted, offline-first server for EvernightRealm
+Comment[zh_CN]=长夜幻境的自架、离线优先服务端
+Comment[zh_TW]=長夜幻境的自架、離線優先伺服端
+Comment[ja]=長夜幻境のセルフホスト型オフライン優先サーバー
+# 圖示名稱必須與 packaging/linux/icons/hicolor/<尺寸>/apps/<應用程式 ID>.png 一致；
+# 那組 PNG 由 tools/icons/generate_icons.py 產生（不進版本庫）。
+Icon=moe.yashi.evernightrealm.server
+Exec=evernight-server
+Terminal=true
+Categories=Network;

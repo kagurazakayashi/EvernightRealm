@@ -95,3 +95,20 @@ node_modules/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+
+# ========== 圖示產物（本項目補充） ==========
+# 進版本庫的只有四張來源圖（assets/icons/ 下的 Rounded／Square PNG 與 ico／icns）
+# 與指向它們的黏著設定檔；其餘圖檔全部是從來源圖推導出來的，一律不進版本庫。
+# 前端（EvernightRealmAPP 子模組）的圖示由該倉庫自己的 tools/icons/generate_icons.py 負責，與本倉庫無關。
+#
+# 編譯前若發現圖示檔缺失（乾淨 clone 或換機器），先在後端倉庫根執行：
+#     python tools/icons/generate_icons.py
+# 否則 Windows 執行檔不會帶圖示（連結器不報錯，屬靜默缺失）。核對現況（不寫入）：
+#     python tools/icons/generate_icons.py --check
+
+# Windows 內嵌圖示：Go 連結器自動連結套件目錄下的 .syso 產物
+/cmd/evernight-server/resource_windows_*.syso
+
+# 多尺寸展示圖、店鋪素材與 Linux 圖示主題（非編譯必需，需要時再產生）
+/assets/icons/generated/
+/packaging/linux/icons/

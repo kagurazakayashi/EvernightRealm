@@ -32,6 +32,14 @@
 
 簡體中文、繁體中文（臺灣）、English、日本語。
 
+## 從原始碼建置
+
+Windows 執行檔的圖示是產生出來的、不納入版本控制：`cmd/evernight-server/resource_windows_*.syso` 由 `assets/icons/EvernightRealmBackendRounded.ico` 推導。全新複製的倉庫在編譯前先執行
+
+    python tools/icons/generate_icons.py
+
+否則產生的執行檔沒有圖示，而 `go build` 不會報錯。`python tools/icons/generate_icons.py --check` 只核對現況，不寫入任何檔案；詳見 `tools/icons/README.md`。
+
 ## 許可證
 
 Mulan 寬鬆許可證第二版（MulanPSL-2.0）。

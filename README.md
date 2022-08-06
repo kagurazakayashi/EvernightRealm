@@ -32,6 +32,14 @@ The server also ships a maintenance command that produces a **consistent backup 
 
 The interface will be available in Simplified Chinese, Traditional Chinese (Taiwan), English and Japanese.
 
+## Building from source
+
+The Windows executable carries an icon that is generated, not committed: `cmd/evernight-server/resource_windows_*.syso` is derived from `assets/icons/EvernightRealmBackendRounded.ico`. On a fresh clone, run
+
+    python tools/icons/generate_icons.py
+
+before building, otherwise the executable is produced without an icon and `go build` reports nothing. `python tools/icons/generate_icons.py --check` reports the current state without writing anything; see `tools/icons/README.md`.
+
 ## License
 
 Mulan Permissive Software License, Version 2 (MulanPSL-2.0).
