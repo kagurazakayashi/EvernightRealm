@@ -18,6 +18,7 @@ import (
 	"github.com/kagurazakayashi/EvernightRealm/internal/audit"
 	"github.com/kagurazakayashi/EvernightRealm/internal/backup"
 	"github.com/kagurazakayashi/EvernightRealm/internal/database"
+	"github.com/kagurazakayashi/EvernightRealm/internal/database/migrate"
 	"github.com/kagurazakayashi/EvernightRealm/internal/idgen"
 	"github.com/kagurazakayashi/EvernightRealm/internal/restore"
 	"github.com/kagurazakayashi/EvernightRealm/internal/timeutil"
@@ -192,8 +193,13 @@ func TestRestoreSubcommandRoundTrip(t *testing.T) {
 	}
 
 	// 結構版本與清單相同、審計表恰好比清單多這一筆。
-	if got := countRows(t, filepath.Join(target, "evernight.db"), "schema_migrations"); got != 2 {
-		t.Errorf("schema_migrations 列數 %d，清單記 %d", got, 2)
+	// 行數取自內嵌遷移集的最高版本（版本連續 1..N），新增遷移時不必回改這裡。
+	maxVersion, err := migrate.MaxVersion()
+	if err != nil {
+		t.Fatalf("讀取遷移集最高版本失敗: %v", err)
+	}
+	if got := countRows(t, filepath.Join(target, "evernight.db"), "schema_migrations"); got != maxVersion {
+		t.Errorf("schema_migrations 列數 %d，遷移集記 %d", got, maxVersion)
 	}
 	manifestRootAudit := 0
 	for _, item := range manifest.Database.Tables {
