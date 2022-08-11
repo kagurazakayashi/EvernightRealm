@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kagurazakayashi/EvernightRealm/internal/credential"
 	"gopkg.in/yaml.v3"
 )
 
@@ -151,10 +152,80 @@ type SecurityConfig struct {
 	// Root 憑據（Argon2id 雜湊）僅存於資料目錄 config.yaml；
 	// Redacted() 與所有日誌永不輸出其明文。
 	RootPasswordHash string `yaml:"root_password_hash"`
+	// Hashing 是新產生憑據的 Argon2id 參數檔（Root 與普通帳戶共用同一檔）。
+	Hashing HashingConfig `yaml:"hashing"`
 	// Headers 為 HTTP 安全回應頭。
 	Headers SecurityHeadersConfig `yaml:"headers"`
 	// CORS 為跨來源存取策略；預設不開放任何來源。
 	CORS CORSConfig `yaml:"cors"`
+}
+
+// HashingConfig 為憑據雜湊的參數策略（新產生時生效）。
+//
+// 語意（用戶決定）：生產用最低推薦檔是預設，但各欄可在組態檔覆蓋——
+// 欄位留 0（或整段缺省）即沿用該欄的生產預設值，不引入「隱式半自訂檔」的歧義：
+// 解析後的最終檔必須整體通過 credential.Params 的區間校驗。
+//
+// 只影響之後新產生的憑據；既有憑據（Root 雜湊、帳戶 password_hash）
+// 按編碼內自帶參數校驗，換檔不會让它们突然失效。「是否該順手升級某份既有憑據」
+// 由 internal/credential 的 NeedsUpgrade 判定，屬登入路徑的未來工作。
+type HashingConfig struct {
+	// MemoryKiB 是記憶體成本（KiB）；0 表示沿用預設。
+	MemoryKiB int `yaml:"memory_kb"`
+	// TimeCost 是時間成本（遍數）；0 表示沿用預設。
+	TimeCost int `yaml:"time_cost"`
+	// Parallelism 是並行度；0 表示沿用預設。
+	Parallelism int `yaml:"parallelism"`
+	// KeyLength 是摘要輸出長度（位元組）；0 表示沿用預設。
+	KeyLength int `yaml:"key_length"`
+}
+
+// Params 把組態解析為 credential.Params：0 欄位回落生產預設檔對應欄位。
+//
+// 區間檢查在轉 uint 之前完成，超大正數與負數都在此拒絕而不是繞成小值；
+// 錯誤訊息只含欄位名與數值（參數非秘密），不含任何憑據材料。
+func (h HashingConfig) Params() (credential.Params, error) {
+	out := credential.ProductionParams
+	pairs := []struct {
+		name   string
+		src    int
+		lo, hi int64
+		set    func(uint32)
+	}{
+		{"security.hashing.memory_kb", h.MemoryKiB, credential.MinMemoryKiB, credential.MaxMemoryKiB,
+			func(v uint32) { out.MemoryKiB = v }},
+		{"security.hashing.time_cost", h.TimeCost, credential.MinTimeCost, credential.MaxTimeCost,
+			func(v uint32) { out.TimeCost = v }},
+		{"security.hashing.parallelism", h.Parallelism, credential.MinParallelism, credential.MaxParallelism,
+			func(v uint32) { out.Parallelism = uint8(v) }},
+		{"security.hashing.key_length", h.KeyLength, credential.MinKeyLength, credential.MaxKeyLength,
+			func(v uint32) { out.KeyLength = v }},
+	}
+	for _, f := range pairs {
+		if f.src == 0 {
+			continue // 沿用預設欄位值。
+		}
+		if int64(f.src) < f.lo || int64(f.src) > f.hi {
+			return credential.Params{}, fmt.Errorf(
+				"config: %s 需為 0（沿用預設）或 %d..%d，實際為 %d", f.name, f.lo, f.hi, f.src)
+		}
+		f.set(uint32(f.src))
+	}
+	if err := out.Validate(); err != nil {
+		return credential.Params{}, fmt.Errorf("config: security.hashing 參數組合無效: %w", err)
+	}
+	return out, nil
+}
+
+// summary 回傳雜湊參數檔在啟動摘要裡的樣子。參數不是秘密，直接實值輸出；
+// 尚未通過校驗的組合（啟動會失敗）退化为顯示原始配置值，不在此处報錯。
+func (h HashingConfig) summary() string {
+	p, err := h.Params()
+	if err != nil {
+		return fmt.Sprintf("無效組合(m=%d,t=%d,p=%d,keylen=%d)",
+			h.MemoryKiB, h.TimeCost, h.Parallelism, h.KeyLength)
+	}
+	return fmt.Sprintf("m=%d,t=%d,p=%d,keylen=%d", p.MemoryKiB, p.TimeCost, p.Parallelism, p.KeyLength)
 }
 
 // CORSConfig 為跨來源（CORS）策略組態。
@@ -480,6 +551,11 @@ func (c *Config) Validate() error {
 		!strings.HasPrefix(c.Security.RootPasswordHash, "$argon2id$") {
 		return errors.New("config: security.root_password_hash 需為 Argon2id 雜湊（$argon2id$ 前綴）")
 	}
+	// 雜湊參數檔在啟動即整體校驗：把「打錯一個參數導致憑據檔半生不熟」
+	// 關在啟動門外，之後 Hash 路徑拿到的 Params 一定合法。
+	if _, err := c.Security.Hashing.Params(); err != nil {
+		return err
+	}
 
 	// 安全回應頭：Frame 限制正規化為大寫並限枚舉值；
 	// CSP 覆寫必須是有效策略且不得引入 'unsafe-eval'（專案安全基線）。
@@ -739,12 +815,13 @@ func (c Config) DisplayLocation() *time.Location {
 
 // Redacted 回傳組態的脫敏摘要（供啟動日誌），機密欄位一律顯示 [REDACTED]。
 func (c Config) Redacted() string {
-	return fmt.Sprintf("組態摘要：listen=%s data_dir=%s timezone=%s db=%s busy_timeout_ms=%d media=%s documents=%s attachments=%s backups=%s logs_dir=%s logs_level=%s logs_prefix=%s logs_retention_days=%d session_ttl_hours=%d root_password_hash=%s http_timeouts_ms=[read_header=%d read=%d write=%d idle=%d request=%d shutdown=%d] max_body_bytes=%d security_headers=[frame_options=%s csp=%s referrer_policy=%s permissions_policy=%s] cors=[%s] disk=[%s] tx=[begin_mode=%s nested=%s busy_retry_max=%d busy_retry_backoff_ms=%d timeout_ms=%d schema_guard=%s]",
+	return fmt.Sprintf("組態摘要：listen=%s data_dir=%s timezone=%s db=%s busy_timeout_ms=%d media=%s documents=%s attachments=%s backups=%s logs_dir=%s logs_level=%s logs_prefix=%s logs_retention_days=%d session_ttl_hours=%d root_password_hash=%s hashing=[%s] http_timeouts_ms=[read_header=%d read=%d write=%d idle=%d request=%d shutdown=%d] max_body_bytes=%d security_headers=[frame_options=%s csp=%s referrer_policy=%s permissions_policy=%s] cors=[%s] disk=[%s] tx=[begin_mode=%s nested=%s busy_retry_max=%d busy_retry_backoff_ms=%d timeout_ms=%d schema_guard=%s]",
 		c.Server.Listen, c.Server.DataDir, c.Server.DisplayTimezone,
 		c.Database.Path, c.Database.BusyTimeoutMS,
 		c.Media, c.Documents, c.Attachments, c.Backups,
 		c.Logs.Dir, c.Logs.Level, c.Logs.FilePrefix, c.Logs.RetentionDays,
 		c.Security.SessionTTLHours, redact(c.Security.RootPasswordHash),
+		c.Security.Hashing.summary(),
 		c.Server.ReadHeaderTimeoutMS, c.Server.ReadTimeoutMS, c.Server.WriteTimeoutMS,
 		c.Server.IdleTimeoutMS, c.Server.RequestTimeoutMS, c.Server.ShutdownTimeoutMS, c.Server.MaxBodyBytes,
 		orDefault(c.Security.Headers.FrameOptions, "DENY"),
@@ -886,6 +963,10 @@ func applyEnv(cfg *Config) error {
 		{&cfg.Database.Transaction.BusyRetryBackoffMS, "ER_DATABASE_TRANSACTION_BUSY_RETRY_BACKOFF_MS"},
 		{&cfg.Database.Transaction.TimeoutMS, "ER_DATABASE_TRANSACTION_TIMEOUT_MS"},
 		{&cfg.Security.SessionTTLHours, "ER_SECURITY_SESSION_TTL_HOURS"},
+		{&cfg.Security.Hashing.MemoryKiB, "ER_SECURITY_HASHING_MEMORY_KB"},
+		{&cfg.Security.Hashing.TimeCost, "ER_SECURITY_HASHING_TIME_COST"},
+		{&cfg.Security.Hashing.Parallelism, "ER_SECURITY_HASHING_PARALLELISM"},
+		{&cfg.Security.Hashing.KeyLength, "ER_SECURITY_HASHING_KEY_LENGTH"},
 		{&cfg.Logs.RetentionDays, "ER_LOGS_RETENTION_DAYS"},
 		{&cfg.Disk.CheckIntervalMS, "ER_DISK_CHECK_INTERVAL_MS"},
 		{&cfg.Server.ReadHeaderTimeoutMS, "ER_SERVER_READ_HEADER_TIMEOUT_MS"},
@@ -973,6 +1054,15 @@ disk:
 
 security:
   session_ttl_hours: 24
+
+  # 憑據雜湊（Argon2id）參數檔：只在「新產生憑據」時生效，
+  # 既有 Root 雜湊與帳戶雜湊按編碼內自帶參數校驗，換檔不影響登入。
+  # 各欄留 0（或整段不寫）＝沿用生產預設（最低推薦檔：64 MiB、3 遍、4 並行、32B 摘要）。
+  hashing:
+    memory_kb: 0                    # 記憶體成本（KiB）；8192..1048576，0=預設
+    time_cost: 0                    # 時間成本（遍數）；1..32，0=預設
+    parallelism: 0                  # 並行度；1..8，0=預設
+    key_length: 0                   # 摘要長度（位元組）；16..64，0=預設
 
   # HTTP 安全回應頭；留空即用內建預設，只有確實需要時才覆寫。
   # frame_options 可選 DENY | SAMEORIGIN；csp 不得含 'unsafe-eval'。

@@ -9,6 +9,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/kagurazakayashi/EvernightRealm/internal/credential"
 	"github.com/kagurazakayashi/EvernightRealm/internal/runlog"
 )
 
@@ -536,6 +537,76 @@ func TestRedactedNeverLeaksSecret(t *testing.T) {
 	}
 	if !strings.Contains(out, "[REDACTED]") {
 		t.Errorf("Redacted 應顯示 [REDACTED] 標記: %s", out)
+	}
+}
+
+func TestHashingDefaultsResolveToProduction(t *testing.T) {
+	cfg := Default()
+	p, err := cfg.Security.Hashing.Params()
+	if err != nil {
+		t.Fatalf("全零（缺省）參數應解析為生產預設檔: %v", err)
+	}
+	if p != credential.ProductionParams {
+		t.Errorf("缺省應沿用生產檔，實際 %+v", p)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("缺省雜湊檔應通過校驗: %v", err)
+	}
+	if !strings.Contains(cfg.Redacted(), "hashing=[m=65536,t=3,p=4,keylen=32]") {
+		t.Errorf("啟動摘要應標示生效雜湊檔: %s", cfg.Redacted())
+	}
+}
+
+func TestHashingYAMLAndEnvOverride(t *testing.T) {
+	path := writeConfig(t, "security:\n  hashing:\n    time_cost: 4\n")
+	cfg, err := Load(Options{ConfigPath: path})
+	if err != nil {
+		t.Fatalf("Load 失敗: %v", err)
+	}
+	p, err := cfg.Security.Hashing.Params()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.TimeCost != 4 || p.MemoryKiB != credential.ProductionParams.MemoryKiB {
+		t.Errorf("單欄覆蓋應只改該欄，實際 %+v", p)
+	}
+
+	t.Setenv("ER_SECURITY_HASHING_MEMORY_KB", "262144")
+	cfg, err = Load(Options{ConfigPath: path})
+	if err != nil {
+		t.Fatalf("Load 失敗: %v", err)
+	}
+	p, err = cfg.Security.Hashing.Params()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.MemoryKiB != 262144 || p.TimeCost != 4 {
+		t.Errorf("環境變數應覆蓋 yaml 欄位，實際 %+v", p)
+	}
+}
+
+func TestHashingRejectsBadValues(t *testing.T) {
+	cases := []struct {
+		name string
+		set  func(*HashingConfig)
+	}{
+		{"記憶體低於下限", func(h *HashingConfig) { h.MemoryKiB = 4096 }},
+		{"記憶體高於上限", func(h *HashingConfig) { h.MemoryKiB = 2097152 }},
+		{"負數欄位", func(h *HashingConfig) { h.TimeCost = -1 }},
+		{"時間成本越界", func(h *HashingConfig) { h.TimeCost = 33 }},
+		{"並行度越界", func(h *HashingConfig) { h.Parallelism = 9 }},
+		{"摘要長度過短", func(h *HashingConfig) { h.KeyLength = 8 }},
+		{"摘要長度過長", func(h *HashingConfig) { h.KeyLength = 65 }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := Default()
+			tc.set(&cfg.Security.Hashing)
+			err := cfg.Validate()
+			if err == nil || !strings.Contains(err.Error(), "security.hashing") {
+				t.Errorf("應拒絕並指出 security.hashing，實際: %v", err)
+			}
+		})
 	}
 }
 
