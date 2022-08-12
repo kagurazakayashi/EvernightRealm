@@ -5,7 +5,8 @@ package app
 // 結束碼表達成敗），且同樣不開放監聽。
 //
 // 這一條路刻意「只收空目錄」：規格 OPS-008 要求「恢復前自動建立當前狀態的安全備份」，
-// 而本命令沒有先備份誰的能力（能構造「誰恢復的」的那個身份還沒落地，S10 之後才有）。
+// 而本命令沒有先備份誰的能力。受信主體這層已經由 internal/identity 落地，但它對 CLI
+// 只能給出「伺服器自身」這個事實；「是誰下令恢復的」要等 Root 認證路徑（尚未落地）。
 // 與其做一半然後假裝完整，不如把覆蓋這條通路根本不開——
 // 需要覆蓋時，請自己先跑一次 backup，再對那個目錄動手。
 //
@@ -29,6 +30,7 @@ import (
 	"github.com/kagurazakayashi/EvernightRealm/internal/database"
 	"github.com/kagurazakayashi/EvernightRealm/internal/database/migrate"
 	"github.com/kagurazakayashi/EvernightRealm/internal/disk"
+	"github.com/kagurazakayashi/EvernightRealm/internal/identity"
 	"github.com/kagurazakayashi/EvernightRealm/internal/idgen"
 	"github.com/kagurazakayashi/EvernightRealm/internal/restore"
 	"github.com/kagurazakayashi/EvernightRealm/internal/timeutil"
@@ -176,7 +178,11 @@ func appendRestoreAudit(ctx context.Context, cfg config.Config, databasePath str
 		}
 	}()
 
-	record := restoreAuditRecord(manifest, bundle, into)
+	record, err := restoreAuditRecord(manifest, bundle, into)
+	if err != nil {
+		lg.Error("構造恢復審計的主體失敗", "err", err)
+		return idgen.Nil, err
+	}
 	store := audit.NewStore(timeutil.System())
 	var id idgen.ID
 	if err := db.InTx(ctx, func(tctx context.Context, tx *database.Tx) error {
@@ -197,10 +203,19 @@ func appendRestoreAudit(ctx context.Context, cfg config.Config, databasePath str
 //
 // Before 一律為 nil：這一筆記的是「這個目錄從此有了這些東西」，
 // 而不是「某欄位從 A 變成 B」——恢復前的目標目錄裡沒有這些事實可言。
-func restoreAuditRecord(manifest backup.Manifest, bundle, into string) audit.Record {
+//
+// 主體經 internal/identity 的系統主體構造（來源為 CLI），再由其審計橋換成 audit.Actor：
+// 這一筆記的是「執行檔被某人跑了一次」這個事實，不是「Root 登入了」。
+// 把來源寫成明確的引數而不是留在註解裡，是為了讓日後接上 Root 認証時，
+// 「該換哪一行」只有一個答案，而現在這一行不可能被誤寫成 root。
+func restoreAuditRecord(manifest backup.Manifest, bundle, into string) (audit.Record, error) {
+	actor, err := cliSystemActor()
+	if err != nil {
+		return audit.Record{}, err
+	}
 	return audit.Record{
 		Scope:  audit.ScopeRoot,
-		Actor:  audit.Actor{Kind: audit.ActorSystem},
+		Actor:  actor,
 		Action: "server.restore",
 		Target: audit.Target{Kind: "server"},
 		Reason: fmt.Sprintf("從備份包恢復到新的資料目錄（清單 %s、結構版本 %d、%d 個檔案）",
@@ -213,7 +228,23 @@ func restoreAuditRecord(manifest backup.Manifest, bundle, into string) audit.Rec
 			{Field: "files", After: manifest.Totals.Files},
 			{Field: "bytes", After: manifest.Totals.Bytes},
 		},
+	}, nil
+}
+
+// cliSystemActor 把「執行檔被跑了一次」這件事換成受信主體的審計操作者表示。
+//
+// 單獨抽出來是因為它會回錯誤：構造失敗時這筆審計就不該寫（不降級成
+// 「沒有主體的記錄」），而呼叫端要拿到的是原因明確的錯誤，不是猜。
+func cliSystemActor() (audit.Actor, error) {
+	principal, err := identity.NewSystem(identity.OriginCLI)
+	if err != nil {
+		return audit.Actor{}, fmt.Errorf("app: 構造 CLI 系統主體失敗: %w", err)
 	}
+	actor, err := principal.AuditActor()
+	if err != nil {
+		return audit.Actor{}, fmt.Errorf("app: 構造 CLI 審計主體失敗: %w", err)
+	}
+	return actor, nil
 }
 
 // parseRestoreArgs 取出 restore 子命令自己的引數，其餘交回組態解析（--data-dir 等）。

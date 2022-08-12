@@ -376,7 +376,10 @@ func TestRestoreAuditRecordShapeAndValuesSurviveRedaction(t *testing.T) {
 			Bytes int64 `json:"bytes"`
 		}{Files: 7, Bytes: 4096},
 	}
-	record := restoreAuditRecord(manifest, `P:\restore-bundle`, `P:\restore-target`)
+	record, err := restoreAuditRecord(manifest, `P:\restore-bundle`, `P:\restore-target`)
+	if err != nil {
+		t.Fatalf("構造恢復審計記錄失敗：%v", err)
+	}
 
 	if record.Scope != audit.ScopeRoot || record.Actor.Kind != audit.ActorSystem || !record.Actor.ID.IsNil() {
 		t.Errorf("恢復事件的主體與作用域不符：%+v", record)
