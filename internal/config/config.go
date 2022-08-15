@@ -42,6 +42,12 @@ type Config struct {
 	Logs        LogsConfig     `yaml:"logs"`
 	Disk        DiskConfig     `yaml:"disk"`
 	Security    SecurityConfig `yaml:"security"`
+
+	// RootHashNotice 不是組態欄位（不帶 yaml 標記，因此也不會被解讀）：
+	// 它記錄載入階段對 Root 憑據形狀的一句提醒，由 Redacted() 帶進啟動摘要。
+	// 放在 Config 上是因為「這句提醒屬於哪個部署」必須跟著這份組態走，
+	// 而不是變成套件級全域狀態（那樣兩個資料目錄的測試就會互相污染）。
+	RootHashNotice string `yaml:"-"`
 }
 
 // ServerConfig 為伺服器層組態。
@@ -167,7 +173,7 @@ type SecurityConfig struct {
 // 解析後的最終檔必須整體通過 credential.Params 的區間校驗。
 //
 // 只影響之後新產生的憑據；既有憑據（Root 雜湊、帳戶 password_hash）
-// 按編碼內自帶參數校驗，換檔不會让它们突然失效。「是否該順手升級某份既有憑據」
+// 按編碼內自帶參數校驗，換檔不會讓它們突然失效。「是否該順手升級某份既有憑據」
 // 由 internal/credential 的 NeedsUpgrade 判定，屬登入路徑的未來工作。
 type HashingConfig struct {
 	// MemoryKiB 是記憶體成本（KiB）；0 表示沿用預設。
@@ -547,9 +553,23 @@ func (c *Config) Validate() error {
 	if c.Security.SessionTTLHours < 1 {
 		return errors.New("config: security.session_ttl_hours 必須為正整數")
 	}
-	if c.Security.RootPasswordHash != "" &&
-		!strings.HasPrefix(c.Security.RootPasswordHash, "$argon2id$") {
-		return errors.New("config: security.root_password_hash 需為 Argon2id 雜湊（$argon2id$ 前綴）")
+	// Root 憑據的形狀：先以內建常數比對前綴（攔住「拿一般文字冒充雜湊」），
+	// 再用 credential 的嚴格解析確認它真的可用。
+	//
+	// 這裡刻意「只記一句提醒、不擋啟動」，理由是兩句話的權衡：
+	//   - 一個寫壞的 Root 欄位代表目前根本沒有可用的 Root。把這種部署變成開不起來，
+	//     等於用一個運維瑕疵換掉「整個服務停止保護」——活動進行中的代價更大；
+	//   - 反過來，若靜默通過，啟動的人不會知道自己其實登不進去。
+	// 所以結論是：照樣啟動，但這一句要出現在啟動摘要裡；而一次性初始化通路（internal/rootinit）
+	// 在寫入前硬擋——那裡才是「不能再留著壞值」的時機。
+	if c.Security.RootPasswordHash != "" {
+		if !strings.HasPrefix(c.Security.RootPasswordHash, argon2IDPrefix) {
+			return fmt.Errorf("config: security.root_password_hash 需為 Argon2id 雜湊（%s 前綴）", argon2IDPrefix)
+		}
+		if err := credential.CheckEncoding(c.Security.RootPasswordHash); err != nil {
+			c.RootHashNotice = " Root 憑據形狀不合格（" + err.Error() + "）：這個 Root 口令無法通過校驗，" +
+				"請用 evernight-server init-root 建立可用憑據（它在寫入前會先確認形狀）"
+		}
 	}
 	// 雜湊參數檔在啟動即整體校驗：把「打錯一個參數導致憑據檔半生不熟」
 	// 關在啟動門外，之後 Hash 路徑拿到的 Params 一定合法。
@@ -815,12 +835,12 @@ func (c Config) DisplayLocation() *time.Location {
 
 // Redacted 回傳組態的脫敏摘要（供啟動日誌），機密欄位一律顯示 [REDACTED]。
 func (c Config) Redacted() string {
-	return fmt.Sprintf("組態摘要：listen=%s data_dir=%s timezone=%s db=%s busy_timeout_ms=%d media=%s documents=%s attachments=%s backups=%s logs_dir=%s logs_level=%s logs_prefix=%s logs_retention_days=%d session_ttl_hours=%d root_password_hash=%s hashing=[%s] http_timeouts_ms=[read_header=%d read=%d write=%d idle=%d request=%d shutdown=%d] max_body_bytes=%d security_headers=[frame_options=%s csp=%s referrer_policy=%s permissions_policy=%s] cors=[%s] disk=[%s] tx=[begin_mode=%s nested=%s busy_retry_max=%d busy_retry_backoff_ms=%d timeout_ms=%d schema_guard=%s]",
+	return fmt.Sprintf("組態摘要：listen=%s data_dir=%s timezone=%s db=%s busy_timeout_ms=%d media=%s documents=%s attachments=%s backups=%s logs_dir=%s logs_level=%s logs_prefix=%s logs_retention_days=%d session_ttl_hours=%d root_password_hash=%s%s hashing=[%s] http_timeouts_ms=[read_header=%d read=%d write=%d idle=%d request=%d shutdown=%d] max_body_bytes=%d security_headers=[frame_options=%s csp=%s referrer_policy=%s permissions_policy=%s] cors=[%s] disk=[%s] tx=[begin_mode=%s nested=%s busy_retry_max=%d busy_retry_backoff_ms=%d timeout_ms=%d schema_guard=%s]",
 		c.Server.Listen, c.Server.DataDir, c.Server.DisplayTimezone,
 		c.Database.Path, c.Database.BusyTimeoutMS,
 		c.Media, c.Documents, c.Attachments, c.Backups,
 		c.Logs.Dir, c.Logs.Level, c.Logs.FilePrefix, c.Logs.RetentionDays,
-		c.Security.SessionTTLHours, redact(c.Security.RootPasswordHash),
+		c.Security.SessionTTLHours, redact(c.Security.RootPasswordHash), c.RootHashNotice,
 		c.Security.Hashing.summary(),
 		c.Server.ReadHeaderTimeoutMS, c.Server.ReadTimeoutMS, c.Server.WriteTimeoutMS,
 		c.Server.IdleTimeoutMS, c.Server.RequestTimeoutMS, c.Server.ShutdownTimeoutMS, c.Server.MaxBodyBytes,
@@ -1016,7 +1036,12 @@ func applyEnv(cfg *Config) error {
 // ExampleYAML 為首次啟動時寫入資料目錄的脫敏範例組態（不含任何真實憑據）。
 const ExampleYAML = `# EvernightRealm 服務端組態（首次啟動自動建立）
 #
-# 本檔案不含真實憑據；root_password_hash 若未設定，系統將於初始化流程產生。
+# 本檔案不含真實憑據，也不會自動產生任何「出廠口令」。
+# Root 憑據（security.root_password_hash）由伺服器本機的一次性命令寫入：
+#   evernight-server init-root --password-stdin --data-dir <這個目錄>
+# 它只從標準輸入讀口令（前兩行是口令與確認），存進檔案的是 Argon2id 編碼而不是明文，
+# 而且這個欄位一旦有值就不再開放第二次初始化。
+# 想知道現在有沒有 Root，用不寫任何東西的只讀命令：evernight-server root-status
 # 修改後重啟服務端生效。
 
 server:
@@ -1163,11 +1188,25 @@ func (c *Config) Prepare() error {
 	}
 
 	// 可寫性探測：寫入後立即刪除，確保資料目錄實際可寫（SYS-010）。
-	probe := filepath.Join(c.Server.DataDir, ".write-probe")
-	if err := os.WriteFile(probe, []byte("ok"), 0o600); err != nil {
+	//
+	// 檔名由建立器給：固定的「.write-probe」會讓同時跑了在同一個目錄上的兩個命令
+	// 互相刪掉對方的探測檔（第二個 Remove 撞「檔案不存在」，於是啟動／子命令莫名失敗）。
+	// 探測問的是「這個目錄能不能寫」，用不用同一個名字對答案沒有影響。
+	probe, err := os.CreateTemp(c.Server.DataDir, ".write-probe-*")
+	if err != nil {
 		return fmt.Errorf("config: 資料目錄 %s 不可寫: %w", c.Server.DataDir, err)
 	}
-	if err := os.Remove(probe); err != nil {
+	probeName := probe.Name()
+	if _, err := probe.Write([]byte("ok")); err != nil {
+		_ = probe.Close()
+		_ = os.Remove(probeName)
+		return fmt.Errorf("config: 資料目錄 %s 不可寫: %w", c.Server.DataDir, err)
+	}
+	if err := probe.Close(); err != nil {
+		_ = os.Remove(probeName)
+		return fmt.Errorf("config: 資料目錄探測檔關閉失敗: %w", err)
+	}
+	if err := os.Remove(probeName); err != nil {
 		return fmt.Errorf("config: 資料目錄清理失敗: %w", err)
 	}
 

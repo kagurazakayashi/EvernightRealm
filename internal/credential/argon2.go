@@ -119,6 +119,19 @@ func Verify(encoded, password string) (bool, error) {
 	return subtle.ConstantTimeCompare(got, sum) == 1, nil
 }
 
+// CheckEncoding 只做編碼形狀與參數界線的解析，不執行派生，也不回傳任何解析結果。
+//
+// 它存在的理由只有一個：啟動摘要要能說出「檔案裡那一串不是可用的憑據」，
+// 而把 decode 直接匯出等於多開一條能拿到鹽與摘要的通路——那個需求一個布爾結論就夠了。
+// 錯誤一律是 ErrMalformedEncoding／ErrUnsupportedParams 的包裝鏈，訊息只含欄位名與數值，
+// 不回顯鹽、摘要或整個編碼。
+func CheckEncoding(encoded string) error {
+	if _, _, _, err := decode(encoded); err != nil {
+		return err
+	}
+	return nil
+}
+
 // NeedsUpgrade 回報 encoded 的參數是否不同於當前檔 p（供上層決定是否
 // 在登入成功後順手重寫憑據）。
 //

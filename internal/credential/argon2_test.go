@@ -324,3 +324,39 @@ func TestProductionParamsRoundTrip(t *testing.T) {
 		t.Errorf("剛以生產檔產生的憑據不應標記升級（up=%t err=%v）", up, err)
 	}
 }
+
+func TestCheckEncodingAcceptsOnlyUsableEncodings(t *testing.T) {
+	// CheckEncoding 是「這串值能不能當憑據用」的只讀判定：啟動摘要用它來決定要不要留提醒，
+	// 一次性初始化用它來決定要不要拒絕蓋掉一個壞值。兩邊都只問形狀，不做派生。
+	encoded, err := Hash("形狀檢查#1", TestParams)
+	if err != nil {
+		t.Fatalf("Hash 失敗: %v", err)
+	}
+	if err := CheckEncoding(encoded); err != nil {
+		t.Errorf("自身產生的合法編碼應通過形狀檢查: %v", err)
+	}
+
+	for _, bad := range []string{
+		"",
+		"hunter2",
+		"$argon2i$v=19$m=1024,t=1,p=1$c2FsdA$ZGln",
+		"$argon2id$v=16$m=1024,t=1,p=1$c2FsdA$ZGln",
+		"$argon2id$v=19$m=1024,t=1$c2FsdA$ZGln",
+		"$argon2id$v=19$m=1024,t=1,p=1$not-base64!!$ZGln",
+		"$argon2id$v=19$m=1024,t=1,p=1$短$c2FsdA",
+		"$argon2id$v=19$m=999999999999,t=1,p=1$c2FsdA$ZGln",
+	} {
+		err := CheckEncoding(bad)
+		if err == nil {
+			t.Errorf("不合格的形狀應被拒: %q", bad)
+			continue
+		}
+		if !errors.Is(err, ErrMalformedEncoding) && !errors.Is(err, ErrUnsupportedParams) {
+			t.Errorf("錯誤應收斂到已定義的兩類之一: %v", err)
+		}
+		// 空字串以外的輸入不得被回顯（呼叫端會把這句寫進啟動摘要）。
+		if bad != "" && strings.Contains(err.Error(), bad) {
+			t.Errorf("錯誤回顯了輸入內容: %v", err)
+		}
+	}
+}

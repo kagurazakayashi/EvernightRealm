@@ -31,8 +31,10 @@ const Version = "0.1.0-dev"
 // Run 啟動服務端，阻塞至收到停止信號（Ctrl+C、SIGTERM）或發生錯誤。
 //
 // 第一個參數為 `migrate` 時改執行遷移子命令（見 Migrate），為 `backup` 時改執行備份子命令
-// （見 Backup），為 `restore` 時改執行恢復子命令（見 Restore）；
-// 三者都不啟動 HTTP 服務，也都不佔用連接埠。
+// （見 Backup），為 `restore` 時改執行恢復子命令（見 Restore），
+// 為 `init-root` 時改執行 Root 一次性初始化（見 InitRoot），
+// 為 `root-status` 時只讀地回報 Root 是否已初始化（見 RootStatus）；
+// 它們都不啟動 HTTP 服務，也不佔用連接埠。
 //
 // ctx 為服務的根 context，訊號取消即代表停止請求；日後的背景任務
 // （保留期清理、備份排程等）皆須以此 ctx 為取消來源並在返回前結束，
@@ -48,6 +50,10 @@ func Run(args []string) error {
 			return Backup(ctx, args[1:], os.Stdout)
 		case "restore":
 			return Restore(ctx, args[1:], os.Stdout)
+		case "init-root":
+			return InitRoot(ctx, args[1:], os.Stdin, os.Stdout)
+		case "root-status":
+			return RootStatus(ctx, args[1:], os.Stdout)
 		}
 	}
 	return run(ctx, releaseSignals, args, os.Stdout, os.Stderr)

@@ -7,6 +7,7 @@
 package database
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -29,6 +30,12 @@ type fileLock struct {
 	path string
 }
 
+// ErrLocked 表示鎖檔由別的程式持有（單寫入實例約束生效）。
+//
+// 它存在的理由只有一個：讓呼叫端能用 errors.Is 判出「服務正在跑」這種可預期的拒絕，
+// 而不是去比對錯誤字串——訊息會改，判別不該跟著壞。
+var ErrLocked = errors.New("database: 資料庫已被其他服務程序鎖定")
+
 // acquireLock 對 <資料庫檔>.lock 取得獨佔鎖。
 //
 // 已被其他程序持有時回傳可診斷的錯誤（含鎖檔路徑），
@@ -49,7 +56,7 @@ func acquireLock(dbPath string) (*fileLock, error) {
 			message += "；目前持有者：" + holder
 		}
 		message += "；請確認沒有第二個 evernight-server 正在使用同一資料目錄"
-		return nil, fmt.Errorf("%s: %w", message, err)
+		return nil, fmt.Errorf("%s: %w（系統錯誤：%v）", message, ErrLocked, err)
 	}
 
 	// 寫入持有者資訊僅供診斷（人工查看鎖檔即可得知誰持有）；不作為任何判斷依據。

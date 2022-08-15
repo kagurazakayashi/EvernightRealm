@@ -22,6 +22,12 @@ EvernightRealm is under active development and no stable release is available ye
 
 The server also ships a maintenance command that produces a **consistent backup package**: a single-file database snapshot — taken while the server keeps running, and not a copy of the live write-ahead-log file — together with the config file and the media, document and upload directories, each file recorded with its size and SHA-256 in a manifest. A matching `restore` command turns such a package back into a **fresh, empty data directory**: it re-verifies every file against the manifest, reads the snapshot's database facts and compares them with the manifest both before and after the files land, refuses to overwrite any existing directory (back up that directory yourself first), refuses a database schema newer than the running executable, and records the restore itself as a server-side audit entry. A backup package still cannot be encrypted, and old packages are not pruned automatically.
 
+A one-time Root initialization is available as a **local command only**:
+
+    evernight-server init-root --password-stdin --data-dir <data directory>
+
+It reads the password from stdin (two lines: the password and its confirmation), stores an Argon2id hash in the data directory's `config.yaml`, and prints nothing secret — no plaintext, no default password is ever generated or shown. Because handing out the server's highest privilege is authorized by being able to run a command on the server host, this step opens no HTTP endpoint and no listening socket at all; CORS, client-reported addresses or hiding a button are not authorization. Initialization is refused while the service holds the single-writer instance lock, while `ER_SECURITY_ROOT_PASSWORD_HASH` overrides the file, or while the audit table does not exist yet, and it can never run a second time — overwriting an existing Root is not a supported path (changing a Root password needs an authenticated flow, still to be built). A read-only `evernight-server root-status` reports whether Root exists without creating or changing anything, and reports only that much: never a config path, hash or bootstrap secret. Success and refusal both land in the Root audit table without any password.
+
 ## How it will work (once released)
 
 - One person hosts the server on their machine (Windows or Linux)
