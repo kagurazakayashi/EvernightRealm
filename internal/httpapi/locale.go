@@ -78,6 +78,36 @@ var errorMessages = map[ErrorCode]map[string]string{
 		LocaleEnUS: "The server is low on storage space and has paused new write operations. Free up disk space, then try again.",
 		LocaleJaJP: "サーバーのストレージ容量が不足しているため、新しい書き込み操作を一時停止しています。ディスク領域を確保してから再試行してください。",
 	},
+	CodeInvalidCredentials: {
+		LocaleZhCN: "登录名或密码不正确，或该账户当前无法登录。",
+		LocaleZhTW: "登入名或密碼不正確，或該帳戶目前無法登入。",
+		LocaleEnUS: "The login name or password is incorrect, or this account cannot sign in right now.",
+		LocaleJaJP: "ログイン名またはパスワードが正しくないか、このアカウントは現在サインインできません。",
+	},
+	CodeNotAuthenticated: {
+		LocaleZhCN: "此请求未携带会话，请先登录。",
+		LocaleZhTW: "此請求未攜帶會話，請先登入。",
+		LocaleEnUS: "This request carries no session. Please sign in first.",
+		LocaleJaJP: "このリクエストにはセッションが含まれていません。まずサインインしてください。",
+	},
+	CodeSessionInvalid: {
+		LocaleZhCN: "会话已失效（过期、被撤销或账户状态变化），请重新登录。",
+		LocaleZhTW: "會話已失效（過期、被撤銷或帳戶狀態變化），請重新登入。",
+		LocaleEnUS: "The session is no longer valid (expired, revoked, or the account state changed). Please sign in again.",
+		LocaleJaJP: "セッションは無効になりました（期限切れ、失効、またはアカウント状態の変化）。再度サインインしてください。",
+	},
+	CodeAuthMethodConflict: {
+		LocaleZhCN: "请求混用了多种认证方式，或浏览器请求使用了不允许的认证方式。",
+		LocaleZhTW: "請求混用了多種認證方式，或瀏覽器請求使用了不允許的認證方式。",
+		LocaleEnUS: "The request mixes multiple authentication methods, or a browser request used a disallowed method.",
+		LocaleJaJP: "リクエストが複数の認証方式を混在しているか、ブラウザークエストが許可されない方式を使用しています。",
+	},
+	CodeOriginForbidden: {
+		LocaleZhCN: "请求来源未通过跨站防护检查，已被拒绝。",
+		LocaleZhTW: "請求來源未通過跨站防護檢查，已被拒絕。",
+		LocaleEnUS: "The request origin failed the cross-site protection check and was rejected.",
+		LocaleJaJP: "リクエストの送信元がクロスサイト保護チェックを通過しなかったため、拒否されました。",
+	},
 }
 
 // messageFor 取得錯誤碼在指定語言的使用者訊息；語言未支援或訊息為空時回退 defaultLocale。

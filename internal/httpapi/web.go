@@ -47,11 +47,14 @@ type apiRoute struct {
 // 新增端點時只改這一處：登記與排除清單因此不可能各說各話。方法放行規則由 allowMethods
 // 帶上，未知方法仍回 405 與 Allow 標頭，不落入靜態服務的分流。
 func (s *Server) apiRoutes() []apiRoute {
-	return []apiRoute{
+	routes := []apiRoute{
 		{"/health", s.allowMethods(s.handleHealth, http.MethodGet, http.MethodHead)},
 		{"/ready", s.allowMethods(s.handleReady, http.MethodGet, http.MethodHead)},
 		{"/time", s.allowMethods(s.handleTime, http.MethodGet, http.MethodHead)},
 	}
+	// auth 端點由注入的用例決定有無（未注入時清單為空）：登記與否都只有這一個來源，
+	// 回退排除清單因此自動同步——「端點不存在但首段被排除」與「反過來」都無法發生。
+	return append(routes, s.authEndpoints()...)
 }
 
 // apiFirstSegments 從登記清單導出各端點的路徑首段集合。

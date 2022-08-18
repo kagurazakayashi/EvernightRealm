@@ -254,6 +254,58 @@ func (s *Store) RevokeSubject(ctx context.Context, q database.Querier, subject S
 	return int(n), nil
 }
 
+// ResolvePrincipal 驗證會話秘密，並把通過的結果換回一個受信主體。
+//
+// 這是「會話 → 身份」的唯一生產通路，存在的理由是傳輸層需要把一枚 Cookie／Bearer
+// 換成 identity.Principal 才能進上下文與授權判定，而 Principal 的構造規則
+// （帳戶要真實帳戶事實、Root 要憑據證明）不允許在包外拼裝：
+//   - 帳戶主體：現讀 accounts 取類型與狀態後走 NewAccountPrincipal——Verify 已擋過
+//     「不存在／禁用」，這裡再構造一次是雙閘而不是重複功課（讀與構造之間被禁用的競態
+//     會在這裡被拒，方向和保守一致）；
+//   - Root 主體：經 identity.ResumeRootProof 換發延續證明。正當性與使用邊界寫在該函式的
+//     文件裡（會話行只能由帶著真實證明的 Create 簽發，token_hash 又不可變），
+//     並由 internal/identity 的結構閘鎖在本包。
+//
+// Grants 一律為零值：伺服器級角色的授予資料來源至今不存在，解析結果因此不帶任何角色。
+// 未來的授予表落地時，唯一要改的是這裡（把授予讀出來填入），各端點不會各長出一套
+// 「從 Cookie 裡讀角色」的平行語意。
+func (s *Store) ResolvePrincipal(ctx context.Context, q database.Querier, secret string,
+	origin identity.Origin) (identity.Principal, Session, error) {
+	sess, err := s.Verify(ctx, q, secret)
+	if err != nil {
+		return identity.Principal{}, Session{}, err
+	}
+	switch sess.Subject.kind {
+	case SubjectRoot:
+		p, err := identity.Root(identity.ResumeRootProof(), origin)
+		if err != nil {
+			return identity.Principal{}, Session{}, err
+		}
+		return p, sess, nil
+	case SubjectAccount:
+		a, err := s.accounts.ByID(ctx, q, sess.Subject.accountID)
+		if err != nil {
+			if errors.Is(err, account.ErrNotFound) {
+				return identity.Principal{}, Session{}, fmt.Errorf("%w：帳戶已不存在", ErrSubjectUnavailable)
+			}
+			return identity.Principal{}, Session{}, err
+		}
+		p, err := identity.NewAccountPrincipal(identity.AccountInput{
+			Subject: identity.SubjectOf(a),
+			Origin:  origin,
+		})
+		if err != nil {
+			return identity.Principal{}, Session{}, err
+		}
+		return p, sess, nil
+	default:
+		// scanSession 只可能帶出 root|account 兩類；走到這裡代表資料庫被寫進了
+		// 本包不認識的狀態，屬缺陷而不是拒絕理由。
+		return identity.Principal{}, Session{}, fmt.Errorf("%w：會話 %s 帶著無法解析的主體類別",
+			ErrInvalidSubject, sess.ID.String())
+	}
+}
+
 // selectSessionSQL 是会话列清单的唯一定义点（栏序与 scanSession 的取值顺序同源）。
 const selectSessionSQL = `SELECT id, device_id, subject_kind, account_id,
 		created_at, last_active_at, expires_at, revoked_at

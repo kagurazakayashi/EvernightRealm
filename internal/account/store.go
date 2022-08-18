@@ -107,6 +107,30 @@ func (s *Store) ByLoginName(ctx context.Context, q database.Querier, login strin
 	return scanOne(q.QueryRowContext(ctx, selectAccountSQL+" WHERE login_name_key = ?", key))
 }
 
+// RecordLogin 把帳戶的 last_login_at 推進到注入時鐘的當前時刻。
+//
+// 「何時登入成功」屬帳戶的事實而不是會話的事實（會話核心刻意不碰這一欄，
+// 見 internal/session），所以更新點在登入用例：它會把本方法與 session.Create
+// 放進同一個交易，兩者同生同滅。目標不存在時回傳 ErrNotFound——
+// 登入用例拿到的帳戶標識必然有效，找不到只可能是程式缺陷，靜默成功會掩蓋它。
+func (s *Store) RecordLogin(ctx context.Context, q database.Querier, id idgen.ID) error {
+	if q == nil {
+		return errors.New("account: 需要可用的資料庫連線或交易")
+	}
+	if id.IsNil() {
+		return ErrNotFound
+	}
+	res, err := q.ExecContext(ctx, "UPDATE accounts SET last_login_at = ? WHERE id = ?",
+		timeutil.ToMillis(s.clock.Now()), id.String())
+	if err != nil {
+		return fmt.Errorf("account: 更新最近登入時刻失敗: %w", err)
+	}
+	if n, err := res.RowsAffected(); err == nil && n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // selectAccountSQL 是欄位清單的唯一定義點（查詢用的欄序與 scanRow 的取值順序同源）。
 const selectAccountSQL = `SELECT id, login_name, login_name_key, display_name, password_hash,
 		account_type, status, must_change_password, created_at, last_login_at, disabled_at

@@ -1,0 +1,25 @@
+// Package auth 是登入的應用服務層：把「憑據校驗 → 受信主體 → 會話簽發 → 事實落地」
+// 編排成一次原子用例，是 account、credential、identity、session、audit 五個模組之上
+// 唯一的跨模組寫入點。
+//
+// 分工邊界（各層都只回答自己的問題，任何一層都不越界替下一層做決定）：
+//   - internal/credential：這個明文與這份雜湊配不配；
+//   - internal/identity：透過校驗的人是哪一類主體（Root 要真實比對的證明）；
+//   - internal/session：給這個主體簽發／驗證一枚會話；
+//   - internal/account：帳戶的事實（登入名、狀態、最近登入時刻）；
+//   - internal/audit：哪些操作必須留到事後查得到的記錄；
+//   - 本包：把它們按正確的順序組在一起，並決定失敗時對外說什麼。
+//
+// 兩條不可讓步的結論：
+//   - 對外只有「憑據無效」一個答案。「帳戶不存在」「密碼錯誤」「訪客帳戶」「已禁用」
+//     在回應層收斂成同一個錯誤（auth.ErrInvalidCredentials），內部原因只進伺服器端
+//     日誌；「不存在」分支以真實參數檔的佔位派生對齊耗時，時間差同樣是列舉信號。
+//   - 登入成功的落地是一個交易：會話行、accounts.last_login_at、（Root 的）審計記錄
+//     同生同滅——審計失敗不能留下無聲的特權會話，會話失敗也不能留下虛假的登入審計
+//     （合同由 internal/session 的 TestTransactionAtomicityWithAudit 釘住，本包照同一形狀組合）。
+//
+// 審計範圍沿用使用者已批准的決定（R1-009）：只有 Root 的登入成功／失敗寫入 root_audit；
+// 普通帳戶（含尚未落地授予通路的伺服器管理員）的登入事件暫不進審計表——
+// internal/identity 把無角色帳戶的審計主體擋在 ErrActivityScopeUnsupported，
+// 本包不發明類別、也不降級成 system，只寫執行日誌。
+package auth

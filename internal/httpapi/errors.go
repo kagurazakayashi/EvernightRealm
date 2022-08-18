@@ -34,6 +34,31 @@ const (
 	// 另一個要有人去清磁碟或改下限，重試不會讓它自己變好（規格 AT-020）。
 	// 下限未設時這個碼永遠不會出現。
 	CodeNoSpace ErrorCode = 1008
+
+	// —— 以下為 2xxx 帳號與身分分段（R1-009 起發布，數值不得變更或重用）。——
+
+	// CodeInvalidCredentials 表示登入被拒。它是登入失敗時唯一的對外結論：
+	// 「帳戶不存在」「口令錯誤」「訪客帳戶」「已禁用」「Root 憑據不符或未設定」
+	// 全部收斂到這一個碼與同一句文案——外部因此沒有一枚可以枚舉帳戶的信號。
+	// 後續步驟若加「嘗試次數過多請稍後再試」，必須是全帳戶同形的限流語意，
+	// 不得出現「這個帳戶被鎖了」這種把內部原因放回回應的變體。
+	CodeInvalidCredentials ErrorCode = 2001
+	// CodeNotAuthenticated 表示請求沒有攜帶任何會話憑據（Cookie 與 Bearer 都沒有），
+	// 而該端點需要身分。它與 CodeSessionInvalid 分開：一個是「沒帶」，
+	// 另一個是「帶了但無效」，用戶端的處置文案不同（前者是首次登入引導）。
+	CodeNotAuthenticated ErrorCode = 2002
+	// CodeSessionInvalid 表示攜帶的會話憑據無效：形狀不合格、查無此會話、
+	// 已被撤銷、已到期，或其主體此刻不可用（帳戶被禁用）。對內這些原因可區分，
+	// 對外一律同一句「請重新登入」——持秘密的人不需要知道它是哪一半壞的。
+	CodeSessionInvalid ErrorCode = 2003
+	// CodeAuthMethodConflict 表示請求把兩種認證方式混在一起用：同時帶會話 Cookie 與
+	// Bearer，或瀏覽器請求（帶 Origin）企圖用 Bearer 認證。混用的危害是 Cookie 請求
+	// 借 Bearer 繞過來源校驗，因此這不是偏好問題，而是直接拒絕的缺陷信號。
+	CodeAuthMethodConflict ErrorCode = 2004
+	// CodeOriginForbidden 表示有副作用的請求來源未通過 CSRF 來源策略：
+	// Origin 既非同源、也不在組態白名單內，或 Sec-Fetch-Site 宣告跨站。
+	// 預檢放行與否不影響此判定——來源標頭不是身分授權（與 cors.go 同一取向）。
+	CodeOriginForbidden ErrorCode = 2005
 )
 
 // ErrorEnvelope 是所有錯誤回應的統一信封，也是錯誤回應格式的唯一權威定義。

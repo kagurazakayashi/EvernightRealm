@@ -48,6 +48,10 @@ type Deps struct {
 	// ErrorLog 為 net/http 自身錯誤訊息的寫入去處（畸形請求行、標頭超限、交握失敗）。
 	// 組合層給的是「會把整行轉成結構化記錄」的寫入器；為 nil 時丟棄。
 	ErrorLog io.Writer
+	// Auth 為登入用例的入口（internal/app 注入 *auth.Service）。
+	// 為 nil 表示本執行檔不開放 auth 端點：路由、回退清單與錯誤面都和未掛載時
+	// 逐字相同（與 Web Deps 同一取向——「裝配了什麼就服務什麼」，傳輸層不猜）。
+	Auth AuthUseCase
 }
 
 // Server 為 HTTP 服務層。
@@ -71,6 +75,9 @@ type Server struct {
 	displayZone *time.Location
 	// web 為內嵌的靜態產物（可為 nil）；nil 時所有非端點路徑回到統一 404 信封。
 	web fs.FS
+	// auth 為登入用例入口（可為 nil）；nil 時 authEndpoints 回空清單，
+	// 一個 auth 端點都不掛。
+	auth AuthUseCase
 }
 
 // New 以組態、版本字串與外部依賴建立 HTTP 服務層。
@@ -98,6 +105,7 @@ func New(cfg *config.Config, version string, deps Deps) *Server {
 		clock:       clock,
 		displayZone: cfg.DisplayLocation(),
 		web:         deps.Web,
+		auth:        deps.Auth,
 	}
 	s.httpSrv = &http.Server{
 		Addr:    cfg.Server.Listen,

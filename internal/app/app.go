@@ -15,12 +15,16 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/kagurazakayashi/EvernightRealm/internal/account"
+	"github.com/kagurazakayashi/EvernightRealm/internal/audit"
+	"github.com/kagurazakayashi/EvernightRealm/internal/auth"
 	"github.com/kagurazakayashi/EvernightRealm/internal/config"
 	"github.com/kagurazakayashi/EvernightRealm/internal/database"
 	"github.com/kagurazakayashi/EvernightRealm/internal/database/migrate"
 	"github.com/kagurazakayashi/EvernightRealm/internal/disk"
 	"github.com/kagurazakayashi/EvernightRealm/internal/httpapi"
 	"github.com/kagurazakayashi/EvernightRealm/internal/runlog"
+	"github.com/kagurazakayashi/EvernightRealm/internal/session"
 	"github.com/kagurazakayashi/EvernightRealm/internal/timeutil"
 	"github.com/kagurazakayashi/EvernightRealm/internal/webassets"
 )
@@ -283,7 +287,7 @@ func retentionNote(days int) string {
 // 只在內嵌產物可用時列舉「/ 網頁介面」：摘要寫了那個位址卻回 404，比不寫更糟——
 // 人會先去試它，然後才發現執行檔裡根本沒有前端。
 func endpointsNote(status webassets.Status) string {
-	const apiNote = "/health 存活、/ready 就緒、/time 伺服器時間"
+	const apiNote = "/health 存活、/ready 就緒、/time 伺服器時間、/auth 登入與當前會話"
 	if status.Available {
 		return "/ 網頁介面、" + apiNote
 	}
@@ -464,12 +468,41 @@ func run(ctx context.Context, releaseSignals func(), args []string, out io.Write
 	// 內嵌的 Web 產物只在判定可用時掛上路徑，不可用時啟動摘要如實寫出缺什麼
 	// （判定由 internal/webassets 完成，傳輸層只收到一份檔案系統或 nil）。
 	webFS, webStatus := webassets.Dist()
+	// 登入用例的組裝：會話期限讀 security.session_ttl_hours（R1-008 預留的裝配點），
+	// 各倉儲共用系統時鐘——業務時刻的單一來源在各自構造內注入，這裡只給「此刻」。
+	// 失敗一律中斷啟動：缺了會話核心或登入用例的傳輸層只開出一組「連得上但登不進」
+	// 的端點，那種半套狀態比啟動失敗更難排查。
+	sessionStore, err := session.NewStore(timeutil.System(),
+		time.Duration(cfg.Security.SessionTTLHours)*time.Hour)
+	if err != nil {
+		lg.Error("會話核心組裝失敗", "err", err)
+		return err
+	}
+	hashingParams, err := cfg.Security.Hashing.Params()
+	if err != nil {
+		lg.Error("憑據雜湊參數檔不合格", "err", err)
+		return err
+	}
+	authService, err := auth.New(auth.Deps{
+		DB:               db,
+		Sessions:         sessionStore,
+		Accounts:         account.NewStore(timeutil.System()),
+		Audits:           audit.NewStore(timeutil.System()),
+		RootPasswordHash: cfg.Security.RootPasswordHash,
+		Hashing:          hashingParams,
+		Log:              lg.Logger,
+	})
+	if err != nil {
+		lg.Error("登入用例組裝失敗", "err", err)
+		return err
+	}
 	srv := httpapi.New(&cfg, Version, httpapi.Deps{
 		Ready:    readinessCheck(db, space),
 		Clock:    timeutil.System(),
 		Web:      webFS,
 		Log:      lg.Logger,
 		ErrorLog: lg.ErrorLogWriter(slog.LevelError),
+		Auth:     authService,
 	})
 	ln, err := srv.Listen()
 	if err != nil {
