@@ -28,7 +28,9 @@ package httpapi
 import (
 	"context"
 	"errors"
+	"math"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -59,11 +61,15 @@ const (
 // 以介面接收而不是直接收 *auth.Service：傳輸層組合的是「能做這幾件事的能力」，
 // 未來換實作（或測試替身）不動傳輸層程式碼；nil 時不掛載 auth 端點，
 // 協定層行為與本步之前逐字相同（與 Deps.Web 同一取向）。
+//
+// ip 是失敗控制的計量來源：只能由傳輸層從「實際連線」取（remoteHost），
+// 轉發標頭一概不傳進來——本專案沒有已批准的可信代理約定，就沒有資格替別人
+// 宣稱來源；把標頭值當 ip 等於把限流鍵交給請求方隨意填寫。
 type AuthUseCase interface {
 	// LoginAccount 為普通帳戶簽發會話。
-	LoginAccount(ctx context.Context, loginName, password, requestID string) (auth.Outcome, error)
+	LoginAccount(ctx context.Context, loginName, password, requestID, ip string) (auth.Outcome, error)
 	// LoginRoot 以組態憑據為 Root 簽發會話。
-	LoginRoot(ctx context.Context, password, requestID string) (auth.Outcome, error)
+	LoginRoot(ctx context.Context, password, requestID, ip string) (auth.Outcome, error)
 	// Resolve 把一枚會話秘密換回受信主體。
 	Resolve(ctx context.Context, secret string) (identity.Principal, session.Session, error)
 }
@@ -132,7 +138,8 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &in) {
 		return
 	}
-	outcome, err := s.auth.LoginAccount(r.Context(), in.LoginName, in.Password, requestIDFromRequest(r))
+	outcome, err := s.auth.LoginAccount(r.Context(), in.LoginName, in.Password,
+		requestIDFromRequest(r), remoteHost(r))
 	if err != nil {
 		s.writeLoginFailure(w, r, err)
 		return
@@ -158,7 +165,8 @@ func (s *Server) handleRootLogin(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &in) {
 		return
 	}
-	outcome, err := s.auth.LoginRoot(r.Context(), in.Password, requestIDFromRequest(r))
+	outcome, err := s.auth.LoginRoot(r.Context(), in.Password,
+		requestIDFromRequest(r), remoteHost(r))
 	if err != nil {
 		s.writeLoginFailure(w, r, err)
 		return
@@ -195,8 +203,24 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 }
 
 // writeLoginFailure 把登入用例的錯誤對映為對外回應：
-// 拒絕收斂為 2001，其餘（資料庫故障等）屬內部缺陷——統一 500，細節只進日誌。
+// 拒絕收斂為 2001，限流收斂為 2006（附 Retry-After），其餘（資料庫故障等）屬內部缺陷——
+// 統一 500，細節只進日誌。
+//
+// 2001 與 2006 的界線就是「現在重試有沒有意義」：前者口令再來一百次也是錯，
+// 後者等冷卻到期就有全新預算。兩者都只有一句固定文案，沒有 details——
+// 限流回應不允許以任何形式指出被擋的是哪個帳戶（規格要求同形）。
 func (s *Server) writeLoginFailure(w http.ResponseWriter, r *http.Request, err error) {
+	var throttled *auth.ThrottledError
+	if errors.As(err, &throttled) {
+		seconds := int64(math.Ceil(throttled.RetryAfter.Seconds()))
+		if seconds < 1 {
+			// 冷卻只剩不足一秒：報 0 秒會被讀成「立刻再試」，寧可多等一粒鐘。
+			seconds = 1
+		}
+		w.Header().Set("Retry-After", strconv.FormatInt(seconds, 10))
+		writeError(w, r, CodeLoginThrottled, http.StatusTooManyRequests)
+		return
+	}
 	if errors.Is(err, auth.ErrInvalidCredentials) {
 		writeError(w, r, CodeInvalidCredentials, http.StatusUnauthorized)
 		return

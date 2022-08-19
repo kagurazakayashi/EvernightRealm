@@ -610,6 +610,75 @@ func TestHashingRejectsBadValues(t *testing.T) {
 	}
 }
 
+func TestLoginGuardDefaultsAreApprovedValues(t *testing.T) {
+	// 釘住使用者批准的預設閾值：這五個數字改動必須同步改這裡（與
+	// internal/auth 的預設常數、config.example.yaml 三處一致）。
+	g := Default().Security.LoginGuard
+	if g.FailLimit != 10 || g.WindowMinutes != 15 || g.CooldownMinutes != 15 ||
+		g.SourceFailLimit != 50 || g.MaxEntries != 10000 {
+		t.Errorf("login_guard 預設值偏離批准值: %+v", g)
+	}
+}
+
+func TestLoginGuardYAMLAndEnvOverride(t *testing.T) {
+	path := writeConfig(t, "security:\n  login_guard:\n    fail_limit: 5\n")
+	cfg, err := Load(Options{ConfigPath: path})
+	if err != nil {
+		t.Fatalf("Load 失敗: %v", err)
+	}
+	if cfg.Security.LoginGuard.FailLimit != 5 || cfg.Security.LoginGuard.SourceFailLimit != 50 {
+		t.Errorf("單欄覆蓋應只改該欄，實際: %+v", cfg.Security.LoginGuard)
+	}
+
+	t.Setenv("ER_SECURITY_LOGIN_GUARD_COOLDOWN_MINUTES", "30")
+	cfg, err = Load(Options{ConfigPath: path})
+	if err != nil {
+		t.Fatalf("Load 失敗: %v", err)
+	}
+	if cfg.Security.LoginGuard.CooldownMinutes != 30 || cfg.Security.LoginGuard.FailLimit != 5 {
+		t.Errorf("環境變數應覆蓋 yaml 欄位，實際: %+v", cfg.Security.LoginGuard)
+	}
+}
+
+func TestLoginGuardRejectsBadValues(t *testing.T) {
+	cases := []struct {
+		name string
+		set  func(*LoginGuardConfig)
+	}{
+		{"配對上限為零", func(g *LoginGuardConfig) { g.FailLimit = 0 }},
+		{"配對上限為負", func(g *LoginGuardConfig) { g.FailLimit = -1 }},
+		{"配對上限越界", func(g *LoginGuardConfig) { g.FailLimit = maxLoginGuardLimit + 1 }},
+		{"來源低於配對", func(g *LoginGuardConfig) { g.SourceFailLimit = g.FailLimit - 1 }},
+		{"視窗為零", func(g *LoginGuardConfig) { g.WindowMinutes = 0 }},
+		{"冷卻超過一天", func(g *LoginGuardConfig) { g.CooldownMinutes = maxLoginGuardMinutes + 1 }},
+		{"條目上限為零", func(g *LoginGuardConfig) { g.MaxEntries = 0 }},
+		{"條目上限越界", func(g *LoginGuardConfig) { g.MaxEntries = maxLoginGuardEntries + 1 }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := Default()
+			tc.set(&cfg.Security.LoginGuard)
+			err := cfg.Validate()
+			if err == nil || !strings.Contains(err.Error(), "security.login_guard") {
+				t.Errorf("應拒絕並指出 security.login_guard，實際: %v", err)
+			}
+		})
+	}
+}
+
+// 合法覆蓋要整體通過：只改一欄不應讓「來源≥配對」的連鎖校驗誤傷預設值。
+func TestLoginGuardAcceptsCoherentOverride(t *testing.T) {
+	cfg := Default()
+	cfg.Security.LoginGuard.FailLimit = 20
+	cfg.Security.LoginGuard.SourceFailLimit = 20
+	cfg.Security.LoginGuard.WindowMinutes = 60
+	cfg.Security.LoginGuard.CooldownMinutes = 1
+	cfg.Security.LoginGuard.MaxEntries = 1
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("合法閾值組合不應報錯: %v", err)
+	}
+}
+
 func TestListenAllInterfaces(t *testing.T) {
 	cfg := Default()
 	cfg.Server.Listen = "0.0.0.0:5206"

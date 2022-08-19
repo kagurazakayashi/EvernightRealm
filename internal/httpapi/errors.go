@@ -59,6 +59,11 @@ const (
 	// Origin 既非同源、也不在組態白名單內，或 Sec-Fetch-Site 宣告跨站。
 	// 預檢放行與否不影響此判定——來源標頭不是身分授權（與 cors.go 同一取向）。
 	CodeOriginForbidden ErrorCode = 2005
+	// CodeLoginThrottled 表示該來源的登入失敗額度已打滿，正處於冷卻（HTTP 429，
+	// 附 Retry-After）。它是「稍後再試」而不是「憑據不對」：冷卻到期後同一枚正確
+	// 口令照常可登入。回應同樣只有一句固定文案——不指出被擋的是哪個帳戶、
+	// 觸發的是來源×目標配對上限還是來源總量上限，與 2001 的不可枚舉要求同形。
+	CodeLoginThrottled ErrorCode = 2006
 )
 
 // ErrorEnvelope 是所有錯誤回應的統一信封，也是錯誤回應格式的唯一權威定義。

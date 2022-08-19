@@ -31,16 +31,21 @@ type fakeAuth struct {
 	lastLogin  func(loginName, password, requestID string)
 	lastRoot   func(password, requestID string)
 	lastSecret string
+	// lastIP 記錄收到的來源位址：限流把「傳輸層只交實際連線位址、不交轉發標頭」
+	// 的責任放在 handler，這裡釘住「handler 確實交了 remoteHost 而不是標頭值」。
+	lastIP string
 }
 
-func (f *fakeAuth) LoginAccount(ctx context.Context, loginName, password, requestID string) (auth.Outcome, error) {
+func (f *fakeAuth) LoginAccount(ctx context.Context, loginName, password, requestID, ip string) (auth.Outcome, error) {
+	f.lastIP = ip
 	if f.lastLogin != nil {
 		f.lastLogin(loginName, password, requestID)
 	}
 	return f.outcome, f.loginErr
 }
 
-func (f *fakeAuth) LoginRoot(ctx context.Context, password, requestID string) (auth.Outcome, error) {
+func (f *fakeAuth) LoginRoot(ctx context.Context, password, requestID, ip string) (auth.Outcome, error) {
+	f.lastIP = ip
 	if f.lastRoot != nil {
 		f.lastRoot(password, requestID)
 	}

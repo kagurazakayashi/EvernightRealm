@@ -37,6 +37,13 @@ type liveEnv struct {
 // rootPassword 為空時重現「Root 尚未初始化」的部署。
 func newLiveEnv(t *testing.T, rootPassword string) *liveEnv {
 	t.Helper()
+	return newLiveEnvGuarded(t, rootPassword, nil)
+}
+
+// newLiveEnvGuarded 同 newLiveEnv，但替登入用例接上真實守衛（限流端到端測試用）；
+// guard 為 nil 時維持「無限流」的既有現場。
+func newLiveEnvGuarded(t *testing.T, rootPassword string, guard *auth.LoginGuard) *liveEnv {
+	t.Helper()
 	clock := timeutil.System()
 	dir := t.TempDir()
 	db, err := database.Open(context.Background(), database.Options{
@@ -73,6 +80,7 @@ func newLiveEnv(t *testing.T, rootPassword string) *liveEnv {
 		Audits:           audit.NewStore(clock),
 		RootPasswordHash: rootHash,
 		Hashing:          credential.TestParams,
+		Guard:            guard,
 	})
 	if err != nil {
 		t.Fatalf("建立登入用例失敗：%v", err)

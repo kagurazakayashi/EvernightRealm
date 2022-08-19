@@ -22,6 +22,9 @@ import (
 const (
 	testAccountPassword = "auth-test-帳戶口令"
 	testRootPassword    = "auth-test-root-口令"
+	// testSourceIP 是測試裡固定的「連線來源位址」：登入用例的守衛計量以它為鍵之一，
+	// 值本身只是可計量的占位地址，不是任何環境的地址，也不得進斷言之外的輸出。
+	testSourceIP = "127.0.0.1"
 )
 
 // testBase 為注入時鐘的錨點。
@@ -137,7 +140,7 @@ func TestLoginAccountSuccessIssuesSession(t *testing.T) {
 	ctx := context.Background()
 	a := e.createAccount(t, "login_ok", account.StatusActive)
 
-	first, err := e.service.LoginAccount(ctx, "LOGIN_OK", testAccountPassword, "req-1")
+	first, err := e.service.LoginAccount(ctx, "LOGIN_OK", testAccountPassword, "req-1", testSourceIP)
 	if err != nil {
 		t.Fatalf("登入應成功：%v", err)
 	}
@@ -155,7 +158,7 @@ func TestLoginAccountSuccessIssuesSession(t *testing.T) {
 		t.Errorf("成功登入必須推進 last_login_at")
 	}
 
-	second, err := e.service.LoginAccount(ctx, "login_ok", testAccountPassword, "req-2")
+	second, err := e.service.LoginAccount(ctx, "login_ok", testAccountPassword, "req-2", testSourceIP)
 	if err != nil {
 		t.Fatalf("第二次登入應成功：%v", err)
 	}
@@ -199,11 +202,11 @@ func TestLoginAccountRejectionsAreIndistinguishable(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := e.service.LoginAccount(ctx, tc.login, tc.password, "req")
+			_, err := e.service.LoginAccount(ctx, tc.login, tc.password, "req", testSourceIP)
 			if !errors.Is(err, ErrInvalidCredentials) {
 				t.Fatalf("應收斂為 ErrInvalidCredentials，實際 %v", err)
 			}
-			outcome, err2 := e.service.LoginAccount(ctx, tc.login, tc.password, "req")
+			outcome, err2 := e.service.LoginAccount(ctx, tc.login, tc.password, "req", testSourceIP)
 			if err2 == nil || outcome.Secret != "" || !outcome.Session.ID.IsNil() || outcome.Principal.Kind() != identity.KindAnonymous {
 				t.Fatalf("失敗路徑不可回傳任何結果：%v %+v", err2, outcome)
 			}
@@ -221,7 +224,7 @@ func TestLoginRootSuccessAuditsInTransaction(t *testing.T) {
 	e := newEnv(t, true)
 	ctx := context.Background()
 
-	outcome, err := e.service.LoginRoot(ctx, testRootPassword, "req-root-1")
+	outcome, err := e.service.LoginRoot(ctx, testRootPassword, "req-root-1", testSourceIP)
 	if err != nil {
 		t.Fatalf("Root 登入應成功：%v", err)
 	}
@@ -262,7 +265,7 @@ func countRootAuditNamed(t *testing.T, db *database.DB, action, targetID string)
 func TestLoginRootFailures(t *testing.T) {
 	t.Run("wrong-password", func(t *testing.T) {
 		e := newEnv(t, true)
-		if _, err := e.service.LoginRoot(context.Background(), "錯的 Root 口令", "req-root-2"); !errors.Is(err, ErrInvalidCredentials) {
+		if _, err := e.service.LoginRoot(context.Background(), "錯的 Root 口令", "req-root-2", testSourceIP); !errors.Is(err, ErrInvalidCredentials) {
 			t.Fatalf("應收斂為 ErrInvalidCredentials，實際 %v", err)
 		}
 		if n := countSessions(t, e.db); n != 0 {
@@ -274,7 +277,7 @@ func TestLoginRootFailures(t *testing.T) {
 	})
 	t.Run("not-configured", func(t *testing.T) {
 		e := newEnv(t, false)
-		if _, err := e.service.LoginRoot(context.Background(), "任何口令", "req-root-3"); !errors.Is(err, ErrInvalidCredentials) {
+		if _, err := e.service.LoginRoot(context.Background(), "任何口令", "req-root-3", testSourceIP); !errors.Is(err, ErrInvalidCredentials) {
 			t.Fatalf("未初始化時也應回同一結論，實際 %v", err)
 		}
 		if n := countSessions(t, e.db); n != 0 {
@@ -292,10 +295,10 @@ func TestAccountLoginWritesNoAudit(t *testing.T) {
 	e := newEnv(t, false)
 	ctx := context.Background()
 	e.createAccount(t, "no_audit_acc", account.StatusActive)
-	if _, err := e.service.LoginAccount(ctx, "no_audit_acc", testAccountPassword, "req"); err != nil {
+	if _, err := e.service.LoginAccount(ctx, "no_audit_acc", testAccountPassword, "req", testSourceIP); err != nil {
 		t.Fatalf("登入應成功：%v", err)
 	}
-	if _, err := e.service.LoginAccount(ctx, "no_audit_acc", "錯口令", "req"); !errors.Is(err, ErrInvalidCredentials) {
+	if _, err := e.service.LoginAccount(ctx, "no_audit_acc", "錯口令", "req", testSourceIP); !errors.Is(err, ErrInvalidCredentials) {
 		t.Fatalf("第二次應被拒：%v", err)
 	}
 	var n int
@@ -315,7 +318,7 @@ func TestResolveCollapsesRejections(t *testing.T) {
 	e := newEnv(t, false)
 	ctx := context.Background()
 	e.createAccount(t, "resolve_collapse", account.StatusActive)
-	outcome, err := e.service.LoginAccount(ctx, "resolve_collapse", testAccountPassword, "req")
+	outcome, err := e.service.LoginAccount(ctx, "resolve_collapse", testAccountPassword, "req", testSourceIP)
 	if err != nil {
 		t.Fatalf("登入應成功：%v", err)
 	}

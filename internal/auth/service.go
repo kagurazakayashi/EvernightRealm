@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/kagurazakayashi/EvernightRealm/internal/account"
 	"github.com/kagurazakayashi/EvernightRealm/internal/audit"
@@ -26,7 +27,28 @@ var (
 	// ErrInvalidSession 是會話解析被拒時唯一的結論：無效秘密、已撤銷、已到期、
 	// 主體不可用在外層是同一句話（拿秘密來的人只需要知道「重新登入」）。
 	ErrInvalidSession = errors.New("auth: 會話無效")
+	// ErrLoginThrottled 表示該來源對該目標的失敗額度已打滿，正處於冷卻。
+	// 它與 ErrInvalidCredentials 是兩個不同的對外結論（429「稍後再試」對 401「憑據無效」），
+	// 但冷卻對「查無此人」與「真帳戶口令錯」完全同形：計量發生在查庫之前，
+	// 觸發條件只看來源×目標的失敗次數，回應裡沒有任何欄位指出觸發的是誰。
+	ErrLoginThrottled = errors.New("auth: 登入嘗試過於頻繁")
 )
+
+// ThrottledError 是帶著剩餘冷卻時間的 ErrLoginThrottled。
+//
+// 傳輸層據 RetryAfter 寫 Retry-After 標頭（標準 429 語意）；除這個秒數之外
+// 它不提供任何可分辨的狀態——errors.Is(err, ErrLoginThrottled) 照常成立，
+// 不認識 ThrottledError 的呼叫端不會漏判。
+type ThrottledError struct {
+	// RetryAfter 是冷卻解除所需的時間（取兩條規則中較晚解除的那個）。
+	RetryAfter time.Duration
+}
+
+// Error 實作 error 介面；文字恆為固定一句，不含來源、目標或剩餘時間。
+func (e *ThrottledError) Error() string { return "auth: 登入嘗試過於頻繁，暫不受理" }
+
+// Unwrap 讓 errors.Is(err, ErrLoginThrottled) 成立。
+func (e *ThrottledError) Unwrap() error { return ErrLoginThrottled }
 
 // Outcome 是一次成功登入的結果。
 //
@@ -57,6 +79,9 @@ type Deps struct {
 	RootPasswordHash string
 	// Hashing 是佔位派生使用的當前參數檔（令「查無此人」與「口令不符」外部耗時同階）。
 	Hashing credential.Params
+	// Guard 是登入失敗控制與限流（見 guard.go）；nil 表示不啟用——
+	// 裝配層必須注入，留 nil 只為讓既有測試與將來的非網路通路能繞過計量。
+	Guard *LoginGuard
 	// Log 為伺服器端記錄出口；nil 時丟棄。具體失敗原因只能進這裡。
 	Log *slog.Logger
 }
@@ -69,6 +94,7 @@ type Service struct {
 	audits   *audit.Store
 	rootHash string
 	hashing  credential.Params
+	guard    *LoginGuard
 	log      *slog.Logger
 }
 
@@ -98,6 +124,7 @@ func New(deps Deps) (*Service, error) {
 		audits:   deps.Audits,
 		rootHash: deps.RootPasswordHash,
 		hashing:  params,
+		guard:    deps.Guard,
 		log:      logger,
 	}, nil
 }
@@ -120,9 +147,73 @@ func (s *Service) equalize(password string) {
 	}
 }
 
+// accountGuardTarget 計算帳戶登入在守衛裡的目標標識。
+//
+// 正規化成功的登入名用正規化鍵——大小寫／全形不同的同一登入名必須落在同一個條目，
+// 否則「Alice、ALICE、ａｌｉｃｅ 輪流各打三次」就能把配對上限繞成三倍。
+// 正規化失敗（形状不合格的輸入）沒有正規化鍵可用，退回「截斷後的原始字串」：
+// 截斷到正規化鍵同款的碼位上限，海量隨機髒名就不可能用超長鍵撐爆守衛記憶體。
+func accountGuardTarget(loginName string) string {
+	if key, err := account.LoginKey(loginName); err == nil {
+		return key
+	}
+	if r := []rune(loginName); len(r) > 200 {
+		return string(r[:200])
+	}
+	return loginName
+}
+
+// guardCheck 在一切校驗之前問守衛「還許不許」。
+//
+// 順序就是它的防線意義：被擋的嘗試不查庫、不寫審計、不做任何 Argon2 派生——
+// 限流要保護的恰恰是這三樣最貴的資源。守衛未注入時放行（見 Deps.Guard 註解）。
+func (s *Service) guardCheck(ip, target string) error {
+	if s.guard == nil {
+		return nil
+	}
+	blocked, retryAfter := s.guard.Allow(ip, target)
+	if !blocked {
+		return nil
+	}
+	// 被擋的嘗試只留 Debug 級痕跡：冷卻期內攻擊者可以無限發請求，
+	// 每請求一條 Warn 就是把「限流」變成新的資源放大器。
+	s.log.Debug("登入嘗試被限流擋下", "source", ip, "retry_after", retryAfter.String())
+	return &ThrottledError{RetryAfter: retryAfter}
+}
+
+// guardFailure 記一次被拒的憑據嘗試；把某個條目推進冷卻時才升 Warn 日誌——
+// 每個條目每視窗至多喊一次，攻擊轟炸期反而把日誌量壓到最低。
+func (s *Service) guardFailure(ip, target string) {
+	if s.guard == nil {
+		return
+	}
+	if triggered := s.guard.RecordFailure(ip, target); triggered {
+		s.log.Warn("登入失敗額度打滿，來源進入冷卻", "source", ip, "target_kind", loginTargetKind(target))
+	}
+}
+
+// guardSuccess 勾銷該來源×目標的失敗帳。
+func (s *Service) guardSuccess(ip, target string) {
+	if s.guard == nil {
+		return
+	}
+	s.guard.RecordSuccess(ip, target)
+}
+
+// loginTargetKind 只回報「是不是 Root 目標」這一件事，不回傳目標本身——
+// 登入名不是可以隨日誌常規欄位外流的資訊，這裡只給分類不給值。
+func loginTargetKind(target string) string {
+	if target == RootTarget {
+		return "root"
+	}
+	return "login_name"
+}
+
 // LoginAccount 以登入名與口令為普通帳戶簽發會話。
 //
 // 順序與理由：
+//  0. 來源×目標先過登入守衛（見 guardCheck）：冷卻中的嘗試到這裡為止，
+//     查無此人與真帳戶的失敗計入同一個鍵、同一組閾值——限流不透露帳戶存在性；
 //  1. 登入名先過帳戶模組自己的正規化閘（形狀不合格根本不查庫）；
 //  2. 查無此人 → 佔位派生對齊耗時後收斂為 ErrInvalidCredentials；
 //  3. 訪客帳戶沒有口令通路（無密快捷登入屬後續步驟，本步一律按憑據無效處理）；
@@ -133,42 +224,64 @@ func (s *Service) equalize(password string) {
 //
 // 普通帳戶的登入事件不寫審計表（已批准決定：無角色帳戶的審計主體類別未落地），
 // 成敗都只進執行日誌；日誌記內部原因，但永不記口令。
-func (s *Service) LoginAccount(ctx context.Context, loginName, password, requestID string) (Outcome, error) {
-	if _, err := account.LoginKey(loginName); err != nil {
+// ip 是傳輸層從實際連線取到的來源位址：轉發標頭一概不採信（無既有的可信代理約定，
+// 就不新增信任），空字串代表無來源可計量，守衛对此不設閘（見 LoginGuard.Allow）。
+func (s *Service) LoginAccount(ctx context.Context, loginName, password, requestID, ip string) (Outcome, error) {
+	target := accountGuardTarget(loginName)
+	if err := s.guardCheck(ip, target); err != nil {
+		return Outcome{}, err
+	}
+	outcome, rejected, err := s.attemptAccount(ctx, loginName, password, requestID)
+	if err != nil {
+		return Outcome{}, err
+	}
+	if rejected {
+		s.guardFailure(ip, target)
 		return Outcome{}, ErrInvalidCredentials
+	}
+	s.guardSuccess(ip, target)
+	return outcome, nil
+}
+
+// attemptAccount 是 LoginAccount 的校驗本體；rejected 與 err 分工明確：
+// rejected 是「對外要說憑據無效」的拒絕，err 是「對外要說伺服器出錯」的內部故障。
+// 內部故障不記失敗帳——自家資料庫打嗝不該讓來源消耗登入預算。
+func (s *Service) attemptAccount(ctx context.Context, loginName, password, requestID string) (Outcome, bool, error) {
+	if _, err := account.LoginKey(loginName); err != nil {
+		return Outcome{}, true, nil
 	}
 	a, err := s.accounts.ByLoginName(ctx, s.db.SQL(), loginName)
 	if err != nil {
 		if errors.Is(err, account.ErrNotFound) {
 			s.equalize(password)
 			s.log.Warn("帳戶登入被拒：查無此登入名", "login_name", loginName, "request_id", requestID)
-			return Outcome{}, ErrInvalidCredentials
+			return Outcome{}, true, nil
 		}
-		return Outcome{}, fmt.Errorf("auth: 讀取帳戶失敗: %w", err)
+		return Outcome{}, false, fmt.Errorf("auth: 讀取帳戶失敗: %w", err)
 	}
 
 	if a.Type == account.TypeGuest {
 		s.equalize(password)
 		s.log.Warn("帳戶登入被拒：訪客帳戶無口令通路", "account", a.ID.String(), "request_id", requestID)
-		return Outcome{}, ErrInvalidCredentials
+		return Outcome{}, true, nil
 	}
 	if !passwordShapeValid(password) {
 		s.log.Warn("帳戶登入被拒：口令形狀不合格", "account", a.ID.String(), "request_id", requestID)
-		return Outcome{}, ErrInvalidCredentials
+		return Outcome{}, true, nil
 	}
 	ok, err := credential.Verify(a.PasswordHash, password)
 	if err != nil {
 		// 入庫憑據解不開屬資料缺陷：對外仍是「憑據無效」，對內這是一條要查的錯誤。
 		s.log.Error("帳戶憑據編碼不可校驗", "account", a.ID.String(), "err", err, "request_id", requestID)
-		return Outcome{}, ErrInvalidCredentials
+		return Outcome{}, true, nil
 	}
 	if !ok {
 		s.log.Warn("帳戶登入被拒：口令不符", "account", a.ID.String(), "request_id", requestID)
-		return Outcome{}, ErrInvalidCredentials
+		return Outcome{}, true, nil
 	}
 	if a.Status != account.StatusActive {
 		s.log.Warn("帳戶登入被拒：帳戶已禁用", "account", a.ID.String(), "request_id", requestID)
-		return Outcome{}, ErrInvalidCredentials
+		return Outcome{}, true, nil
 	}
 
 	principal, err := identity.NewAccountPrincipal(identity.AccountInput{
@@ -179,17 +292,22 @@ func (s *Service) LoginAccount(ctx context.Context, loginName, password, request
 	if err != nil {
 		if errors.Is(err, identity.ErrNotAuthenticated) {
 			// 讀取與構造之間賬戶恰好被禁用：與狀態檢查同口徑收斂。
-			return Outcome{}, ErrInvalidCredentials
+			return Outcome{}, true, nil
 		}
-		return Outcome{}, fmt.Errorf("auth: 構造帳戶主體失敗: %w", err)
+		return Outcome{}, false, fmt.Errorf("auth: 構造帳戶主體失敗: %w", err)
 	}
 
 	outcome, err := s.issue(ctx, principal, a.ID)
 	if err != nil {
-		return Outcome{}, err
+		// issue 把「主體此刻不可用」的拒絕也收斂成 ErrInvalidCredentials 鏈；
+		// 區分靠 errors.Is——那是憑據路徑的拒絕，不是內部故障。
+		if errors.Is(err, ErrInvalidCredentials) {
+			return Outcome{}, true, nil
+		}
+		return Outcome{}, false, err
 	}
 	s.log.Info("帳戶登入成功", "account", a.ID.String(), "request_id", requestID)
-	return outcome, nil
+	return outcome, false, nil
 }
 
 // LoginRoot 以組態中的 Root 憑據簽發 Root 會話，成敗都寫入 root_audit。
@@ -203,17 +321,40 @@ func (s *Service) LoginAccount(ctx context.Context, loginName, password, request
 //
 // 組態尚未設定 Root 憑據時同樣回 ErrInvalidCredentials：對外不告訴試探者「這臺伺服器有沒有 Root」，
 // 內部補一次佔位派生對齊耗時，並在日誌裡如實記「未設定」。
-func (s *Service) LoginRoot(ctx context.Context, password, requestID string) (Outcome, error) {
+//
+// 失敗控制走同一把守衛、固定目標 RootTarget：「Root 未設定」與「口令不符」不只對外同形，
+// 在計量上也同形——探測者無法用「哪個口令會開始被 429」反推這臺有沒有 Root。
+// 冷卻中的嘗試連失敗審計都不追加：root_audit 的寫入速率被 fail_limit 封頂，
+// 這正是「有攻擊而無痕跡」的反面——痕跡留在觸發冷卻的那一筆與執行日誌，
+// 而不是留給攻擊者免費的寫入放大。
+func (s *Service) LoginRoot(ctx context.Context, password, requestID, ip string) (Outcome, error) {
+	if err := s.guardCheck(ip, RootTarget); err != nil {
+		return Outcome{}, err
+	}
+	outcome, rejected, err := s.attemptRoot(ctx, password, requestID)
+	if err != nil {
+		return Outcome{}, err
+	}
+	if rejected {
+		s.guardFailure(ip, RootTarget)
+		return Outcome{}, ErrInvalidCredentials
+	}
+	s.guardSuccess(ip, RootTarget)
+	return outcome, nil
+}
+
+// attemptRoot 是 LoginRoot 的校驗本體；rejected/err 分工與 attemptAccount 相同。
+func (s *Service) attemptRoot(ctx context.Context, password, requestID string) (Outcome, bool, error) {
 	if s.rootHash == "" {
 		s.equalize(password)
 		s.appendRootFailureAudit(ctx, requestID, "組態未設定 Root 憑據")
 		s.log.Warn("Root 登入被拒：組態未設定 Root 憑據", "request_id", requestID)
-		return Outcome{}, ErrInvalidCredentials
+		return Outcome{}, true, nil
 	}
 	if !passwordShapeValid(password) {
 		s.appendRootFailureAudit(ctx, requestID, "口令形狀不合格")
 		s.log.Warn("Root 登入被拒：口令形狀不合格", "request_id", requestID)
-		return Outcome{}, ErrInvalidCredentials
+		return Outcome{}, true, nil
 	}
 	proof, err := identity.VerifyRootCredential(s.rootHash, password)
 	if err != nil {
@@ -226,16 +367,16 @@ func (s *Service) LoginRoot(ctx context.Context, password, requestID string) (Ou
 			s.log.Warn("Root 登入被拒：憑據不符", "request_id", requestID)
 		}
 		s.appendRootFailureAudit(ctx, requestID, "Root 憑據校驗未透過")
-		return Outcome{}, ErrInvalidCredentials
+		return Outcome{}, true, nil
 	}
 	principal, err := identity.Root(proof, identity.OriginHTTPRequest)
 	if err != nil {
-		return Outcome{}, fmt.Errorf("auth: 構造 Root 主體失敗: %w", err)
+		return Outcome{}, false, fmt.Errorf("auth: 構造 Root 主體失敗: %w", err)
 	}
 
 	subjectID, err := identity.RootSubjectID()
 	if err != nil {
-		return Outcome{}, fmt.Errorf("auth: Root 審計主體標識異常: %w", err)
+		return Outcome{}, false, fmt.Errorf("auth: Root 審計主體標識異常: %w", err)
 	}
 
 	var outcome Outcome
@@ -252,10 +393,10 @@ func (s *Service) LoginRoot(ctx context.Context, password, requestID string) (Ou
 	})
 	if err != nil {
 		// 交易失敗不猜原因是哪一半：會話與審計同生同滅，這次登入就是沒有發生。
-		return Outcome{}, fmt.Errorf("auth: Root 登入落地失敗: %w", err)
+		return Outcome{}, false, fmt.Errorf("auth: Root 登入落地失敗: %w", err)
 	}
 	s.log.Info("Root 登入成功", "request_id", requestID)
-	return outcome, nil
+	return outcome, false, nil
 }
 
 // rootLoginRecord 產生 Root 域登入審計。

@@ -483,6 +483,19 @@ func run(ctx context.Context, releaseSignals func(), args []string, out io.Write
 		lg.Error("憑據雜湊參數檔不合格", "err", err)
 		return err
 	}
+	// 登入失敗控制與限流：閾值取自 security.login_guard（啟動校驗已過，
+	// 這裡的構造失敗只剩「裝配代碼寫錯」一種可能，同樣中斷啟動不帶病上線）。
+	loginGuard, err := auth.NewLoginGuard(auth.GuardConfig{
+		FailLimit:       cfg.Security.LoginGuard.FailLimit,
+		Window:          time.Duration(cfg.Security.LoginGuard.WindowMinutes) * time.Minute,
+		Cooldown:        time.Duration(cfg.Security.LoginGuard.CooldownMinutes) * time.Minute,
+		SourceFailLimit: cfg.Security.LoginGuard.SourceFailLimit,
+		MaxEntries:      cfg.Security.LoginGuard.MaxEntries,
+	}, timeutil.System())
+	if err != nil {
+		lg.Error("登入守衛組裝失敗", "err", err)
+		return err
+	}
 	authService, err := auth.New(auth.Deps{
 		DB:               db,
 		Sessions:         sessionStore,
@@ -490,6 +503,7 @@ func run(ctx context.Context, releaseSignals func(), args []string, out io.Write
 		Audits:           audit.NewStore(timeutil.System()),
 		RootPasswordHash: cfg.Security.RootPasswordHash,
 		Hashing:          hashingParams,
+		Guard:            loginGuard,
 		Log:              lg.Logger,
 	})
 	if err != nil {

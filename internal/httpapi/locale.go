@@ -108,6 +108,12 @@ var errorMessages = map[ErrorCode]map[string]string{
 		LocaleEnUS: "The request origin failed the cross-site protection check and was rejected.",
 		LocaleJaJP: "リクエストの送信元がクロスサイト保護チェックを通過しなかったため、拒否されました。",
 	},
+	CodeLoginThrottled: {
+		LocaleZhCN: "登录尝试过多，请稍后再试。",
+		LocaleZhTW: "登入嘗試次數過多，請稍後再試。",
+		LocaleEnUS: "Too many login attempts. Please try again later.",
+		LocaleJaJP: "ログイン試行回数が多すぎます。しばらくしてからもう一度お試しください。",
+	},
 }
 
 // messageFor 取得錯誤碼在指定語言的使用者訊息；語言未支援或訊息為空時回退 defaultLocale。

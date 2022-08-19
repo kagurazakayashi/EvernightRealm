@@ -61,6 +61,18 @@ disk:
 security:
   session_ttl_hours: 24
 
+  # 登入失敗控制與限流（純記憶體狀態：服務重啟即清空，不寫入資料庫）。
+  # 計量主軸是「來源位址 × 登入目標」配對：某個帳戶被擋只冷卻「這個位址對這個帳戶」，
+  # 同一出口位址後面的其他用戶不受影響；source_fail_limit 是同一位址橫掃大量帳戶時
+  # 才會觸發的來源級補集，因此刻意遠高於 fail_limit。
+  # 來源位址一律取實際連線（本服務沒有可信代理約定，不採信任何轉發標頭）。
+  login_guard:
+    fail_limit: 10                  # 視窗內單一「來源×目標」的失敗上限
+    window_minutes: 15              # 失敗計數的滑動視窗（分鐘）
+    cooldown_minutes: 15            # 觸發後的冷卻長度（分鐘）；冷卻期內的嘗試不延長它
+    source_fail_limit: 50           # 視窗內單一來源跨全部目標的失敗上限（不得低於 fail_limit）
+    max_entries: 10000              # 限流條目總數上限（限流自身的記憶體封頂）
+
   # Root 憑據（root_password_hash）不要在這裡手工填寫：它由伺服器本機的一次性命令寫入，
   # 存進檔案的是 Argon2id 編碼而不是明文口令，而且一旦有值就不再開放第二次初始化。
   #   evernight-server init-root --password-stdin --data-dir <執行資料目錄>

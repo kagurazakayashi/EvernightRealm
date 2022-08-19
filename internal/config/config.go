@@ -160,11 +160,70 @@ type SecurityConfig struct {
 	RootPasswordHash string `yaml:"root_password_hash"`
 	// Hashing 是新產生憑據的 Argon2id 參數檔（Root 與普通帳戶共用同一檔）。
 	Hashing HashingConfig `yaml:"hashing"`
+	// LoginGuard 是登入失敗控制與限流的閾值（見 internal/auth 的 LoginGuard）。
+	LoginGuard LoginGuardConfig `yaml:"login_guard"`
 	// Headers 為 HTTP 安全回應頭。
 	Headers SecurityHeadersConfig `yaml:"headers"`
 	// CORS 為跨來源存取策略；預設不開放任何來源。
 	CORS CORSConfig `yaml:"cors"`
 }
+
+// LoginGuardConfig 為登入失敗控制與限流組態。
+//
+// 計量主軸是「來源位址 × 登入目標」配對（某一帳戶被打滿只冷卻該來源對該帳戶），
+// 來源級總量是橫掃大量帳戶時的補集——兩層閾值的悬殊比例就是為局域网共享出口
+// 留的餘地：一百個用戶各自打錯幾次密碼，不該讓整棟樓登入不了的來源級閘門落下。
+//
+// 狀態純在記憶體、重啟即清空（使用者批准的語意）；這裡只有閾值，沒有持久資料。
+type LoginGuardConfig struct {
+	// FailLimit 是視窗內單一「來源×目標」的失敗上限。
+	FailLimit int `yaml:"fail_limit"`
+	// WindowMinutes 是失敗計數的滑動視窗長度（分鐘）。
+	WindowMinutes int `yaml:"window_minutes"`
+	// CooldownMinutes 是觸發上限後的冷卻長度（分鐘）；冷卻期內被擋的嘗試不延長它。
+	CooldownMinutes int `yaml:"cooldown_minutes"`
+	// SourceFailLimit 是視窗內單一來源跨全部目標的失敗上限。
+	SourceFailLimit int `yaml:"source_fail_limit"`
+	// MaxEntries 是限流條目總數上限：限流自己必須是有限資源，
+	// 否則「餵海量隨機鍵耗盡伺服器記憶體」會成為攻擊登入端點的新路線。
+	MaxEntries int `yaml:"max_entries"`
+}
+
+// Validate 正規化並校驗登入失敗控制閾值。
+//
+// 界限與 internal/auth 的 LoginGuard 構造校驗一致（兩邊都擋：啟動時組態層先報
+// 帶鍵名的可讀錯誤，構造層再守最後一道——組裝代碼出錯也不讓半套閾值上線）。
+// 上界的意義是「這個值本身還構不構成資源風險」：MaxEntries 十萬條約十 MB 量級，
+// 分鐘数超過一天就不再是「稍後再試」而是變相永久鎖人。
+func (g LoginGuardConfig) Validate() error {
+	if g.FailLimit < 1 || g.FailLimit > maxLoginGuardLimit {
+		return fmt.Errorf("config: security.login_guard.fail_limit 需為 1..%d，實際為 %d", maxLoginGuardLimit, g.FailLimit)
+	}
+	if g.SourceFailLimit < 1 || g.SourceFailLimit > maxLoginGuardLimit {
+		return fmt.Errorf("config: security.login_guard.source_fail_limit 需為 1..%d，實際為 %d", maxLoginGuardLimit, g.SourceFailLimit)
+	}
+	if g.SourceFailLimit < g.FailLimit {
+		return fmt.Errorf("config: security.login_guard.source_fail_limit(%d) 不得低於 fail_limit(%d)（否則單一帳戶就會鎖死整個來源）",
+			g.SourceFailLimit, g.FailLimit)
+	}
+	if g.WindowMinutes < 1 || g.WindowMinutes > maxLoginGuardMinutes {
+		return fmt.Errorf("config: security.login_guard.window_minutes 需為 1..%d，實際為 %d", maxLoginGuardMinutes, g.WindowMinutes)
+	}
+	if g.CooldownMinutes < 1 || g.CooldownMinutes > maxLoginGuardMinutes {
+		return fmt.Errorf("config: security.login_guard.cooldown_minutes 需為 1..%d，實際為 %d", maxLoginGuardMinutes, g.CooldownMinutes)
+	}
+	if g.MaxEntries < 1 || g.MaxEntries > maxLoginGuardEntries {
+		return fmt.Errorf("config: security.login_guard.max_entries 需為 1..%d，實際為 %d", maxLoginGuardEntries, g.MaxEntries)
+	}
+	return nil
+}
+
+// 登入失敗控制的硬界限（與 internal/auth 的 LoginGuard 上界對齊）。
+const (
+	maxLoginGuardLimit   = 10000
+	maxLoginGuardMinutes = 1440
+	maxLoginGuardEntries = 100000
+)
 
 // HashingConfig 為憑據雜湊的參數策略（新產生時生效）。
 //
@@ -322,6 +381,15 @@ func Default() Config {
 		},
 		Security: SecurityConfig{
 			SessionTTLHours: 24,
+			// 登入失敗控制的預設閾值（使用者批准）：配對 10 次、來源 50 次、
+			// 視窗與冷卻各 15 分鐘、限流表封頂一萬條。
+			LoginGuard: LoginGuardConfig{
+				FailLimit:       10,
+				WindowMinutes:   15,
+				CooldownMinutes: 15,
+				SourceFailLimit: 50,
+				MaxEntries:      10000,
+			},
 			CORS: CORSConfig{
 				// 來源清單刻意留空：跨域預設關閉，需要時由部署者明確開啟。
 				AllowedMethods: []string{"GET", "HEAD", "OPTIONS"},
@@ -574,6 +642,12 @@ func (c *Config) Validate() error {
 	// 雜湊參數檔在啟動即整體校驗：把「打錯一個參數導致憑據檔半生不熟」
 	// 關在啟動門外，之後 Hash 路徑拿到的 Params 一定合法。
 	if _, err := c.Security.Hashing.Params(); err != nil {
+		return err
+	}
+
+	// 登入失敗控制閾值同樣在啟動整體校驗：0 在这里不是「沿用預設」的語意
+	// （Default() 已填好預設值，寫出 0 只可能是組態檔打錯），一律拒絕。
+	if err := c.Security.LoginGuard.Validate(); err != nil {
 		return err
 	}
 
@@ -987,6 +1061,11 @@ func applyEnv(cfg *Config) error {
 		{&cfg.Security.Hashing.TimeCost, "ER_SECURITY_HASHING_TIME_COST"},
 		{&cfg.Security.Hashing.Parallelism, "ER_SECURITY_HASHING_PARALLELISM"},
 		{&cfg.Security.Hashing.KeyLength, "ER_SECURITY_HASHING_KEY_LENGTH"},
+		{&cfg.Security.LoginGuard.FailLimit, "ER_SECURITY_LOGIN_GUARD_FAIL_LIMIT"},
+		{&cfg.Security.LoginGuard.WindowMinutes, "ER_SECURITY_LOGIN_GUARD_WINDOW_MINUTES"},
+		{&cfg.Security.LoginGuard.CooldownMinutes, "ER_SECURITY_LOGIN_GUARD_COOLDOWN_MINUTES"},
+		{&cfg.Security.LoginGuard.SourceFailLimit, "ER_SECURITY_LOGIN_GUARD_SOURCE_FAIL_LIMIT"},
+		{&cfg.Security.LoginGuard.MaxEntries, "ER_SECURITY_LOGIN_GUARD_MAX_ENTRIES"},
 		{&cfg.Logs.RetentionDays, "ER_LOGS_RETENTION_DAYS"},
 		{&cfg.Disk.CheckIntervalMS, "ER_DISK_CHECK_INTERVAL_MS"},
 		{&cfg.Server.ReadHeaderTimeoutMS, "ER_SERVER_READ_HEADER_TIMEOUT_MS"},
@@ -1079,6 +1158,16 @@ disk:
 
 security:
   session_ttl_hours: 24
+
+  # 登入失敗控制與限流（純記憶體狀態：服務重啟即清空，不寫入資料庫）。
+  # 計量主軸是「來源位址 × 登入目標」配對；來源級總量是橫掃大量帳戶時的補集。
+  # 來源位址一律取實際連線（沒有可信代理約定，不採信任何轉發標頭）。
+  login_guard:
+    fail_limit: 10                  # 視窗內單一「來源×目標」的失敗上限
+    window_minutes: 15              # 失敗計數的滑動視窗（分鐘）
+    cooldown_minutes: 15            # 觸發後的冷卻長度（分鐘）；冷卻期內的嘗試不延長它
+    source_fail_limit: 50           # 視窗內單一來源跨全部目標的失敗上限（不得低於 fail_limit）
+    max_entries: 10000              # 限流條目總數上限（限流自身的記憶體封頂）
 
   # 憑據雜湊（Argon2id）參數檔：只在「新產生憑據」時生效，
   # 既有 Root 雜湊與帳戶雜湊按編碼內自帶參數校驗，換檔不影響登入。
