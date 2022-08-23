@@ -54,7 +54,9 @@ func (s *Server) apiRoutes() []apiRoute {
 	}
 	// auth 端點由注入的用例決定有無（未注入時清單為空）：登記與否都只有這一個來源，
 	// 回退排除清單因此自動同步——「端點不存在但首段被排除」與「反過來」都無法發生。
-	return append(routes, s.authEndpoints()...)
+	routes = append(routes, s.authEndpoints()...)
+	// 初始化狀態端點同一個來源、同一個有無判定（未注入來源時不掛）。
+	return append(routes, s.initStatusEndpoints()...)
 }
 
 // apiFirstSegments 從登記清單導出各端點的路徑首段集合。

@@ -517,6 +517,9 @@ func run(ctx context.Context, releaseSignals func(), args []string, out io.Write
 		Log:      lg.Logger,
 		ErrorLog: lg.ErrorLogWriter(slog.LevelError),
 		Auth:     authService,
+		// Root 初始化狀態的只讀來源：只查組態檔本身，不開任何寫入通路
+		// （初始化仍然只有 evernight-server init-root 這一條路）。
+		InitStatus: initStatusSource(cfg),
 	})
 	ln, err := srv.Listen()
 	if err != nil {

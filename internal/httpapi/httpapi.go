@@ -3,6 +3,8 @@
 // 業務端點一律掛在根路徑（無版本前綴，依 S02 決策），由 apiRoutes 集中登記。
 // 基礎端點有三個：/health 回答進程存活、/ready 回答依賴（資料庫）就緒與否、
 // /time 回答伺服器當前時間與顯示時區；三者都是 GET/HEAD，且不採信請求內容提供的時間。
+// auth 端點與 Root 初始化狀態端點則由裝配時有沒有注入來源決定（見 Deps），
+// 未注入時一個都不掛，協定層行為與沒有這些端點的版次逐字相同。
 // 其餘路徑由 web 層接手：內嵌的 Flutter Web 產物以同一路徑空間提供靜態資源，
 // 深連結回退應用外殼；未內嵌產物時這些路徑一律回統一 404 信封（見 web.go）。
 // 輸入保護（請求體上限、處理期限、連線層期限、JSON 解碼限制）於中介層與 http.Server 設定；
@@ -52,6 +54,10 @@ type Deps struct {
 	// 為 nil 表示本執行檔不開放 auth 端點：路由、回退清單與錯誤面都和未掛載時
 	// 逐字相同（與 Web Deps 同一取向——「裝配了什麼就服務什麼」，傳輸層不猜）。
 	Auth AuthUseCase
+	// InitStatus 為 Root 初始化狀態的只讀來源（internal/app 從 internal/rootinit 取）。
+	// 為 nil 表示不登記該端點：這個執行檔不對外回報初始化狀態。
+	// 注入的實作只准讀、不准寫——它會被一個匿名可讀的 GET 端點直接呼叫。
+	InitStatus func() (RootInitStatus, error)
 }
 
 // Server 為 HTTP 服務層。
@@ -78,6 +84,8 @@ type Server struct {
 	// auth 為登入用例入口（可為 nil）；nil 時 authEndpoints 回空清單，
 	// 一個 auth 端點都不掛。
 	auth AuthUseCase
+	// initStatus 為 Root 初始化狀態的只讀來源（可為 nil）；nil 時同樣一個端點都不掛。
+	initStatus func() (RootInitStatus, error)
 }
 
 // New 以組態、版本字串與外部依賴建立 HTTP 服務層。
@@ -106,6 +114,7 @@ func New(cfg *config.Config, version string, deps Deps) *Server {
 		displayZone: cfg.DisplayLocation(),
 		web:         deps.Web,
 		auth:        deps.Auth,
+		initStatus:  deps.InitStatus,
 	}
 	s.httpSrv = &http.Server{
 		Addr:    cfg.Server.Listen,
