@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"path/filepath"
 	"testing"
@@ -330,6 +331,92 @@ func TestResolveCollapsesRejections(t *testing.T) {
 	}
 	if _, _, err := e.service.Resolve(ctx, outcome.Secret); !errors.Is(err, ErrInvalidSession) {
 		t.Errorf("已撤銷會話應收斂為 ErrInvalidSession，實際 %v", err)
+	}
+}
+
+// TestLogoutRootRevokesAndAuditsInTransaction 驗證 Root 登出：會話被撤銷（随即解析不出主體）
+// 且 root_audit 落下一筆 auth.logout，其 target_id 指向該會話、reason 不含會話秘密。
+func TestLogoutRootRevokesAndAuditsInTransaction(t *testing.T) {
+	e := newEnv(t, true)
+	ctx := context.Background()
+	outcome, err := e.service.LoginRoot(ctx, testRootPassword, "req-root", testSourceIP)
+	if err != nil {
+		t.Fatalf("Root 登入應成功：%v", err)
+	}
+	if err := e.service.Logout(ctx, outcome.Principal, outcome.Session, "req-logout"); err != nil {
+		t.Fatalf("Root 登出應成功：%v", err)
+	}
+	if _, _, err := e.service.Resolve(ctx, outcome.Secret); !errors.Is(err, ErrInvalidSession) {
+		t.Errorf("登出後該秘密應解析失敗：%v", err)
+	}
+	if n := countRootAudit(t, e.db, "auth.logout"); n != 1 {
+		t.Fatalf("Root 登出應留一筆 auth.logout，實際 %d", n)
+	}
+	var (
+		targetID string
+		reason   sql.NullString
+	)
+	err = e.db.SQL().QueryRowContext(ctx,
+		"SELECT target_id, reason FROM root_audit WHERE action = 'auth.logout'").Scan(&targetID, &reason)
+	if err != nil {
+		t.Fatalf("讀回登出審計失敗：%v", err)
+	}
+	if targetID != outcome.Session.ID.String() {
+		t.Errorf("登出審計 target_id 應指向該會話：%q vs %q", targetID, outcome.Session.ID.String())
+	}
+	// 空 reason 在表裡是 NULL（與 audit 仓储的空值約定一致）；總之不得帶會話秘密。
+	if reason.Valid && reason.String != "" {
+		t.Errorf("登出審計 reason 應為空，不帶任何秘密：%q", reason.String)
+	}
+}
+
+// TestLogoutAccountRevokesWithoutAudit 釘住沿用登入的審計邊界：普通帳戶登出只撤銷會話、
+// 一律不進審計表（無角色帳戶的審計主體類別仍未批准）。
+func TestLogoutAccountRevokesWithoutAudit(t *testing.T) {
+	e := newEnv(t, false)
+	ctx := context.Background()
+	e.createAccount(t, "logout_acc", account.StatusActive)
+	outcome, err := e.service.LoginAccount(ctx, "logout_acc", testAccountPassword, "req", testSourceIP)
+	if err != nil {
+		t.Fatalf("登入應成功：%v", err)
+	}
+	if err := e.service.Logout(ctx, outcome.Principal, outcome.Session, "req-logout"); err != nil {
+		t.Fatalf("帳戶登出應成功：%v", err)
+	}
+	if _, _, err := e.service.Resolve(ctx, outcome.Secret); !errors.Is(err, ErrInvalidSession) {
+		t.Errorf("登出後該秘密應解析失敗：%v", err)
+	}
+	var n int
+	for _, table := range []string{"root_audit", "activity_audit"} {
+		if err := e.db.SQL().QueryRowContext(ctx, "SELECT COUNT(*) FROM "+table).Scan(&n); err != nil {
+			t.Fatalf("統計 %s 失敗：%v", table, err)
+		}
+		if n != 0 {
+			t.Errorf("普通帳戶登出不可寫入 %s（現有 %d 筆）", table, n)
+		}
+	}
+}
+
+// TestLogoutIsIdempotentAtServiceLayer 驗證登出在服務層的幂等：重複撤銷同一枚已失效的
+// 會話不報錯、不再追加審計、也不簽發任何新會話。
+func TestLogoutIsIdempotentAtServiceLayer(t *testing.T) {
+	e := newEnv(t, true)
+	ctx := context.Background()
+	outcome, err := e.service.LoginRoot(ctx, testRootPassword, "req-root", testSourceIP)
+	if err != nil {
+		t.Fatalf("Root 登入應成功：%v", err)
+	}
+	if err := e.service.Logout(ctx, outcome.Principal, outcome.Session, "req-logout-1"); err != nil {
+		t.Fatalf("首次登出應成功：%v", err)
+	}
+	if err := e.service.Logout(ctx, outcome.Principal, outcome.Session, "req-logout-2"); err != nil {
+		t.Fatalf("重複登出應幂等回 nil，實際 %v", err)
+	}
+	if n := countRootAudit(t, e.db, "auth.logout"); n != 1 {
+		t.Errorf("重複登出不可追加第二筆審計，實際 %d", n)
+	}
+	if n := countSessions(t, e.db); n != 1 {
+		t.Errorf("登出不得產生新會話，現有 %d 行", n)
 	}
 }
 

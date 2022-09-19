@@ -385,7 +385,7 @@ func (s *Service) attemptRoot(ctx context.Context, password, requestID string) (
 		if err != nil {
 			return err
 		}
-		if _, err := s.audits.Append(tctx, tx, s.rootLoginRecord(subjectID, "auth.login_success", sess.ID.String(), requestID, "")); err != nil {
+		if _, err := s.audits.Append(tctx, tx, s.rootSessionRecord(subjectID, "auth.login_success", sess.ID.String(), requestID, "")); err != nil {
 			return err
 		}
 		outcome = Outcome{Principal: principal, Session: sess, Secret: secret}
@@ -399,13 +399,14 @@ func (s *Service) attemptRoot(ctx context.Context, password, requestID string) (
 	return outcome, false, nil
 }
 
-// rootLoginRecord 產生 Root 域登入審計。
+// rootSessionRecord 產生 Root 域的會話生命週期審計（登入成功、登出撤銷）。
 //
+// 失敗記錄與成功記錄共用這裡：兩者只差 action 與 sessionID。
 // reason 只講結論（「憑據校驗未透過」這種內部分類），不帶口令、不帶雜湊、
 // 不帶錯誤鏈——那些屬日誌，不屬要長期保留的審計事實。
 // sessionID 在失敗記錄上是空字串：那一次登入沒有簽發任何會話，
 // 拿「不存在的會話標識」冒充 target 等於造出一個查無此事的指紋。
-func (s *Service) rootLoginRecord(subjectID idgen.ID, action, sessionID, requestID, reason string) audit.Record {
+func (s *Service) rootSessionRecord(subjectID idgen.ID, action, sessionID, requestID, reason string) audit.Record {
 	return audit.Record{
 		Scope:     audit.ScopeRoot,
 		Actor:     audit.Actor{Kind: audit.ActorRoot, ID: subjectID},
@@ -426,7 +427,7 @@ func (s *Service) appendRootFailureAudit(ctx context.Context, requestID, reason 
 		s.log.Warn("Root 登入失敗的審計未寫入：保留標識異常", "err", err)
 		return
 	}
-	rec := s.rootLoginRecord(subjectID, "auth.login_failure", "", requestID, reason)
+	rec := s.rootSessionRecord(subjectID, "auth.login_failure", "", requestID, reason)
 	if _, err := s.audits.Append(ctx, s.db.SQL(), rec); err != nil {
 		s.log.Warn("Root 登入失敗的審計未寫入", "err", err, "request_id", requestID)
 	}
@@ -449,6 +450,62 @@ func (s *Service) Resolve(ctx context.Context, secret string) (identity.Principa
 		return identity.Principal{}, session.Session{}, fmt.Errorf("auth: 會話解析失敗: %w", err)
 	}
 	return principal, sess, nil
+}
+
+// Logout 撤銷一個「剛經 Resolve 換回主體」的會話；這是登出端點的領域入口。
+//
+// 「幂等」在這裡的意義：撤銷一個早已不在的會話不是錯誤，目標狀態（這個憑據不再換得出身份）
+// 本就已經達成。Revoke 的 ErrNotFound 對呼叫端一律收斂為 nil——重複登出、
+// 或在「解析→撤銷」這段窗口內被並發撤銷／過期，都不應該把使用者朝「重新登入」推。
+//
+// 審計的落地範圍沿用 R1-009 已批准的判定：
+//   - Root 主體：撤銷與 root_audit 的 `auth.logout` 落在同一個交易——審計寫不進去，
+//     會話就不撤銷，兩者同生同滅。這是「Root 域事件必須在 Root 審計留痕」的合同，
+//     也是「不留下無痕跡的特權變更」的具體形態。
+//   - 普通帳戶（含 server_admin）：只進執行日誌，不進審計表。R1-006／008／009 把
+//     「普通帳戶的審計主體類別」留在未批准邊界；本步不擅自歸類，也不降级成 system。
+//     Root 撤銷那筆審計的 actor 用保留的 Root 主體標識、target 指向會話標識；
+//     target、reason 與 request_id 全部經 audit 模組的遮罩管線與長度閘。
+//
+// 呼叫端（傳輸層）必須只在「已解析出一個有效會話」的路徑上呼叫本方法，
+// 這樣「撤銷不存在的會話」永遠是幂等 no-op，而不是被誤用成一個可探測的信號。
+func (s *Service) Logout(ctx context.Context, principal identity.Principal, sess session.Session, requestID string) error {
+	if principal.IsRoot() {
+		subjectID, err := identity.RootSubjectID()
+		if err != nil {
+			return fmt.Errorf("auth: Root 審計主體標識異常: %w", err)
+		}
+		err = s.db.InTx(ctx, func(tctx context.Context, tx *database.Tx) error {
+			if _, err := s.sessions.Revoke(tctx, tx, sess.ID); err != nil {
+				return err
+			}
+			rec := s.rootSessionRecord(subjectID, "auth.logout", sess.ID.String(), requestID, "")
+			if _, err := s.audits.Append(tctx, tx, rec); err != nil {
+				return err
+			}
+			return nil
+		})
+		if err != nil {
+			if errors.Is(err, session.ErrNotFound) {
+				// 竄改、過期或已被別處撤銷：登出的目標已達成，不追加審計。
+				s.log.Info("Root 登出：會話已不在，按幂等收斂", "request_id", requestID)
+				return nil
+			}
+			return fmt.Errorf("auth: Root 登出落地失敗: %w", err)
+		}
+		s.log.Info("Root 登出成功", "request_id", requestID)
+		return nil
+	}
+	if _, err := s.sessions.Revoke(ctx, s.db.SQL(), sess.ID); err != nil {
+		if errors.Is(err, session.ErrNotFound) {
+			s.log.Info("帳戶登出：會話已不在，按幂等收斂", "request_id", requestID)
+			return nil
+		}
+		return fmt.Errorf("auth: 撤銷會話失敗: %w", err)
+	}
+	s.log.Info("帳戶登出成功",
+		"account", principal.AccountID().String(), "request_id", requestID)
+	return nil
 }
 
 // issue 在一個交易裡簽發會話並推進帳戶的最近登入時刻。

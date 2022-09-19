@@ -31,6 +31,10 @@ type fakeAuth struct {
 	lastLogin  func(loginName, password, requestID string)
 	lastRoot   func(password, requestID string)
 	lastSecret string
+	// logoutErr 讓傳輸層測試能釘住登出用例的回傳形態（撤銷失敗映射為 500）。
+	logoutErr error
+	// lastLogout 記錄登出收到的主體與會話（斷言「只有活會話那條路才調用撤銷」）。
+	lastLogout func(identity.Principal, session.Session)
 	// lastIP 記錄收到的來源位址：限流把「傳輸層只交實際連線位址、不交轉發標頭」
 	// 的責任放在 handler，這裡釘住「handler 確實交了 remoteHost 而不是標頭值」。
 	lastIP string
@@ -58,6 +62,13 @@ func (f *fakeAuth) Resolve(ctx context.Context, secret string) (identity.Princip
 		return f.resolveFn(secret)
 	}
 	return identity.Principal{}, session.Session{}, auth.ErrInvalidSession
+}
+
+func (f *fakeAuth) Logout(ctx context.Context, principal identity.Principal, sess session.Session, requestID string) error {
+	if f.lastLogout != nil {
+		f.lastLogout(principal, sess)
+	}
+	return f.logoutErr
 }
 
 // testOutcome 構造一個帳戶主體的登入結果（秘密固定，便於斷言它只進 Cookie）。

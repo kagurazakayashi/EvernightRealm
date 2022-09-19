@@ -72,6 +72,9 @@ type AuthUseCase interface {
 	LoginRoot(ctx context.Context, password, requestID, ip string) (auth.Outcome, error)
 	// Resolve 把一枚會話秘密換回受信主體。
 	Resolve(ctx context.Context, secret string) (identity.Principal, session.Session, error)
+	// Logout 撤銷一個剛經 Resolve 換回的主體其所綁定的會話（幂等）。
+	// 呼叫端只在「已解析出一個有效會話」的路徑上調它；撤銷結果的審計落地由用例承擔。
+	Logout(ctx context.Context, principal identity.Principal, sess session.Session, requestID string) error
 }
 
 // loginRequest 為普通帳戶登入的請求本體。欄位只准出現這兩個：
@@ -112,6 +115,15 @@ type sessionResponse struct {
 	RequestID    string `json:"request_id"`
 }
 
+// logoutResponse 是登出成功的回應本體：只有請求關聯 ID。
+//
+// 刻意不再_echo_任何身分或會話欄位——登出之後那枚憑據已換不出身份，回應裡留它
+// 只是給探測者一個「這枚秘密對應誰」的旁證。撤銷是否實際發生、是否幂等，
+// 由 2xx 與（Web 路徑的）刪除指令共同表達，不需要額外欄位。
+type logoutResponse struct {
+	RequestID string `json:"request_id"`
+}
+
 // authEndpoints 回傳 auth 端點登記清單；未注入用例時為空。
 //
 // 掛在 apiRoutes 的登記流裡，「/auth 首段屬於 API」因此自動成立，
@@ -124,6 +136,7 @@ func (s *Server) authEndpoints() []apiRoute {
 		{"/auth/login", s.allowMethods(s.handleLogin, http.MethodPost)},
 		{"/auth/root/login", s.allowMethods(s.handleRootLogin, http.MethodPost)},
 		{"/auth/session", s.allowMethods(s.handleSession, http.MethodGet, http.MethodHead)},
+		{"/auth/logout", s.allowMethods(s.handleLogout, http.MethodPost)},
 	}
 }
 
@@ -200,6 +213,65 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 		body.AccountID = id.String()
 	}
 	writeJSON(w, http.StatusOK, body)
+}
+
+// handleLogout 撤銷當前請求所綁定的會話：POST /auth/logout。
+//
+// 這是「退出必須讓伺服器端會話失效，而不只是清前端標記」那条要求的落點：
+//  1. 有副作用的方法——先過 allowRequestOrigin（CSRF 來源策略），避免跨站 forced logout；
+//  2. 憑據解析走共用的 resolveCredentials 一份入口——Cookie／Bearer 獨佔判定
+//     與「會話換主體」的規則與 /auth/session 逐字相同，不會出現「退出绕過混用校驗」的平行語意；
+//  3. 有效會話：交會話层的 Logout 用例（Root 同交易追加 root_audit 的 auth.logout；
+//     普通帳戶只進執行日誌）。Web 路徑順帶下發刪除指令，讓瀏覽器真正丟掉 Cookie；
+//     原生路徑的秘密由客戶端自己保管與刪除，伺服器不發無意義的 Cookie；
+//  4. 無憑據（credAbsent）或憑據已失效（credInvalid）：都是幂等 no-op——目標狀態
+//     （這枚憑據不再換得出身份）本已達成，一律 2xx、不創建任何新會話、
+//     不報 2003「請重新登入」。Web 路徑仍在回應裡附刪除指令，讓下一次請求乾乾淨淨。
+//
+// 冪等的邊界：本端點只撤銷「本請求憑據所指向的那一枚會話」——不做全設備退出，
+// 因為那是另一個產品決定（需要 RevokeSubject 加可信的多設備清單 UI）。
+//
+// 503／500 與 /auth/session 同形：未注入用藥、資料庫不可用都不做靜默降級。
+func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
+	s.noStore(w)
+	if !s.allowRequestOrigin(r) {
+		writeError(w, r, CodeOriginForbidden, http.StatusForbidden)
+		return
+	}
+	res := s.resolveCredentials(r)
+	switch res.status {
+	case credOK:
+		// 有效會話：交撤銷用例；冪等收斂（ErrNotFound）在用例內已是 nil。
+		if err := s.auth.Logout(r.Context(), res.resolved.Principal, res.resolved.Session,
+			requestIDFromRequest(r)); err != nil {
+			// 到這裡只剩資料庫故障這類非拒絕錯誤：回 500，細節只進日誌。
+			s.logger.Error("登出撤銷失敗", "request_id", requestIDFromRequest(r), "err", err)
+			writeError(w, r, CodeUnknown, http.StatusInternalServerError)
+			return
+		}
+		if res.viaCookie {
+			http.SetCookie(w, s.clearedSessionCookie(r))
+		}
+		writeJSON(w, http.StatusOK, logoutResponse{RequestID: requestIDFromRequest(r)})
+		return
+	case credAbsent, credInvalid:
+		// 幂等：沒有可撤銷的活會話，或目標憑據早已不在——一律 2xx。
+		if res.viaCookie {
+			http.SetCookie(w, s.clearedSessionCookie(r))
+		}
+		writeJSON(w, http.StatusOK, logoutResponse{RequestID: requestIDFromRequest(r)})
+		return
+	case credNotReady:
+		writeError(w, r, CodeNotReady, http.StatusServiceUnavailable)
+		return
+	case credConflict:
+		writeError(w, r, CodeAuthMethodConflict, http.StatusBadRequest)
+		return
+	case credUnavailable:
+		// resolveCredentials 已把內部原因進日誌；這裡只寫对外回應。
+		writeError(w, r, CodeUnknown, http.StatusInternalServerError)
+		return
+	}
 }
 
 // writeLoginFailure 把登入用例的錯誤對映為對外回應：
@@ -330,15 +402,43 @@ type resolvedSession struct {
 	ViaCookie bool
 }
 
-// resolveSession 是「請求 → 會話 → 主體」的唯一解析入口：讀取、獨佔判定、
-// 驗證、失效清除全部發生在這裡，呼叫端拿到的只有成功主體或已寫好的錯誤回應。
+// credentialStatus 是「請求 → 憑據 → 會話」解析的結論，供不同端點各自映射对外回應。
 //
-// 回傳 false 時錯誤回應已寫出，呼叫端必須立即返回——這個約定讓
-// 「忘了判錯誤」在呼叫點無從發生（拿不到主體就寫不出回應）。
-func (s *Server) resolveSession(w http.ResponseWriter, r *http.Request) (resolvedSession, bool) {
+// 分成這個列舉而不是一路寫到 writeError，是因為登出要能在「無憑據」與「憑據已失效」
+// 上把幂等 no-op 報成 2xx，而 /auth/session 這類只讀端點必須把同一件事報成 2002／2003——
+// 解析規則只有一份（杜絕兩套 Cookie／Bearer 判定），错误映射則按端點職責分岔。
+type credentialStatus int
+
+const (
+	// credOK 解析出一個有效的會話；resolved 欄位可用。
+	credOK credentialStatus = iota
+	// credNotReady 未注入登入用例（等同服務尚未具備該能力）。
+	credNotReady
+	// credConflict 認證方式混用（Cookie＋Bearer，或瀏覽器帶 Origin 企圖用 Bearer）。
+	credConflict
+	// credAbsent 請求沒有任何憑據。
+	credAbsent
+	// credInvalid 帶了憑據但伺服器判定它換不出身分（撤銷／過期／主體不可用）。
+	credInvalid
+	// credUnavailable 非拒絕類故障（資料庫等）：屬內部缺陷，不回 4xx。
+	credUnavailable
+)
+
+// credentialResolution 是一次憑據解析的結果。
+type credentialResolution struct {
+	status    credentialStatus
+	viaCookie bool
+	resolved  resolvedSession // 僅 credOK 有效
+}
+
+// resolveCredentials 是「請求 → 會話 → 主體」的唯一解析核心：讀取、獨佔判定、
+// 驗證全部發生在這裡，但不寫任何 HTTP 回應——回應的形态由呼叫端依端點職責決定。
+//
+// resolveSession 與 handleLogout 都調這一處，因此 Cookie／Bearer 的順序、混用拒絕、
+// 「帶 Origin 不準用 Bearer」與「拿秘密換主體」的規則在全服務只有一份實作。
+func (s *Server) resolveCredentials(r *http.Request) credentialResolution {
 	if s.auth == nil {
-		writeError(w, r, CodeNotReady, http.StatusServiceUnavailable)
-		return resolvedSession{}, false
+		return credentialResolution{status: credNotReady}
 	}
 
 	cookie, cookieErr := r.Cookie(sessionCookieName)
@@ -348,13 +448,11 @@ func (s *Server) resolveSession(w http.ResponseWriter, r *http.Request) (resolve
 	switch {
 	case hasCookie && hasBearer:
 		// 混用即拒：讓 Cookie 請求繞過來源校驗的唯一通路就是「再帶一枚 Bearer」。
-		writeError(w, r, CodeAuthMethodConflict, http.StatusBadRequest)
-		return resolvedSession{}, false
+		return credentialResolution{status: credConflict}
 	case hasBearer && r.Header.Get(originHeader) != "":
 		// 瀏覽器請求（任何 Origin，含同源）禁用 Bearer：瀏覽器路徑的會話由
 		// HttpOnly Cookie 獨佔，這條規則把「認證方式選擇」從客戶端手裡收走。
-		writeError(w, r, CodeAuthMethodConflict, http.StatusBadRequest)
-		return resolvedSession{}, false
+		return credentialResolution{status: credConflict}
 	}
 
 	var secret string
@@ -365,26 +463,52 @@ func (s *Server) resolveSession(w http.ResponseWriter, r *http.Request) (resolve
 	case hasBearer:
 		secret = bearer
 	default:
-		writeError(w, r, CodeNotAuthenticated, http.StatusUnauthorized)
-		return resolvedSession{}, false
+		return credentialResolution{status: credAbsent, viaCookie: viaCookie}
 	}
 
 	principal, sess, err := s.auth.Resolve(r.Context(), secret)
 	if err != nil {
 		if errors.Is(err, auth.ErrInvalidSession) {
-			if viaCookie {
-				// 順帶下發刪除指令：無效 Cookie 留在瀏覽器裡，只會讓下一次請求
-				// 再撞同一堵牆；清掉它，客戶端的「重新登入」引導才乾淨。
-				http.SetCookie(w, s.clearedSessionCookie(r))
-			}
-			writeError(w, r, CodeSessionInvalid, http.StatusUnauthorized)
-			return resolvedSession{}, false
+			return credentialResolution{status: credInvalid, viaCookie: viaCookie}
 		}
 		s.logger.Error("會話解析失敗", "request_id", requestIDFromRequest(r), "err", err)
-		writeError(w, r, CodeUnknown, http.StatusInternalServerError)
-		return resolvedSession{}, false
+		return credentialResolution{status: credUnavailable, viaCookie: viaCookie}
 	}
-	return resolvedSession{Principal: principal, Session: sess, ViaCookie: viaCookie}, true
+	return credentialResolution{
+		status:    credOK,
+		viaCookie: viaCookie,
+		resolved:  resolvedSession{Principal: principal, Session: sess, ViaCookie: viaCookie},
+	}
+}
+
+// resolveSession 是 /auth/session 這類端點使用的「解析並寫錯誤」入口：
+// 呼叫端拿到 true 時一定有可信主體，拿到 false 時回應已由本函式寫好、必須立即返回。
+//
+// 「回傳 false 時錯誤已寫出」這條約定讓「忘了判錯誤」在呼叫點無從發生
+// （拿不到主體就寫不出回應）。它只把 resolveCredentials 的結論對映成既有合同
+// 的 2002／2003／2004／500／503，行為與 R1-009 發布時逐字一致。
+func (s *Server) resolveSession(w http.ResponseWriter, r *http.Request) (resolvedSession, bool) {
+	res := s.resolveCredentials(r)
+	switch res.status {
+	case credOK:
+		return res.resolved, true
+	case credNotReady:
+		writeError(w, r, CodeNotReady, http.StatusServiceUnavailable)
+	case credConflict:
+		writeError(w, r, CodeAuthMethodConflict, http.StatusBadRequest)
+	case credAbsent:
+		writeError(w, r, CodeNotAuthenticated, http.StatusUnauthorized)
+	case credInvalid:
+		if res.viaCookie {
+			// 順帶下發刪除指令：無效 Cookie 留在瀏覽器裡，只會讓下一次請求
+			// 再撞同一堵牆；清掉它，客戶端的「重新登入」引導才乾淨。
+			http.SetCookie(w, s.clearedSessionCookie(r))
+		}
+		writeError(w, r, CodeSessionInvalid, http.StatusUnauthorized)
+	case credUnavailable:
+		writeError(w, r, CodeUnknown, http.StatusInternalServerError)
+	}
+	return resolvedSession{}, false
 }
 
 // setSessionCookie 寫入會話 Cookie。

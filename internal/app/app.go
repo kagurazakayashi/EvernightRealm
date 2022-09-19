@@ -287,7 +287,7 @@ func retentionNote(days int) string {
 // 只在內嵌產物可用時列舉「/ 網頁介面」：摘要寫了那個位址卻回 404，比不寫更糟——
 // 人會先去試它，然後才發現執行檔裡根本沒有前端。
 func endpointsNote(status webassets.Status) string {
-	const apiNote = "/health 存活、/ready 就緒、/time 伺服器時間、/auth 登入與當前會話"
+	const apiNote = "/health 存活、/ready 就緒、/time 伺服器時間、/auth 登入、當前會話與登出"
 	if status.Available {
 		return "/ 網頁介面、" + apiNote
 	}
