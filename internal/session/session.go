@@ -115,6 +115,23 @@ const (
 // String 回传状态的机器表示。
 func (s State) String() string { return string(s) }
 
+// IdleDeadline 回傳「閒置截止時刻」：最近活動之後沒有再動過，就在這個時刻失效。
+//
+// idleTTL 不為正（閒置判定關閉）時回傳零值，呼叫端以 IsZero 判別，不必自己記規則。
+// 返回值一律不超過 ExpiresAt——這是「閒置截止、不延長絕對期」這條已批准語義的落點：
+// 活動能把失效時刻往後推到閒置線，但永遠推不過建立時定死的絕對期限，
+// 因此本方法不可能造出一個「一直動就永遠不退登」的會話。
+func (s Session) IdleDeadline(idleTTL time.Duration) time.Time {
+	if idleTTL <= 0 {
+		return time.Time{}
+	}
+	deadline := s.LastActiveAt.Add(idleTTL)
+	if deadline.After(s.ExpiresAt) {
+		return s.ExpiresAt
+	}
+	return deadline
+}
+
 // Session 是一个服务端会话的领域实体，字段与 sessions 表一一对应（见迁移 0004）。
 //
 // 与迁移注释同一套三标识分工：ID 是内部主键、DeviceID 是用户可见设备标识、
@@ -138,6 +155,10 @@ type Session struct {
 }
 
 // State 按给定时刻推导会话状态；撤销优先于到期。
+//
+// 這裡只看絕對期限：閒置截止屬於策略（多長不動算閒置是組態決定），
+// 不寫進實體自己的狀態推導，否則同一個實體在不同策略下會有兩套「狀態」事實。
+// 需要含閒置的失效判定時呼叫 IdleDeadline（見 Store.Verify 的組合方式）。
 func (s Session) State(now time.Time) State {
 	switch {
 	case !s.RevokedAt.IsZero():

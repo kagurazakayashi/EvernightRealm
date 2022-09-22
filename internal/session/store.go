@@ -15,7 +15,34 @@ import (
 	"github.com/kagurazakayashi/EvernightRealm/internal/timeutil"
 )
 
-// Store 是会话的领域服务兼持久仓储：创建、验证、撤销三个入口覆盖全部生命周期。
+// Policy 是會話的有效期與清理策略。
+//
+// 各項彼此獨立，且都不由呼叫端代填「此刻」：期限與間隔屬組態決定，判定用的
+// 當前時刻一律來自注入時鐘。零值代表「絕對期限之外全部沿用既有行為」——
+// 閒置判定與寫入節流關閉，因此只給絕對期限的 NewStore 不會因新增欄位而改語意。
+type Policy struct {
+	// IdleTTL 是閒置有效期：距最近活動超過它即視同到期。0 或負值＝不啟用閒置判定。
+	// 閒置只把失效時刻往前拉，永不延長絕對期限（見 Session.IdleDeadline）。
+	IdleTTL time.Duration
+	// TouchThreshold 是「最近活動時刻」落庫的最小間隔：距上次落庫超過它才寫一行
+	// UPDATE，沒超過就只在記憶體推進。這是單寫鎖 SQLite 下的寫放大閘門——
+	// 每個已認證請求都寫一行，等於把讀多寫少的會話表變成每請求一寫。
+	// 0 或負值＝每次驗證都寫（沿用新增節流前的可觀察行為）。
+	// 閒置截止因此以「最近一次落庫的活動時刻」起算：它最多比真實活動早一個閾值被判失效
+	// （保守方向——不會讓一個本該閒置失效的會話多活），兩者必須一起配置。
+	TouchThreshold time.Duration
+	// CleanupGrace 是失效後的保留寬限期：過期或已撤銷的行再留這麼久才物理刪除。
+	//
+	// 這段窗口的對象是運維與未來的裝置清單，不是客戶端的提示：對拿著舊憑據的請求而言，
+	// 「行還在但已失效」與「行已刪除」是同一個答案（查無此秘密與已到期都收斂為
+	// ErrInvalidSecret，見 Verify），兩邊都不會因此收到不一樣的機器碼。
+	// 寬限期真正保住的是「這一枚憑據是什麼時候失效的」這條事實還能被查到的時間；
+	// 設 0 就是失效即刪，表最小，但剛失效的會話在運維側也一起消失。
+	CleanupGrace time.Duration
+}
+
+// Store 是會話的領域服務兼持久倉儲：建立、驗證、撤銷三個入口覆蓋全部生命週期，
+// Cleanup 只刪除「服務端已認定失效、且過了寬限期」的記錄，不參與任何授權判定。
 //
 // 与 internal/account 同一取向：标识唯一产生点是 idgen（DEC-014）、时刻唯一来源是
 // 注入的 timeutil.Clock（DEC-015）、秘密唯一产生点是 crypto/rand（见 secret.go），
@@ -23,12 +50,17 @@ import (
 // 因此未来的登录用例能把「会话写入 + 审计追加」组合进同一个交易——
 // 审计失败时会话行一起回滚，业务失败时也不会留下虚假的登录成功审计。
 //
-// 零值不可用，请经 NewStore 取得。
+// 到期判定完全以庫內時刻為準（expires_at、revoked_at、last_active_at），
+// 沒有任何程序內倒數計時：服務重啟後第一次驗證就能正確判出到期與閒置失效。
+//
+// 零值不可用，請經 NewStore 或 NewStoreWithPolicy 取得。
 type Store struct {
 	clock timeutil.Clock
 	// ttl 是会话寿命：到期时刻在创建时定死（created + ttl），验证通过不延长。
 	// 滑动续期与轮换属后续步骤，届时走「撤销旧会话 + 建新会话」，不改既有行。
 	ttl time.Duration
+	// policy 是閒置有效期、活動寫入節流與清理寬限期；零值即「關閉／沿用既有行為」。
+	policy Policy
 	// newID 与 randReader 以字段持有是为了让测试注入失败情境，
 	// 验证产生失败时拒绝创建而非降级（换 UUIDv4、换伪随机继续发会话都不可接受）。
 	newID      func() (idgen.ID, error)
@@ -36,15 +68,35 @@ type Store struct {
 	accounts   *account.Store
 }
 
-// NewStore 建立会话仓储。
+// NewStore 建立會話倉儲：只有絕對期限，閒置判定與活動寫入節流都關閉。
 //
 // clock 为 nil 时采用 timeutil.System()；ttl 必须为正——期限为零或负的会话
 // 是一个「创建了就永远验证不过」的对象，那种装配错误要在建立仓储时当场报出来，
 // 而不是等某个登录请求莫名其妙失败。上限组态（security.session_ttl_hours）
 // 的读取属装配层（internal/app），本套件不认识组态结构体。
 func NewStore(clock timeutil.Clock, ttl time.Duration) (*Store, error) {
+	return NewStoreWithPolicy(clock, ttl, Policy{})
+}
+
+// NewStoreWithPolicy 建立帶完整有效期與清理策略的會話倉儲。
+//
+// 策略的合法性在構造時當場校驗，不留到執行時：負值的閒置期限、節流間隔與寬限期
+// 只會造成歧義（到底是「不啟用」還是「立即失效」？），而裝配錯誤應該在啟動階段
+// 就拿到明確錯誤。寬限期允許為 0——那是「失效即刪」的運維選擇，語義清楚
+// （放棄 2003 與 2002 的可區分性，換一張最小的表），不屬於裝配錯誤；
+// 閒置與節流「不為正＝關閉」寫在 Policy 各欄自己的說明裡。
+func NewStoreWithPolicy(clock timeutil.Clock, ttl time.Duration, policy Policy) (*Store, error) {
 	if ttl <= 0 {
 		return nil, fmt.Errorf("session: 會話期限必須為正值，實際 %s", ttl)
+	}
+	if policy.IdleTTL < 0 {
+		return nil, fmt.Errorf("session: 閒置期限不可為負值（0 表示不啟用），實際 %s", policy.IdleTTL)
+	}
+	if policy.TouchThreshold < 0 {
+		return nil, fmt.Errorf("session: 活動寫入節流間隔不可為負值（0 表示每次驗證都寫），實際 %s", policy.TouchThreshold)
+	}
+	if policy.CleanupGrace < 0 {
+		return nil, fmt.Errorf("session: 清理寬限期不可為負值，實際 %s", policy.CleanupGrace)
 	}
 	if clock == nil {
 		clock = timeutil.System()
@@ -52,6 +104,7 @@ func NewStore(clock timeutil.Clock, ttl time.Duration) (*Store, error) {
 	return &Store{
 		clock:    clock,
 		ttl:      ttl,
+		policy:   policy,
 		newID:    idgen.New,
 		accounts: account.NewStore(clock),
 	}, nil
@@ -133,19 +186,27 @@ func (s *Store) Create(ctx context.Context, q database.Querier, p identity.Princ
 	return sess, secret, nil
 }
 
-// Verify 用会话秘密验证实体：通过时回传会话并把最近活动时刻推进到现在。
+// Verify 用會話秘密驗證實體：透過時回傳會話，並按節流規則推進最近活動時刻。
 //
 // 判定顺序即安全顺序，每一步都可能拒绝：
 //  1. 秘密形状与哈希查找——不合格与查无此秘密同样回 ErrInvalidSecret，不给差分信号；
-//  2. 到期与撤销——到期时刻由创建定死，撤销由 Revoke 落库，两者都以服务器时钟为准；
+//  2. 到期與撤銷——絕對到期時刻由建立定死，閒置截止以庫內 last_active_at 起算，
+//     撤銷由 Revoke 落庫，三者都以伺服器時鐘為準；
 //  3. 主体当前状态——账户主体现读 accounts.status，禁用或已不存在的账户，
 //     哪怕会话行完好也一律 ErrSubjectUnavailable。「有会话记录」从来不是授权依据。
 //
-// 注意本方法会写一行 UPDATE（last_active_at），因此 Querier 必须可写；
-// 把「验证」与「记录最近活动」合成一步，是为了让设备展示和未来的闲置策略
-// 拿到的是服务器自己确认过的活动事实，而不是另一个需要记得调用的入口。
-// UPDATE 带 revoked_at IS NULL 条件：读与写之间会话恰好被撤销时，
-// 本次验证按撤销处理，不给「撤销命令之后又成功一次」留窗口。
+// 閒置判定是「讀庫內時刻比較」，不是倒計時：程序重啟、清理任務有沒有跑過，
+// 都不改變第一次驗證就能正確判出失效這件事。
+//
+// 透過後的最近活動推進受 policy.TouchThreshold 約束：距上次落庫沒超過閾值時
+// 只在回傳的實體上推進，不寫資料庫。這一條讓「每個已認證請求一寫」退回成
+// 「每個會話每閾值一寫」；代價是閒置線以「上次落庫的活動時刻」為準，最多比真實活動
+// 早一個閾值把會話判失效（往保守的那一侧偏），配置時兩者要一起決定。
+// 真要寫時，UPDATE 帶 revoked_at IS NULL 條件：讀與寫之間會話恰好被撤銷時，
+// 本次驗證按撤銷處理，不給「撤銷命令之後又成功一次」留窗口。
+// 被節流跳過寫入的那一次沒有這層附加檢測——但本方法每次都先整行現讀，revoked_at
+// 就在里面，所以撤销最迟在下一个请求就被拒；那条 UPDATE 条件一向只是把
+// 「讀與寫之間」這幾微秒的窗口壓到最小，不是關掉窗口的機制。
 func (s *Store) Verify(ctx context.Context, q database.Querier, secret string) (Session, error) {
 	if q == nil {
 		return Session{}, errors.New("session: 需要可用的資料庫連線或交易")
@@ -171,6 +232,11 @@ func (s *Store) Verify(ctx context.Context, q database.Querier, secret string) (
 	case StateExpired:
 		return Session{}, ErrExpired
 	}
+	// 閒置截止與絕對期限共用 ErrExpired：客戶端要做的處置是同一件（重新登入），
+	// 而「你多久沒動」屬於伺服器內部策略，不值得在對外的機器碼上分出一個可探測的類別。
+	if deadline := sess.IdleDeadline(s.policy.IdleTTL); !deadline.IsZero() && !now.Before(deadline) {
+		return Session{}, ErrExpired
+	}
 	if sess.Subject.kind == SubjectAccount {
 		a, err := s.accounts.ByID(ctx, q, sess.Subject.accountID)
 		if err != nil {
@@ -185,17 +251,31 @@ func (s *Store) Verify(ctx context.Context, q database.Querier, secret string) (
 		}
 	}
 
-	res, err := q.ExecContext(ctx,
-		"UPDATE sessions SET last_active_at = ? WHERE id = ? AND revoked_at IS NULL",
-		timeutil.ToMillis(now), sess.ID.String())
-	if err != nil {
-		return Session{}, fmt.Errorf("session: 更新最近活動失敗: %w", err)
-	}
-	if n, err := res.RowsAffected(); err == nil && n == 0 {
-		return Session{}, ErrRevoked
+	if s.shouldTouch(sess.LastActiveAt, now) {
+		res, err := q.ExecContext(ctx,
+			"UPDATE sessions SET last_active_at = ? WHERE id = ? AND revoked_at IS NULL",
+			timeutil.ToMillis(now), sess.ID.String())
+		if err != nil {
+			return Session{}, fmt.Errorf("session: 更新最近活動失敗: %w", err)
+		}
+		if n, err := res.RowsAffected(); err == nil && n == 0 {
+			return Session{}, ErrRevoked
+		}
 	}
 	sess.LastActiveAt = now
 	return sess, nil
+}
+
+// shouldTouch 回報本次驗證是否值得把最近活動時刻寫進資料庫。
+//
+// 閾值不為正＝沿用「每次都寫」；否則只有距上次落庫超過閾值才寫。
+// 比較用「非正差值也寫」的保守方向：庫內時刻意外落後於當前時鐘（例如時鐘被
+// 往前調過）時，多寫一行不是錯誤，少寫一行才會讓閒置判定一直停在舊時刻。
+func (s *Store) shouldTouch(lastWritten, now time.Time) bool {
+	if s.policy.TouchThreshold <= 0 {
+		return true
+	}
+	return now.Sub(lastWritten) >= s.policy.TouchThreshold
 }
 
 // Revoke 按内部会话标识撤销一个会话，回传撤销后的实体。
@@ -304,6 +384,48 @@ func (s *Store) ResolvePrincipal(ctx context.Context, q database.Querier, secret
 		return identity.Principal{}, Session{}, fmt.Errorf("%w：會話 %s 帶著無法解析的主體類別",
 			ErrInvalidSubject, sess.ID.String())
 	}
+}
+
+// Cleanup 刪除「已失效且過了寬限期」的會話記錄，回傳刪除行數。
+//
+// 刪除條件只有兩類，都以庫內時刻為準（不看程序內經過了多少時間）：
+//   - 絕對到期：expires_at 已過去，且再過去 CleanupGrace；
+//   - 已撤銷：revoked_at 已過去，且再過去 CleanupGrace。
+//
+// 閒置失效不在這裡單獨判定，也不是遺漏：閒置截止恆不超過絕對期限
+// （見 Session.IdleDeadline），所以一條閒置失效的行必然已經過了絕對到期時刻，
+// 會隨絕對到期那一批一起被刪掉。反過來，把「now - last_active_at > 閒置」寫進
+// 刪除條件，等於在絕對期限之外再多出一個以「最後一次活動」起算的錨點，
+// 同一件事就有兩個刪除時鐘，寬限期也再不能用一句话说清。
+// expires_at 與 revoked_at 各自不早於（或晚於）created_at 由遷移 0004 的 CHECK 保證，
+// 因此這兩個條件不需要再疊一層建立時刻的下界。
+//
+// 只刪 sessions 表，絕不碰任何審計表：清理的目標是「不再可能換出身份的憑據記錄」，
+// 不是歷史事實。審計的保留策略屬日誌／運維那條線，不在本方法裡順帶處理。
+//
+// 單條 DELETE 完成整批：SQLite 下這天然是一個原子的寫操作，不需要也故意不做
+// 分批遊標——會話行數由「活躍會話數＋寬限期內的失效行」封頂，量級不需要遊標分頁。
+//
+// Cleanup 是維護動作，不參與授權判定：入口的失效拒絕在 Verify 裡，
+// 清理任務沒跑、跑失敗或還沒跑到，都不會讓一個失效憑據繼續換出身份。
+// 刪除也換不來任何資訊增益：對客戶端而言「行還在但已過期」與「行已不存在」
+// 是同一個拒絕理由（見 ErrInvalidSecret 與 ErrExpired 的收斂）。
+func (s *Store) Cleanup(ctx context.Context, q database.Querier) (int, error) {
+	if q == nil {
+		return 0, errors.New("session: 需要可用的資料庫連線或交易")
+	}
+	cutoff := timeutil.ToMillis(s.clock.Now().Add(-s.policy.CleanupGrace))
+	res, err := q.ExecContext(ctx,
+		"DELETE FROM sessions WHERE expires_at <= ? OR (revoked_at IS NOT NULL AND revoked_at <= ?)",
+		cutoff, cutoff)
+	if err != nil {
+		return 0, fmt.Errorf("session: 清理失效會話失敗: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("session: 讀取清理數量失敗: %w", err)
+	}
+	return int(n), nil
 }
 
 // selectSessionSQL 是会话列清单的唯一定义点（栏序与 scanSession 的取值顺序同源）。

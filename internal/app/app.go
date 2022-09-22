@@ -472,8 +472,13 @@ func run(ctx context.Context, releaseSignals func(), args []string, out io.Write
 	// 各倉儲共用系統時鐘——業務時刻的單一來源在各自構造內注入，這裡只給「此刻」。
 	// 失敗一律中斷啟動：缺了會話核心或登入用例的傳輸層只開出一組「連得上但登不進」
 	// 的端點，那種半套狀態比啟動失敗更難排查。
-	sessionStore, err := session.NewStore(timeutil.System(),
-		time.Duration(cfg.Security.SessionTTLHours)*time.Hour)
+	sessionPolicy := session.Policy{
+		IdleTTL:        time.Duration(cfg.Security.SessionIdleHours) * time.Hour,
+		TouchThreshold: time.Duration(cfg.Security.SessionTouchMinutes) * time.Minute,
+		CleanupGrace:   time.Duration(cfg.Security.SessionCleanupGraceHours) * time.Hour,
+	}
+	sessionStore, err := session.NewStoreWithPolicy(timeutil.System(),
+		time.Duration(cfg.Security.SessionTTLHours)*time.Hour, sessionPolicy)
 	if err != nil {
 		lg.Error("會話核心組裝失敗", "err", err)
 		return err
@@ -558,6 +563,31 @@ func run(ctx context.Context, releaseSignals func(), args []string, out io.Write
 
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv.Serve(ln) }()
+
+	// 失效會話的清理任務：以本函式專用的可取消 context 為停止來源，因此無論是
+	// 收到停止訊號、還是服務自行結束（監聽器失效），都會先取消它再等它收尾，
+	// 不會出現「主流程已要返回、背景任務還在等永遠不來的取消」那種死等。
+	// 註冊在資料庫關閉之前（defers 反序執行），保證不會有人在連線關閉後還在寫。
+	// 週期為 0 表示部署者明確關掉了這個任務——那時完全不起 goroutine，
+	// 而不是起一個什麼都不做的背景迴圈。
+	if cfg.Security.SessionCleanupMinutes > 0 {
+		cleanupCtx, cancelCleanup := context.WithCancel(ctx)
+		cleanupDone := make(chan struct{})
+		cleanupInterval := time.Duration(cfg.Security.SessionCleanupMinutes) * time.Minute
+		go func() {
+			defer close(cleanupDone)
+			runSessionCleanup(cleanupCtx, sessionStore, db, cleanupInterval, lg.Logger)
+		}()
+		defer func() {
+			cancelCleanup()
+			<-cleanupDone
+			lg.Info("失效會話清理任務已結束")
+		}()
+		fmt.Fprintf(out, "失效會話清理：每 %s 一回合，失效後保留 %s 再物理刪除（只動會話記錄，審計一律保留）\n",
+			cleanupInterval, time.Duration(cfg.Security.SessionCleanupGraceHours)*time.Hour)
+	} else {
+		fmt.Fprintln(out, "失效會話清理：已停用（security.session_cleanup_minutes=0），失效憑據仍在請求入口被拒，但記錄不會自動移除。")
+	}
 
 	select {
 	case err := <-serveErr:

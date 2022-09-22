@@ -48,6 +48,10 @@ type Config struct {
 	// 放在 Config 上是因為「這句提醒屬於哪個部署」必須跟著這份組態走，
 	// 而不是變成套件級全域狀態（那樣兩個資料目錄的測試就會互相污染）。
 	RootHashNotice string `yaml:"-"`
+	// SessionIdleNotice 同樣不是組態欄位：記錄「閒置判定被絕對期限完全蓋住」這一句提醒，
+	// 由 Redacted() 帶進啟動摘要。這是一個能啟動、也能正常登入的配錯，
+	// 攔啟動沒有比一句可見的提醒更合適的處理方式。
+	SessionIdleNotice string `yaml:"-"`
 }
 
 // ServerConfig 為伺服器層組態。
@@ -155,6 +159,28 @@ type DiskConfig struct {
 // SecurityConfig 為安全相關組態。
 type SecurityConfig struct {
 	SessionTTLHours int `yaml:"session_ttl_hours"`
+	// SessionIdleHours 是閒置有效期：距最近一次活動超過即視同到期。
+	//
+	// 0 表示不啟用閒置判定（只受 session_ttl_hours 的絕對期限約束）。閒置只把
+	// 失效時刻往前拉，永不延長絕對期限（活動不可能讓一個登入永久有效）；
+	// 閒置判定以 session_touch_minutes 之前最後一次落庫的活動時刻為準，兩者必須一起考慮。
+	SessionIdleHours int `yaml:"session_idle_hours"`
+	// SessionTouchMinutes 是「最近活動時刻」寫入資料庫的最小間隔。
+	//
+	// 0 表示每次已認證請求都寫一行（單寫鎖 SQLite 下等於把會話表變成每請求一寫，
+	// 只適合刻意要不折不扣的閒置精度）。正值把寫入降到「每會話每間隔一次」，
+	// 代價是閒置截止以「上次落庫的活動時刻」計算，最多比真實活動早一個間隔判失效。
+	SessionTouchMinutes int `yaml:"session_touch_minutes"`
+	// SessionCleanupMinutes 是失效會話記錄的清理週期；0 表示不起背景清理任務。
+	//
+	// 關掉它不影響安全性：失效的憑據在入口就被拒，清理只是不再需要的記錄別無限堆積。
+	SessionCleanupMinutes int `yaml:"session_cleanup_minutes"`
+	// SessionCleanupGraceHours 是會話失效後保留記錄的寬限期（小時）。
+	//
+	// 這段窗口面向運維與未來的裝置清單（「這枚憑據何時失效」還查得到），
+	// 不改變對外機器碼：行還在但已過期、與行已不存在，對客戶端都是同一個 2003。
+	// 0 表示失效即刪——表最小，但剛失效的會話在運維側也一起消失。
+	SessionCleanupGraceHours int `yaml:"session_cleanup_grace_hours"`
 	// Root 憑據（Argon2id 雜湊）僅存於資料目錄 config.yaml；
 	// Redacted() 與所有日誌永不輸出其明文。
 	RootPasswordHash string `yaml:"root_password_hash"`
@@ -223,6 +249,21 @@ const (
 	maxLoginGuardLimit   = 10000
 	maxLoginGuardMinutes = 1440
 	maxLoginGuardEntries = 100000
+)
+
+// 會話有效期與清理策略的硬界限。
+//
+// 三個量級都刻意封在「一年／一天」這一類範圍內：這些欄位的正確值以小時與分鐘計，
+// 寫出 100000 分鐘這種數字只能是打錯，而不是某種罕見的部署意圖。
+// 「不啟用」一律由 0 明確表達，不需要靠一個巨大的數字來表示。
+const (
+	// maxSessionIdleHours 為閒置有效期與失效保留寬限期的上限（一年）。
+	maxSessionIdleHours = 8760
+	// maxSessionTouchMinutes 為最近活動寫入節流間隔的上限（一天）。
+	// 超過一天還要求「每幾分鐘才寫一次活動時刻」，等同於沒有節流，只是把失效判定推遲。
+	maxSessionTouchMinutes = 1440
+	// maxSessionCleanupMinutes 為背景清理週期的上限（一天）。
+	maxSessionCleanupMinutes = 1440
 )
 
 // HashingConfig 為憑據雜湊的參數策略（新產生時生效）。
@@ -381,6 +422,16 @@ func Default() Config {
 		},
 		Security: SecurityConfig{
 			SessionTTLHours: 24,
+			// 閒置判定預設關閉（0），三個清理與寫入引數用已批准的量級：
+			//
+			// 為什麼閒置不給一個「看起來更像預設」的正值——在「活動永不延長絕對期限」
+			// 這條已批准語意下，任何不小於 session_ttl_hours 的閒置值都被絕對期限完全
+			// 蓋住（等於沒有作用），而小於它的值是「多久沒動就必須重新登入」這個
+			// 產品決定，尚未批准。留 0 是唯一不擅自改變使用者可見會話壽命的寫法。
+			SessionIdleHours:         0,
+			SessionTouchMinutes:      5,
+			SessionCleanupMinutes:    30,
+			SessionCleanupGraceHours: 168,
 			// 登入失敗控制的預設閾值（使用者批准）：配對 10 次、來源 50 次、
 			// 視窗與冷卻各 15 分鐘、限流表封頂一萬條。
 			LoginGuard: LoginGuardConfig{
@@ -621,6 +672,34 @@ func (c *Config) Validate() error {
 	if c.Security.SessionTTLHours < 1 {
 		return errors.New("config: security.session_ttl_hours 必須為正整數")
 	}
+	// 閒置、寫入節流與清理三項都允許 0（明確表示「不啟用／不起背景任務」），
+	// 但設一個巨大的值通常是打錯數字——絕對期限之上再掛一個十年的閒置閘，
+	// 只會讓人誤以為閒置判定有在做事。上界因此按「一天到十年」這一類量級封頂。
+	if c.Security.SessionIdleHours < 0 || c.Security.SessionIdleHours > maxSessionIdleHours {
+		return fmt.Errorf("config: security.session_idle_hours 需為 0（不啟用閒置判定）或 1..%d，實際為 %d",
+			maxSessionIdleHours, c.Security.SessionIdleHours)
+	}
+	if c.Security.SessionTouchMinutes < 0 || c.Security.SessionTouchMinutes > maxSessionTouchMinutes {
+		return fmt.Errorf("config: security.session_touch_minutes 需為 0（每次驗證都寫）或 1..%d，實際為 %d",
+			maxSessionTouchMinutes, c.Security.SessionTouchMinutes)
+	}
+	if c.Security.SessionCleanupMinutes < 0 || c.Security.SessionCleanupMinutes > maxSessionCleanupMinutes {
+		return fmt.Errorf("config: security.session_cleanup_minutes 需為 0（不起背景清理）或 1..%d，實際為 %d",
+			maxSessionCleanupMinutes, c.Security.SessionCleanupMinutes)
+	}
+	if c.Security.SessionCleanupGraceHours < 0 || c.Security.SessionCleanupGraceHours > maxSessionIdleHours {
+		return fmt.Errorf("config: security.session_cleanup_grace_hours 需為 0（失效即刪）或 1..%d，實際為 %d",
+			maxSessionIdleHours, c.Security.SessionCleanupGraceHours)
+	}
+	// 閒置不小於絕對期限時，閒置判定永遠被絕對期限蓋掉：last_active_at 不早於 created_at，
+	// 所以 last_active + 閒置 ≥ created + 絕對期限，封頂後恆等於絕對到期時刻
+	// （相等那一格同樣不會比絕對期限更早，因此連「剛好等於」也算進去）。
+	// 這不是危險配置，但部署者大概不是這個意思，因此記一句提醒而不是攔啟動。
+	if c.Security.SessionIdleHours >= c.Security.SessionTTLHours && c.Security.SessionIdleHours > 0 {
+		c.SessionIdleNotice = fmt.Sprintf(" 閒置判定未生效（security.session_idle_hours=%d 不小於"+
+			" session_ttl_hours=%d，閒置截止永不早於絕對期限；要讓閒置判定做事請設成小於絕對期限的值，"+
+			"或設 0 明確關閉）", c.Security.SessionIdleHours, c.Security.SessionTTLHours)
+	}
 	// Root 憑據的形狀：先以內建常數比對前綴（攔住「拿一般文字冒充雜湊」），
 	// 再用 credential 的嚴格解析確認它真的可用。
 	//
@@ -645,7 +724,7 @@ func (c *Config) Validate() error {
 		return err
 	}
 
-	// 登入失敗控制閾值同樣在啟動整體校驗：0 在这里不是「沿用預設」的語意
+	// 登入失敗控制閾值同樣在啟動整體校驗：0 在這裡不是「沿用預設」的語意
 	// （Default() 已填好預設值，寫出 0 只可能是組態檔打錯），一律拒絕。
 	if err := c.Security.LoginGuard.Validate(); err != nil {
 		return err
@@ -909,12 +988,14 @@ func (c Config) DisplayLocation() *time.Location {
 
 // Redacted 回傳組態的脫敏摘要（供啟動日誌），機密欄位一律顯示 [REDACTED]。
 func (c Config) Redacted() string {
-	return fmt.Sprintf("組態摘要：listen=%s data_dir=%s timezone=%s db=%s busy_timeout_ms=%d media=%s documents=%s attachments=%s backups=%s logs_dir=%s logs_level=%s logs_prefix=%s logs_retention_days=%d session_ttl_hours=%d root_password_hash=%s%s hashing=[%s] http_timeouts_ms=[read_header=%d read=%d write=%d idle=%d request=%d shutdown=%d] max_body_bytes=%d security_headers=[frame_options=%s csp=%s referrer_policy=%s permissions_policy=%s] cors=[%s] disk=[%s] tx=[begin_mode=%s nested=%s busy_retry_max=%d busy_retry_backoff_ms=%d timeout_ms=%d schema_guard=%s]",
+	return fmt.Sprintf("組態摘要：listen=%s data_dir=%s timezone=%s db=%s busy_timeout_ms=%d media=%s documents=%s attachments=%s backups=%s logs_dir=%s logs_level=%s logs_prefix=%s logs_retention_days=%d session_ttl_hours=%d session_idle_hours=%d session_touch_minutes=%d session_cleanup=[minutes=%d grace_hours=%d] root_password_hash=%s%s%s hashing=[%s] http_timeouts_ms=[read_header=%d read=%d write=%d idle=%d request=%d shutdown=%d] max_body_bytes=%d security_headers=[frame_options=%s csp=%s referrer_policy=%s permissions_policy=%s] cors=[%s] disk=[%s] tx=[begin_mode=%s nested=%s busy_retry_max=%d busy_retry_backoff_ms=%d timeout_ms=%d schema_guard=%s]",
 		c.Server.Listen, c.Server.DataDir, c.Server.DisplayTimezone,
 		c.Database.Path, c.Database.BusyTimeoutMS,
 		c.Media, c.Documents, c.Attachments, c.Backups,
 		c.Logs.Dir, c.Logs.Level, c.Logs.FilePrefix, c.Logs.RetentionDays,
-		c.Security.SessionTTLHours, redact(c.Security.RootPasswordHash), c.RootHashNotice,
+		c.Security.SessionTTLHours, c.Security.SessionIdleHours, c.Security.SessionTouchMinutes,
+		c.Security.SessionCleanupMinutes, c.Security.SessionCleanupGraceHours,
+		redact(c.Security.RootPasswordHash), c.RootHashNotice, c.SessionIdleNotice,
 		c.Security.Hashing.summary(),
 		c.Server.ReadHeaderTimeoutMS, c.Server.ReadTimeoutMS, c.Server.WriteTimeoutMS,
 		c.Server.IdleTimeoutMS, c.Server.RequestTimeoutMS, c.Server.ShutdownTimeoutMS, c.Server.MaxBodyBytes,
@@ -1057,6 +1138,10 @@ func applyEnv(cfg *Config) error {
 		{&cfg.Database.Transaction.BusyRetryBackoffMS, "ER_DATABASE_TRANSACTION_BUSY_RETRY_BACKOFF_MS"},
 		{&cfg.Database.Transaction.TimeoutMS, "ER_DATABASE_TRANSACTION_TIMEOUT_MS"},
 		{&cfg.Security.SessionTTLHours, "ER_SECURITY_SESSION_TTL_HOURS"},
+		{&cfg.Security.SessionIdleHours, "ER_SECURITY_SESSION_IDLE_HOURS"},
+		{&cfg.Security.SessionTouchMinutes, "ER_SECURITY_SESSION_TOUCH_MINUTES"},
+		{&cfg.Security.SessionCleanupMinutes, "ER_SECURITY_SESSION_CLEANUP_MINUTES"},
+		{&cfg.Security.SessionCleanupGraceHours, "ER_SECURITY_SESSION_CLEANUP_GRACE_HOURS"},
 		{&cfg.Security.Hashing.MemoryKiB, "ER_SECURITY_HASHING_MEMORY_KB"},
 		{&cfg.Security.Hashing.TimeCost, "ER_SECURITY_HASHING_TIME_COST"},
 		{&cfg.Security.Hashing.Parallelism, "ER_SECURITY_HASHING_PARALLELISM"},
@@ -1158,6 +1243,19 @@ disk:
 
 security:
   session_ttl_hours: 24
+
+  # 會話失效與失效記錄清理：判定一律以伺服器時鐘＋資料庫內的時刻為準，
+  # 服務重啟不會讓已失效的憑據重新可用（沒有進程內倒計時）。
+  session_idle_hours: 0             # 閒置有效期（小時）；0 = 不啟用。閒置永不延長絕對期限，
+                                    # 設成 >= session_ttl_hours 會被絕對期限完全蓋住（啟動摘要會提示）
+  session_touch_minutes: 5          # 「最近活動時刻」落庫的最小間隔（分鐘）；0 = 每個已認證請求都寫一行
+                                    # 閒置線以「上次落庫的活動時刻」起算，因此這個值最多會讓閒置判定早一個間隔；兩者一起考慮
+  session_cleanup_minutes: 30       # 失效會話記錄的背景清理周期（分鐘）；0 = 不起背景清理
+                                    # 關掉不影響安全：失效憑據在請求入口就被拒
+  session_cleanup_grace_hours: 168  # 失效後保留記錄的寬限期（小時）；0 = 失效即刪
+                                    # 這段窗口面向運維與未來的裝置清單；不改變對外機器碼
+                                    # （行已過期與行已刪除對客戶端都是同一個 2003）；
+                                    # 清理只動 sessions 表，絕不刪審計記錄
 
   # 登入失敗控制與限流（純記憶體狀態：服務重啟即清空，不寫入資料庫）。
   # 計量主軸是「來源位址 × 登入目標」配對；來源級總量是橫掃大量帳戶時的補集。
