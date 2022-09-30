@@ -132,7 +132,10 @@ func (s Session) IdleDeadline(idleTTL time.Duration) time.Time {
 	return deadline
 }
 
-// Session 是一个服务端会话的领域实体，字段与 sessions 表一一对应（见迁移 0004）。
+// Session 是一個服務端會話的領域實體，欄位對應 sessions 表（見遷移 0004、0005）。
+//
+// 刻意不帶 previous_token_hash：那是上一代秘密的驗證材料，讀它沒有任何合法用途
+// （實體的出口是回應對映與日誌摘要，兩邊都不該經手它），因此不讀進實體、不帶出倉儲。
 //
 // 与迁移注释同一套三标识分工：ID 是内部主键、DeviceID 是用户可见设备标识、
 // 认证秘密本体不在这里（库内只有其 SHA-256，见 secret.go）。
@@ -141,9 +144,15 @@ type Session struct {
 	// ID 为内部会话标识（UUIDv7），不承担认证也不作展示名。
 	ID idgen.ID
 	// DeviceID 为用户可见设备标识（独立随机 UUIDv7），展示与按设备撤销用。
+	// 輪換不換它：同一臺裝置換秘密不是多出一臺裝置，也不佔用新的裝置名額。
 	DeviceID idgen.ID
 	// Subject 为会话关联的受信主体。
 	Subject Subject
+	// RotationSeq 是秘密的世代號：建立時為 0，每換發一枚新秘密恰好加一。
+	//
+	// 它的用途是讓客戶端能判出一個回應描述的是哪一代憑據，從而令倒序送達的
+	// 舊回應不可能蓋掉手上更新的那一枚。它是計數器不是秘密，可以進回應與日誌。
+	RotationSeq int64
 	// CreatedAt 为建立时刻（服务器时钟，UTC）。
 	CreatedAt time.Time
 	// LastActiveAt 为最近一次验证通过的时刻；初值等于 CreatedAt。
@@ -187,11 +196,20 @@ var (
 	// 「格式错」与「哈希没查到」不分开，是因为对拿着秘密来验证的人而言两个答案
 	// 都只会得到同一件事：拒绝。分开报不提供任何合法流程需要的信息。
 	ErrInvalidSecret = errors.New("session: 会话秘密无效")
+	// ErrStaleSecret 表示來的是「上一代」秘密：它曾經有效，但對應的會話已換發過
+	// 新秘密，因此它換不出任何身份。
+	//
+	// 它與 ErrInvalidSecret 分開只有一個理由，而且是客戶端的處境：拿著落後一代憑據
+	// 出錯的那一條請求，多半只是與一次輪換交錯，重試即可；把它報成「會話已失效」
+	// 會把一次正常換密說成一次登出，把使用者踢回登入頁。分開報**不給**它任何訪問能力，
+	// 也不給任何新秘密——它換不來操作能力，只換回一句「你手上的憑據晚了」。
+	// 庫裡只留最近一代的雜湊，因此這個訊號不會隨歷史累積而變寬。
+	ErrStaleSecret = errors.New("session: 會話秘密已是上一代")
 	// ErrRevoked 表示会话已被撤销。只有持有有效秘密的人才查得到这个答案，
 	// 告知本人「你的会话被撤销了」是设备管理需要的信息，不是泄露。
 	ErrRevoked = errors.New("session: 会话已被撤销")
-	// ErrExpired 表示会话已到期。续期与轮换属后续步骤，一律走「建新会话」，
-	// 不存在把过期会话改回有效的通路。
+	// ErrExpired 表示會話已到期。輪換只換秘密，絕不把已到期的會話改回有效，
+	// 也不延長絕對期限（見 Store.Rotate 與遷移 0005 的 expires_at 不可變觸發器）。
 	ErrExpired = errors.New("session: 会话已到期")
 	// ErrSubjectUnavailable 表示会话记录本身有效，但其主体当前不可用：
 	// 账户已被禁用或已不存在。「会话还在就能继续操作」从设计上不成立，

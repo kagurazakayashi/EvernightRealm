@@ -75,6 +75,9 @@ type AuthUseCase interface {
 	// Logout 撤銷一個剛經 Resolve 換回的主體其所綁定的會話（幂等）。
 	// 呼叫端只在「已解析出一個有效會話」的路徑上調它；撤銷結果的審計落地由用例承擔。
 	Logout(ctx context.Context, principal identity.Principal, sess session.Session, requestID string) error
+	// RotateSession 用一枚當代會話秘密換發一枚新秘密（同一行、同一裝置、同一絕對期限）。
+	// 授權就是那枚秘密本身：呼叫端不得先把請求裡任何可自報的欄位當成身分。
+	RotateSession(ctx context.Context, secret, requestID string) (auth.Outcome, error)
 }
 
 // loginRequest 為普通帳戶登入的請求本體。欄位只准出現這兩個：
@@ -105,10 +108,15 @@ type loginResponse struct {
 }
 
 // sessionResponse 是「當前會話」的回應本體，在登入回應之上多帶建立與最近活動時刻。
+//
+// rotation_seq 是後來增補的欄位（只增不刪的相容策略）：它讓客戶端能把「手上這一枚
+// 是第幾代」與伺服器的權威事實對上一次，於是一次丟失的輪換回應可以被查出來，
+// 而不是讓客戶端只能靠猜。
 type sessionResponse struct {
 	SubjectKind  string `json:"subject_kind"`
 	AccountID    string `json:"account_id,omitempty"`
 	DeviceID     string `json:"device_id"`
+	RotationSeq  int64  `json:"rotation_seq"`
 	CreatedAt    string `json:"created_at"`
 	LastActiveAt string `json:"last_active_at"`
 	ExpiresAt    string `json:"expires_at"`
@@ -137,6 +145,7 @@ func (s *Server) authEndpoints() []apiRoute {
 		{"/auth/root/login", s.allowMethods(s.handleRootLogin, http.MethodPost)},
 		{"/auth/session", s.allowMethods(s.handleSession, http.MethodGet, http.MethodHead)},
 		{"/auth/logout", s.allowMethods(s.handleLogout, http.MethodPost)},
+		{"/auth/session/rotate", s.allowMethods(s.handleRotate, http.MethodPost)},
 	}
 }
 
@@ -204,6 +213,7 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 	body := sessionResponse{
 		SubjectKind:  subjectKindOf(resolved.Principal),
 		DeviceID:     resolved.Session.DeviceID.String(),
+		RotationSeq:  resolved.Session.RotationSeq,
 		CreatedAt:    timeutil.FormatUTC(resolved.Session.CreatedAt),
 		LastActiveAt: timeutil.FormatUTC(resolved.Session.LastActiveAt),
 		ExpiresAt:    timeutil.FormatUTC(resolved.Session.ExpiresAt),
@@ -264,6 +274,12 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	case credNotReady:
 		writeError(w, r, CodeNotReady, http.StatusServiceUnavailable)
 		return
+	case credStale:
+		// 落後一代的憑據不該能撤銷一個還活著的會話：那是把「舊秘密被看到」
+		// 變成「使用者被踢下線」的服務中斷通路。冪等的好意圖只在「目標本就失效」時成立，
+		// 這裡目標並沒有失效，所以老實報 2007，不做任何撤銷。
+		writeError(w, r, CodeSessionStale, http.StatusUnauthorized)
+		return
 	case credConflict:
 		writeError(w, r, CodeAuthMethodConflict, http.StatusBadRequest)
 		return
@@ -271,6 +287,115 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 		// resolveCredentials 已把內部原因進日誌；這裡只寫对外回應。
 		writeError(w, r, CodeUnknown, http.StatusInternalServerError)
 		return
+	}
+}
+
+// rotateResponse 是輪換成功的回應本體。
+//
+// 與 loginResponse 同一套缺席規則：新秘密不在這裡（只在 Set-Cookie），
+// 會話內部標識也不在這裡。rotation_seq 是計數器而不是秘密，可以公開給
+// 自己的客戶端——它存在的意義就是讓客戶端判得出一個回應描述的是哪一代憑據，
+// 從而不讓倒序送達的舊響應蓋掉手上更新的那一枚。
+type rotateResponse struct {
+	SubjectKind string `json:"subject_kind"`
+	AccountID   string `json:"account_id,omitempty"`
+	DeviceID    string `json:"device_id"`
+	RotationSeq int64  `json:"rotation_seq"`
+	ExpiresAt   string `json:"expires_at"`
+	RequestID   string `json:"request_id"`
+}
+
+// handleRotate 換髮新會話秘密：POST /auth/session/rotate。
+//
+// 這個端點做的事只有一件：把「本請求憑據指向的那一枚會話」的秘密換代。
+// 它的關鍵語義都寫在用例與會話層裡，這裡只負責協議層該負責的四件事：
+//  1. 有副作用的方法——先過 allowRequestOrigin（CSRF 來源策略），不讓跨站頁面
+//     替使用者換掉秘密並把後續請求打成失敗；
+//  2. 憑據解析走共用的 resolveCredentials 一份入口：Cookie／Bearer 獨佔判定、
+//     「帶 Origin 不準用 Bearer」與「拿秘密換主體」的規則與 /auth/session 逐字相同；
+//  3. 新秘密只經 setSessionCookie 送出（與登入同一條分發通路：Web 由瀏覽器代管，
+//     原生客戶端從 Set-Cookie 讀取後改用 Bearer 回傳），回應本體只有可展示的
+//     事實與世代號；屬性組合（HttpOnly／SameSite／Secure／Path）也與簽發時一致，
+//     瀏覽器按同名同域同路徑替換，輪換才不會變成「多出第二枚 Cookie」；
+//  4. 失敗按端點職責分流，不復制一套：未帶憑據 2002、混用 2004、來源不符 2005、
+//     憑據已失效 2003（Web 順帶刪除指令）、落後一代 2007（不發刪除指令，見 resolveSession）。
+//
+// 沒有 grace window、沒有請求體：請求裡沒有任何可自報的欄位，因此也沒有
+// 「客戶端聲稱自己要換哪一枚」這種越權空間。
+func (s *Server) handleRotate(w http.ResponseWriter, r *http.Request) {
+	s.noStore(w)
+	if !s.allowRequestOrigin(r) {
+		writeError(w, r, CodeOriginForbidden, http.StatusForbidden)
+		return
+	}
+	res := s.resolveCredentials(r)
+	switch res.status {
+	case credOK:
+		// 到這裡res.secret 已是「當代」憑據：Resolve 成功意味著它此刻換得出身份。
+		outcome, err := s.auth.RotateSession(r.Context(), res.secret, requestIDFromRequest(r))
+		if err != nil {
+			s.writeRotationFailure(w, r, err, res.viaCookie)
+			return
+		}
+		s.setSessionCookie(w, r, outcome.Session, outcome.Secret)
+		body := rotateResponse{
+			SubjectKind: subjectKindOf(outcome.Principal),
+			DeviceID:    outcome.Session.DeviceID.String(),
+			RotationSeq: outcome.Session.RotationSeq,
+			ExpiresAt:   timeutil.FormatUTC(outcome.Session.ExpiresAt),
+			RequestID:   requestIDFromRequest(r),
+		}
+		if id := outcome.Principal.AccountID(); !id.IsNil() {
+			body.AccountID = id.String()
+		}
+		writeJSON(w, http.StatusOK, body)
+		return
+	case credAbsent:
+		writeError(w, r, CodeNotAuthenticated, http.StatusUnauthorized)
+		return
+	case credInvalid:
+		// 失效憑據在瀏覽器裡只會讓下一次請求再撞同一堵牆，清掉它；
+		// 這裡的刪除指令不撤銷任何東西，也不簽發新會話。
+		if res.viaCookie {
+			http.SetCookie(w, s.clearedSessionCookie(r))
+		}
+		writeError(w, r, CodeSessionInvalid, http.StatusUnauthorized)
+		return
+	case credStale:
+		writeError(w, r, CodeSessionStale, http.StatusUnauthorized)
+		return
+	case credNotReady:
+		writeError(w, r, CodeNotReady, http.StatusServiceUnavailable)
+		return
+	case credConflict:
+		writeError(w, r, CodeAuthMethodConflict, http.StatusBadRequest)
+		return
+	case credUnavailable:
+		writeError(w, r, CodeUnknown, http.StatusInternalServerError)
+		return
+	}
+}
+
+// writeRotationFailure 把輪換用例的錯誤對映為對外回應。
+//
+// 三條規則，全部沿用已釋出的合同語義，不新造第二套：
+//   - ErrStaleSession → 2007：在解析與換髮之間被併發的另一次輪換搶先。
+//     不發刪除指令（有效憑據可能就在瀏覽器裡），也說不出「請重新登入」。
+//   - ErrInvalidSession → 2003：在同一個窗口裡被撤銷或到期。Web 順帶刪除指令，
+//     因為那枚 Cookie 此刻確實再也換不出身份。
+//   - 其餘（資料庫故障這類非拒絕錯誤）→ 500，細節只進日誌。
+func (s *Server) writeRotationFailure(w http.ResponseWriter, r *http.Request, err error, viaCookie bool) {
+	switch {
+	case errors.Is(err, auth.ErrStaleSession):
+		writeError(w, r, CodeSessionStale, http.StatusUnauthorized)
+	case errors.Is(err, auth.ErrInvalidSession):
+		if viaCookie {
+			http.SetCookie(w, s.clearedSessionCookie(r))
+		}
+		writeError(w, r, CodeSessionInvalid, http.StatusUnauthorized)
+	default:
+		s.logger.Error("會話輪換處理失敗", "request_id", requestIDFromRequest(r), "err", err)
+		writeError(w, r, CodeUnknown, http.StatusInternalServerError)
 	}
 }
 
@@ -420,6 +545,12 @@ const (
 	credAbsent
 	// credInvalid 帶了憑據但伺服器判定它換不出身分（撤銷／過期／主體不可用）。
 	credInvalid
+	// credStale 帶的是「上一代」憑據：會話還在，但已換發過新秘密。
+	//
+	// 單獨一檔不是為了寬待舊秘密——它一樣換不出身份——而是為了不讓一次正常輪換
+	// 把與之交錯的那條請求說成「會話已失效」。對照 handleLogout 必須把這種失敗
+	// 當成冪等成功之外的一類，/auth/session 則要把它報成可重試的 401 而非登出。
+	credStale
 	// credUnavailable 非拒絕類故障（資料庫等）：屬內部缺陷，不回 4xx。
 	credUnavailable
 )
@@ -429,6 +560,9 @@ type credentialResolution struct {
 	status    credentialStatus
 	viaCookie bool
 	resolved  resolvedSession // 僅 credOK 有效
+	// secret 是本請求帶來的憑據明文，僅在需要拿它去換發新憑據時用（見 handleRotate）。
+	// 它與 resolved 一樣只在解析成功的路上有意義，不得進日誌、回應或審計。
+	secret string
 }
 
 // resolveCredentials 是「請求 → 會話 → 主體」的唯一解析核心：讀取、獨佔判定、
@@ -468,15 +602,19 @@ func (s *Server) resolveCredentials(r *http.Request) credentialResolution {
 
 	principal, sess, err := s.auth.Resolve(r.Context(), secret)
 	if err != nil {
+		if errors.Is(err, auth.ErrStaleSession) {
+			return credentialResolution{status: credStale, viaCookie: viaCookie, secret: secret}
+		}
 		if errors.Is(err, auth.ErrInvalidSession) {
-			return credentialResolution{status: credInvalid, viaCookie: viaCookie}
+			return credentialResolution{status: credInvalid, viaCookie: viaCookie, secret: secret}
 		}
 		s.logger.Error("會話解析失敗", "request_id", requestIDFromRequest(r), "err", err)
-		return credentialResolution{status: credUnavailable, viaCookie: viaCookie}
+		return credentialResolution{status: credUnavailable, viaCookie: viaCookie, secret: secret}
 	}
 	return credentialResolution{
 		status:    credOK,
 		viaCookie: viaCookie,
+		secret:    secret,
 		resolved:  resolvedSession{Principal: principal, Session: sess, ViaCookie: viaCookie},
 	}
 }
@@ -505,6 +643,11 @@ func (s *Server) resolveSession(w http.ResponseWriter, r *http.Request) (resolve
 			http.SetCookie(w, s.clearedSessionCookie(r))
 		}
 		writeError(w, r, CodeSessionInvalid, http.StatusUnauthorized)
+	case credStale:
+		// 刻意不發刪除指令：瀏覽器裡那一枚可能已經是更新後的憑據（本輪換的 Set-Cookie
+		// 已生效），只是這條請求出發時帶的是舊的。刪掉它等於把有效憑據清走，
+		// 把一個可重試的失敗做成一次真的登出。
+		writeError(w, r, CodeSessionStale, http.StatusUnauthorized)
 	case credUnavailable:
 		writeError(w, r, CodeUnknown, http.StatusInternalServerError)
 	}

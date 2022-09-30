@@ -114,6 +114,12 @@ var errorMessages = map[ErrorCode]map[string]string{
 		LocaleEnUS: "Too many login attempts. Please try again later.",
 		LocaleJaJP: "ログイン試行回数が多すぎます。しばらくしてからもう一度お試しください。",
 	},
+	CodeSessionStale: {
+		LocaleZhCN: "本次请求携带的会话凭据已被更新的凭据取代，请重试这一次操作。",
+		LocaleZhTW: "本次請求攜帶的會話憑據已被更新的憑據取代，請重試這一次操作。",
+		LocaleEnUS: "The session credential in this request has been superseded by a newer one. Please retry this operation.",
+		LocaleJaJP: "このリクエストのセッション資格情報は新しいものに置き換えられました。この操作をもう一度実行してください。",
+	},
 }
 
 // messageFor 取得錯誤碼在指定語言的使用者訊息；語言未支援或訊息為空時回退 defaultLocale。

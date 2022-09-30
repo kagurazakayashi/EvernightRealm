@@ -35,6 +35,14 @@ type fakeAuth struct {
 	logoutErr error
 	// lastLogout 記錄登出收到的主體與會話（斷言「只有活會話那條路才調用撤銷」）。
 	lastLogout func(identity.Principal, session.Session)
+	// rotateFn 覆寫輪換用例的回傳形態；未設定時一律回 rotateErr。
+	// 與 resolveFn 同一取向：傳輸層測試要釘的是「分發與對映」，不是會不會話層判定。
+	rotateFn func(secret string) (auth.Outcome, error)
+	// rotateErr 是未設定 rotateFn 時輪換用例的回傳錯誤（nil 即回一個空結果）。
+	rotateErr error
+	// lastRotate 記錄輪換收到的秘密：斷言「端點交出去的是本請求帶來的憑據」，
+	// 以及「回應本體與 Cookie 之外沒有任何地方出現新秘密」。
+	lastRotate string
 	// lastIP 記錄收到的來源位址：限流把「傳輸層只交實際連線位址、不交轉發標頭」
 	// 的責任放在 handler，這裡釘住「handler 確實交了 remoteHost 而不是標頭值」。
 	lastIP string
@@ -69,6 +77,14 @@ func (f *fakeAuth) Logout(ctx context.Context, principal identity.Principal, ses
 		f.lastLogout(principal, sess)
 	}
 	return f.logoutErr
+}
+
+func (f *fakeAuth) RotateSession(ctx context.Context, secret, requestID string) (auth.Outcome, error) {
+	f.lastRotate = secret
+	if f.rotateFn != nil {
+		return f.rotateFn(secret)
+	}
+	return auth.Outcome{}, f.rotateErr
 }
 
 // testOutcome 構造一個帳戶主體的登入結果（秘密固定，便於斷言它只進 Cookie）。

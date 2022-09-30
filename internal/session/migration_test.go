@@ -16,8 +16,8 @@ import (
 // timeHourFallback 是本套件測試倉儲的預設會話期限。
 const timeHourFallback = time.Hour
 
-// TestMigrationCreatesSessionsTable 验证 0004 迁移落地：版本推进到迁移集最高版、
-// sessions 表、两个列级 UNIQUE 的自动索引、两个普通索引与三个触发器存在。
+// TestMigrationCreatesSessionsTable 驗證 0004 與 0005 遷移落地：版本推進到遷移集最高版、
+// sessions 表、兩個列級 UNIQUE 的自動索引、普通索引與輪換時代的觸發器存在。
 func TestMigrationCreatesSessionsTable(t *testing.T) {
 	db, _, _ := newTestEnv(t, time.Hour)
 	ctx := context.Background()
@@ -39,14 +39,28 @@ func TestMigrationCreatesSessionsTable(t *testing.T) {
 		{"table", "sessions"},
 		{"index", "sessions_expires_at_idx"},
 		{"index", "sessions_account_id_idx"},
+		{"index", "sessions_previous_token_hash_idx"},
 		{"trigger", "sessions_id_no_update"},
-		{"trigger", "sessions_security_no_update"},
+		{"trigger", "sessions_device_no_update"},
+		{"trigger", "sessions_token_hash_rotation"},
+		{"trigger", "sessions_rotation_seq_no_update"},
+		{"trigger", "sessions_expires_at_no_update"},
 	} {
 		var found string
 		if err := db.SQL().QueryRowContext(ctx,
 			"SELECT name FROM sqlite_master WHERE type = ? AND name = ?", want.kind, want.name).Scan(&found); err != nil {
 			t.Errorf("%s %s 應存在：%v", want.kind, want.name, err)
 		}
+	}
+	// 0004 那道「device_id 與 token_hash 一起不可變」的觸發器必須確實消失：
+	// 留著它，輪換那條 UPDATE 會被它先擋下，新觸發器根本沒有上場的機會。
+	var stale int
+	if err := db.SQL().QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = 'sessions_security_no_update'").Scan(&stale); err != nil {
+		t.Fatalf("查詢舊觸發器失敗：%v", err)
+	}
+	if stale != 0 {
+		t.Errorf("sessions_security_no_update 應已被 0005 移除，實際存在 %d 個", stale)
 	}
 	// device_id 与 token_hash 用的是列级 UNIQUE：索引由 SQLite 自动创建，
 	// 名称不归本迁移管，这里按数量核对「三个唯一性约束（含 TEXT 主键）都真的建了索引」。
@@ -182,21 +196,70 @@ func TestMigrationConstraintsRejectInvalidRows(t *testing.T) {
 		}
 	}
 
-	// 触发器：三个安全标识建立后不可变（换秘密=新建会话+撤销旧会话）。
+	// 觸發器：身份與期限類的更新一律擋下；換查詢鍵只有「伴隨世代號加一併留下舊雜湊」
+	// 這一種合法形狀（這裡每條都是繞過應用層的直寫，正是觸發器要對付的物件）。
+	//
+	// 拒絕原因的斷言各自盯一條觸發器的措辭，不只盯「有錯誤發生」：否則一個語法錯誤
+	// 或無關約束也能讓用例變綠，而觸發器本身早已被改壞。
+	otherHash := strings.Repeat("e", tokenHashLen)
 	updateRejections := []struct {
 		name  string
 		query string
+		args  []any
+		frag  string
 	}{
-		{"改主鍵", "UPDATE sessions SET id = ? WHERE id = ?"},
-		{"改設備標識", "UPDATE sessions SET device_id = ? WHERE id = ?"},
-		{"換查找鍵", "UPDATE sessions SET token_hash = ? WHERE id = ?"},
+		{"改主鍵", "UPDATE sessions SET id = ? WHERE id = ?",
+			[]any{identitytest.NewID(t).String(), sessionID.String()}, "不得修改"},
+		{"改設備標識", "UPDATE sessions SET device_id = ? WHERE id = ?",
+			[]any{identitytest.NewID(t).String(), sessionID.String()}, "不可變"},
+		{"裸換查找鍵（不動世代號）", "UPDATE sessions SET token_hash = ? WHERE id = ?",
+			[]any{otherHash, sessionID.String()}, "只能經輪換更新"},
+		{"換查找鍵但不留舊哈希", "UPDATE sessions SET token_hash = ?, rotation_seq = rotation_seq + 1 WHERE id = ?",
+			[]any{otherHash, sessionID.String()}, "只能經輪換更新"},
+		// 這一條同時踩到兩道觸發器（世代號跳兩格、新雜湊也沒留舊雜湊），
+		// 先跑哪一道由 SQLite 決定，因此只斷言「是世代號那條不變量擋的」。
+		{"世代號一次跳兩格", "UPDATE sessions SET token_hash = ?, previous_token_hash = token_hash, rotation_seq = rotation_seq + 2 WHERE id = ?",
+			[]any{otherHash, sessionID.String()}, "rotation_seq"},
+		{"只動世代號不換哈希", "UPDATE sessions SET rotation_seq = rotation_seq + 1 WHERE id = ?",
+			[]any{sessionID.String()}, "世代號"},
+		{"改絕對期限（輪換不是續期）", "UPDATE sessions SET expires_at = expires_at + 3600000 WHERE id = ?",
+			[]any{sessionID.String()}, "不可變"},
 	}
 	for _, tc := range updateRejections {
-		if _, err := db.SQL().ExecContext(ctx, tc.query, identitytest.NewID(t).String(), sessionID.String()); err == nil {
+		if _, err := db.SQL().ExecContext(ctx, tc.query, tc.args...); err == nil {
 			t.Errorf("%s：應被觸發器擋下", tc.name)
-		} else if !strings.Contains(err.Error(), "不得修改") && !strings.Contains(err.Error(), "不可变") {
-			t.Errorf("%s：錯誤應出自觸發器訊息，實際 %v", tc.name, err)
+		} else if !strings.Contains(err.Error(), tc.frag) {
+			t.Errorf("%s：錯誤應含 %q，實際 %v", tc.name, tc.frag, err)
 		}
+	}
+
+	// 合法形狀的對照面：同一張表上，帶著世代號加一並留下舊雜湊的那條 UPDATE 必須過——
+	// 少了這一句，上面的七條拒絕可能只是「寫法全都碰不得」的假象。
+	legalHash := strings.Repeat("9", tokenHashLen)
+	if _, err := db.SQL().ExecContext(ctx,
+		"UPDATE sessions SET token_hash = ?, previous_token_hash = token_hash, "+
+			"rotation_seq = rotation_seq + 1 WHERE id = ?", legalHash, sessionID.String()); err != nil {
+		t.Fatalf("合法的輪換形狀應被放行：%v", err)
+	}
+	var (
+		storedHash    string
+		storedPrev    string
+		storedSeq     int64
+		storedExpires int64
+	)
+	if err := db.SQL().QueryRowContext(ctx,
+		"SELECT token_hash, previous_token_hash, rotation_seq, expires_at FROM sessions WHERE id = ?",
+		sessionID.String()).Scan(&storedHash, &storedPrev, &storedSeq, &storedExpires); err != nil {
+		t.Fatalf("讀回輪換結果失敗：%v", err)
+	}
+	if storedHash != legalHash || storedSeq != 1 {
+		t.Errorf("輪換後應為 hash=%s seq=%d，實際 hash=%s seq=%d", legalHash, 1, storedHash, storedSeq)
+	}
+	if storedPrev != hash {
+		t.Errorf("previous_token_hash 應留下換代前那枚哈希，實際 %s", storedPrev)
+	}
+	if storedExpires != now+3600_000 {
+		t.Errorf("expires_at 不可被輪換碰動，實際 %d", storedExpires)
 	}
 
 	// 外键不配 CASCADE 的另一半：带着会话的账户不允许被物理删除——

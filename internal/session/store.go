@@ -41,7 +41,7 @@ type Policy struct {
 	CleanupGrace time.Duration
 }
 
-// Store 是會話的領域服務兼持久倉儲：建立、驗證、撤銷三個入口覆蓋全部生命週期，
+// Store 是會話的領域服務兼持久倉儲：建立、驗證、輪換、撤銷四個入口覆蓋全部生命週期，
 // Cleanup 只刪除「服務端已認定失效、且過了寬限期」的記錄，不參與任何授權判定。
 //
 // 与 internal/account 同一取向：标识唯一产生点是 idgen（DEC-014）、时刻唯一来源是
@@ -57,7 +57,8 @@ type Policy struct {
 type Store struct {
 	clock timeutil.Clock
 	// ttl 是会话寿命：到期时刻在创建时定死（created + ttl），验证通过不延长。
-	// 滑动续期与轮换属后续步骤，届时走「撤销旧会话 + 建新会话」，不改既有行。
+	// 輪換（Rotate）同理只換秘密：絕對期限由遷移 0005 的觸發器釘住，
+	// 閒置線又被絕對期限封頂，因此兩條通路都不可能把一個會話續命。
 	ttl time.Duration
 	// policy 是閒置有效期、活動寫入節流與清理寬限期；零值即「關閉／沿用既有行為」。
 	policy Policy
@@ -218,8 +219,15 @@ func (s *Store) Verify(ctx context.Context, q database.Querier, secret string) (
 	sess, err := scanSession(q.QueryRowContext(ctx, selectSessionSQL+" WHERE token_hash = ?", tokenHash))
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
-			// 「查无此秘密」与「秘密形状不合格」必须收敛到同一个错误（见 ErrInvalidSecret 注释），
-			// 不把 ErrNotFound 原样透出——那会告诉试探者「形状是对的，只差没这条记录」。
+			// 「查無此秘密」與「秘密形狀不合格」必須收斂到同一個錯誤（見 ErrInvalidSecret 註解），
+			// 不把 ErrNotFound 原樣透出——那會告訴試探者「形狀是對的，只差沒這條記錄」。
+			//
+			// 唯一例外是「上一代」：這一枚確實換不出身份，但它的主人在剛發生過輪換的
+			// 那條請求路上是常態，把兩者混為一談會讓客戶端把一次換密判成一次登出。
+			// 判定只是多讀一欄索引查詢，絕不因此給出任何訪問能力。
+			if s.matchesPreviousGeneration(ctx, q, tokenHash) {
+				return Session{}, ErrStaleSecret
+			}
 			return Session{}, ErrInvalidSecret
 		}
 		return Session{}, err
@@ -264,6 +272,105 @@ func (s *Store) Verify(ctx context.Context, q database.Querier, secret string) (
 	}
 	sess.LastActiveAt = now
 	return sess, nil
+}
+
+// Rotate 用一枚當前的會話秘密換發一枚新秘密，世代號同時加一。
+//
+// 語義邊界就是「換密而不換命」這一件事：
+//   - 同一行、同一個 device_id：同一臺裝置輪換秘密不是新增裝置，因此不佔用新的
+//     裝置名額，也不讓使用者在將來的裝置清單裡看到兩個自己；
+//   - expires_at 與 created_at 一個字都不動（資料庫另有觸發器把它釘死，見遷移 0005）：
+//     輪換不是續期。絕對期限仍在，閒置線又被絕對期限封頂，兩條路都不可能把
+//     一個本該失效的會話救回來；
+//   - 舊秘密在提交的那一刻起徹底失效：庫裡不再有它的查詢鍵，換不出身份、
+//     也換不來新秘密。失效邊界因此是一個點（那次 UPDATE 生效的瞬間），不是一段視窗。
+//
+// 原子性靠一條 UPDATE 完成全部換代（新雜湊、舊雜湊入 previous_token_hash、世代號加一、
+// 推進最近活動），WHERE 帶著「還是舊那一枚、未撤銷、未過絕對期限、未過閒置線」四個條件：
+// 讀與寫之間發生的任何撤銷、到期或並發輪換都會讓條件不成立，這次輪換就整個不發生，
+// 不會出現「已撤銷的會話又拿到一枚新秘密」這種半套結果。SQLite 只有一個寫者，
+// 這條語句本身即序列化點，不需要額外鎖。
+//
+// 前置檢查整個複用 Verify（形狀、存在、撤銷、絕對到期、閒置、主體可用性一個都不少），
+// 不在這裡重寫一套判定——兩套判定遲早會有一種被繞過。主體狀態（帳戶被停用）無法寫進
+// 這張表的 WHERE，它與 Verify 的活動寫入共用同一個「讀與寫之間」的微觀視窗：
+// 停用最遲在下一個請求被拒，這裡不假裝能關掉那個視窗。
+//
+// 回傳的新秘密明文與 Create 同一個等級的機密：唯一的去處是傳輸層寫進 Set-Cookie，
+// 不得進日誌、審計、錯誤訊息或回應 JSON 本體。
+// 未命中任何行時（並發輸給對手、或剛被撤銷／到期）用同一枚舊秘密重跑一次 Verify，
+// 把這次輪換按它本該得到的結論報回去，不另創一套錯誤分類。
+func (s *Store) Rotate(ctx context.Context, q database.Querier, secret string) (Session, string, error) {
+	if q == nil {
+		return Session{}, "", errors.New("session: 需要可用的資料庫連線或交易")
+	}
+	oldHash, err := hashSecret(secret)
+	if err != nil {
+		return Session{}, "", err
+	}
+	sess, err := s.Verify(ctx, q, secret)
+	if err != nil {
+		return Session{}, "", err
+	}
+
+	newSecret, err := newSecret(s.randReader)
+	if err != nil {
+		return Session{}, "", err
+	}
+	newHash, err := hashSecret(newSecret)
+	if err != nil {
+		return Session{}, "", fmt.Errorf("session: 會話秘密自我檢驗未通過: %w", err)
+	}
+
+	now := s.clock.Now()
+	// 世代號由資料庫自己加一（rotation_seq = rotation_seq + 1），不在這裡算好再寫：
+	// 把算計留在語句內，綁架這條 UPDATE 的並發寫者就無法用一個過期的計數蓋掉事實。
+	query := `UPDATE sessions
+			SET token_hash = ?, previous_token_hash = ?, rotation_seq = rotation_seq + 1,
+				last_active_at = ?
+			WHERE id = ? AND token_hash = ? AND revoked_at IS NULL AND expires_at > ?`
+	args := []any{newHash, oldHash, timeutil.ToMillis(now),
+		sess.ID.String(), oldHash, timeutil.ToMillis(now)}
+	if s.policy.IdleTTL > 0 {
+		// 閒置線也進 WHERE，讓「Verify 讀到還活著、寫入時已閒置失效」這個視窗同樣關閉。
+		// 寫成算術而不是把閒置秒數交給呼叫端：閾值是本倉儲的事實，只有這裡知道怎麼換算。
+		query += " AND ? < last_active_at + ?"
+		args = append(args, timeutil.ToMillis(now), s.policy.IdleTTL.Milliseconds())
+	}
+	res, err := q.ExecContext(ctx, query, args...)
+	if err != nil {
+		return Session{}, "", fmt.Errorf("session: 輪換會話秘密失敗: %w", err)
+	}
+	// 秘密明文不在錯誤、不在日誌：失敗路徑與成功時一樣，它唯一的去處是 Set-Cookie。
+	n, err := res.RowsAffected()
+	if err != nil {
+		return Session{}, "", fmt.Errorf("session: 讀取輪換結果失敗: %w", err)
+	}
+	if n == 0 {
+		if _, vErr := s.Verify(ctx, q, secret); vErr != nil {
+			return Session{}, "", vErr
+		}
+		return Session{}, "", fmt.Errorf("session: 輪換未命中會話 %s", sess.ID.String())
+	}
+	rotated, err := scanSession(q.QueryRowContext(ctx, selectSessionSQL+" WHERE id = ?", sess.ID.String()))
+	if err != nil {
+		return Session{}, "", err
+	}
+	return rotated, newSecret, nil
+}
+
+// matchesPreviousGeneration 回報這枚雜湊是否是某一行的「上一代」驗證材料。
+//
+// 命中只改變拒絕的措辭（ErrStaleSecret 對 ErrInvalidSecret），不改變結論：
+// 兩者都換不出身份。查無這一行、或該行的上一代已被下一次輪換擠掉，都是未命中。
+func (s *Store) matchesPreviousGeneration(ctx context.Context, q database.Querier, tokenHash string) bool {
+	var one int
+	err := q.QueryRowContext(ctx,
+		"SELECT 1 FROM sessions WHERE previous_token_hash = ? LIMIT 1", tokenHash).Scan(&one)
+	if err != nil {
+		return false
+	}
+	return true
 }
 
 // shouldTouch 回報本次驗證是否值得把最近活動時刻寫進資料庫。
@@ -429,7 +536,7 @@ func (s *Store) Cleanup(ctx context.Context, q database.Querier) (int, error) {
 }
 
 // selectSessionSQL 是会话列清单的唯一定义点（栏序与 scanSession 的取值顺序同源）。
-const selectSessionSQL = `SELECT id, device_id, subject_kind, account_id,
+const selectSessionSQL = `SELECT id, device_id, subject_kind, account_id, rotation_seq,
 		created_at, last_active_at, expires_at, revoked_at
 	FROM sessions`
 
@@ -442,11 +549,12 @@ func scanSession(row *sql.Row) (Session, error) {
 	var (
 		idText, deviceText, kindText string
 		accountID                    sql.NullString
+		rotationSeq                  int64
 		createdAt, lastActive        int64
 		expiresAt                    int64
 		revokedAt                    sql.NullInt64
 	)
-	err := row.Scan(&idText, &deviceText, &kindText, &accountID,
+	err := row.Scan(&idText, &deviceText, &kindText, &accountID, &rotationSeq,
 		&createdAt, &lastActive, &expiresAt, &revokedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Session{}, ErrNotFound
@@ -484,6 +592,7 @@ func scanSession(row *sql.Row) (Session, error) {
 		ID:           id,
 		DeviceID:     deviceID,
 		Subject:      subject,
+		RotationSeq:  rotationSeq,
 		CreatedAt:    timeutil.FromMillis(createdAt),
 		LastActiveAt: timeutil.FromMillis(lastActive),
 		ExpiresAt:    timeutil.FromMillis(expiresAt),

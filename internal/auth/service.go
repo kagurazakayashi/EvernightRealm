@@ -27,6 +27,11 @@ var (
 	// ErrInvalidSession 是會話解析被拒時唯一的結論：無效秘密、已撤銷、已到期、
 	// 主體不可用在外層是同一句話（拿秘密來的人只需要知道「重新登入」）。
 	ErrInvalidSession = errors.New("auth: 會話無效")
+	// ErrStaleSession 表示來的是上一代憑據：它換不出任何身份，但也不是「從未有效過」。
+	//
+	// 單獨留一個結論只為一件事——讓呼叫端知道這一次的失敗是「與一次輪換交錯」，
+	// 處置是重試而不是把使用者踢回登入頁。它不帶任何會話資料，也不帶新秘密。
+	ErrStaleSession = errors.New("auth: 會話憑據已是上一代")
 	// ErrLoginThrottled 表示該來源對該目標的失敗額度已打滿，正處於冷卻。
 	// 它與 ErrInvalidCredentials 是兩個不同的對外結論（429「稍後再試」對 401「憑據無效」），
 	// 但冷卻對「查無此人」與「真帳戶口令錯」完全同形：計量發生在查庫之前，
@@ -442,6 +447,11 @@ func (s *Service) appendRootFailureAudit(ctx context.Context, requestID, reason 
 func (s *Service) Resolve(ctx context.Context, secret string) (identity.Principal, session.Session, error) {
 	principal, sess, err := s.sessions.ResolvePrincipal(ctx, s.db.SQL(), secret, identity.OriginHTTPRequest)
 	if err != nil {
+		if errors.Is(err, session.ErrStaleSecret) {
+			// 「上一代」必須在收斂為 ErrInvalidSession 之前分出去：否則一次正常輪換
+			// 會讓與之交錯的那條請求被判成「會話已失效」，客戶端據此把人踢回登入頁。
+			return identity.Principal{}, session.Session{}, fmt.Errorf("%w（%v）", ErrStaleSession, err)
+		}
 		if errors.Is(err, session.ErrInvalidSecret) || errors.Is(err, session.ErrRevoked) ||
 			errors.Is(err, session.ErrExpired) || errors.Is(err, session.ErrSubjectUnavailable) ||
 			errors.Is(err, session.ErrNotFound) || errors.Is(err, session.ErrInvalidSubject) {
@@ -506,6 +516,70 @@ func (s *Service) Logout(ctx context.Context, principal identity.Principal, sess
 	s.log.Info("帳戶登出成功",
 		"account", principal.AccountID().String(), "request_id", requestID)
 	return nil
+}
+
+// RotateSession 用一枚當代的會話秘密換發一枚新秘密：同一行、同一裝置、同一絕對期限。
+//
+// 意圖只有一個——縮短一枚被偷看到的秘密還能用多久。它不是續期（會話的death時刻在
+// 建立時就定死，見 internal/session 與遷移 0005），也不是重新登入（device_id 不動，
+// 同一臺裝置換密不會在裝置清單裡多出一臺裝置，也不會丟掉原本的裝置身份）。
+//
+// 誰準它：只有「這枚秘密本身」。這裡不查角色、不看請求裡任何可自報的欄位——
+// 拿一枚還活著的會話秘密來，就是這個動作的全部授權；拿一枚已失效的來，
+// 得到的就是與任何其它被拒請求同樣的結論。
+//
+// 落地邊界：
+//   - 舊秘密在那條 UPDATE 生效的一刻起徹底失效，沒有任何寬限視窗；庫裡只多留一個
+//     世代號與上一代的雜湊，用來把「你晚了」和「你從來不對」分開（見 ErrStaleSession）。
+//   - Root 主體：輪換與 root_audit 的 `auth.rotate` 落在同一個交易——審計寫不進去，
+//     秘密就不換，兩件事實同生同滅。普通帳戶仍只進執行日誌（審計主體類別未批准，
+//     與登入／登出同一口徑，本步不擅自歸類）。
+//   - 被拒的輪換不寫審計：拒絕的理由是「你手上那枚不行」，把它記成一筆長期事實等於
+//     給任何能碰到這個端點的來源一個寫入放大器，而它不提供任何審計要提供的東西。
+//   - 日誌只記主體摘要、世代號與請求關聯 ID；新秘密明文不進日誌、不進審計、
+//     不進回應 JSON 本體（它的唯一去處是傳輸層的 Set-Cookie）。
+func (s *Service) RotateSession(ctx context.Context, secret, requestID string) (Outcome, error) {
+	var outcome Outcome
+	err := s.db.InTx(ctx, func(tctx context.Context, tx *database.Tx) error {
+		sess, newSecret, err := s.sessions.Rotate(tctx, tx, secret)
+		if err != nil {
+			return err
+		}
+		// 換發後立刻用新秘密走一次「秘密→主體」：這一步既產生回應要用的主體，
+		// 也順帶證明這枚新秘密真的換得出身份——發不出去的秘密不該被交給任何人。
+		principal, _, err := s.sessions.ResolvePrincipal(tctx, tx, newSecret, identity.OriginHTTPRequest)
+		if err != nil {
+			return err
+		}
+		if principal.IsRoot() {
+			subjectID, err := identity.RootSubjectID()
+			if err != nil {
+				return fmt.Errorf("auth: Root 審計主體標識異常: %w", err)
+			}
+			rec := s.rootSessionRecord(subjectID, "auth.rotate", sess.ID.String(), requestID, "")
+			if _, err := s.audits.Append(tctx, tx, rec); err != nil {
+				return err
+			}
+		}
+		outcome = Outcome{Principal: principal, Session: sess, Secret: newSecret}
+		return nil
+	})
+	if err != nil {
+		switch {
+		case errors.Is(err, session.ErrStaleSecret):
+			return Outcome{}, fmt.Errorf("%w（%v）", ErrStaleSession, err)
+		case errors.Is(err, session.ErrInvalidSecret), errors.Is(err, session.ErrRevoked),
+			errors.Is(err, session.ErrExpired), errors.Is(err, session.ErrSubjectUnavailable),
+			errors.Is(err, session.ErrNotFound), errors.Is(err, session.ErrInvalidSubject):
+			return Outcome{}, fmt.Errorf("%w（%v）", ErrInvalidSession, err)
+		}
+		s.log.Error("會話輪換失敗", "request_id", requestID, "err", err)
+		return Outcome{}, fmt.Errorf("auth: 會話輪換失敗: %w", err)
+	}
+	s.log.Info("會話秘密已輪換",
+		"subject", outcome.Session.Subject.String(), "rotation_seq", outcome.Session.RotationSeq,
+		"request_id", requestID)
+	return outcome, nil
 }
 
 // issue 在一個交易裡簽發會話並推進帳戶的最近登入時刻。
