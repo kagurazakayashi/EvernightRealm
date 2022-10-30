@@ -472,10 +472,19 @@ func run(ctx context.Context, releaseSignals func(), args []string, out io.Write
 	// 各倉儲共用系統時鐘——業務時刻的單一來源在各自構造內注入，這裡只給「此刻」。
 	// 失敗一律中斷啟動：缺了會話核心或登入用例的傳輸層只開出一組「連得上但登不進」
 	// 的端點，那種半套狀態比啟動失敗更難排查。
+	// 裝置登入策略的組裝：模式字串換成領域值（組態層已校驗過列舉，
+	// 到這裡還解析不出來只剩「裝配程式碼寫錯」一種可能，一樣中斷啟動不帶病上線）。
+	deviceMode, err := session.ParseDeviceMode(cfg.Security.DevicePolicy.Mode)
+	if err != nil {
+		lg.Error("裝置登入策略組裝失敗", "err", err)
+		return err
+	}
 	sessionPolicy := session.Policy{
 		IdleTTL:        time.Duration(cfg.Security.SessionIdleHours) * time.Hour,
 		TouchThreshold: time.Duration(cfg.Security.SessionTouchMinutes) * time.Minute,
 		CleanupGrace:   time.Duration(cfg.Security.SessionCleanupGraceHours) * time.Hour,
+		DeviceMode:     deviceMode,
+		MaxDevices:     cfg.Security.DevicePolicy.MaxDevices,
 	}
 	sessionStore, err := session.NewStoreWithPolicy(timeutil.System(),
 		time.Duration(cfg.Security.SessionTTLHours)*time.Hour, sessionPolicy)

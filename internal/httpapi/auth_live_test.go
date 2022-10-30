@@ -44,6 +44,18 @@ func newLiveEnv(t *testing.T, rootPassword string) *liveEnv {
 // guard 為 nil 時維持「無限流」的既有現場。
 func newLiveEnvGuarded(t *testing.T, rootPassword string, guard *auth.LoginGuard) *liveEnv {
 	t.Helper()
+	return newLiveEnvFull(t, rootPassword, guard, session.Policy{})
+}
+
+// newLiveEnvWithPolicy 同 newLiveEnv，但會話倉儲帶指定的有效期與清理／裝置策略
+// （裝置名額的端到端證據必須走真實事務，替身撐不出「檢查與寫入同交易」這件事）。
+func newLiveEnvWithPolicy(t *testing.T, rootPassword string, policy session.Policy) *liveEnv {
+	t.Helper()
+	return newLiveEnvFull(t, rootPassword, nil, policy)
+}
+
+func newLiveEnvFull(t *testing.T, rootPassword string, guard *auth.LoginGuard, policy session.Policy) *liveEnv {
+	t.Helper()
 	clock := timeutil.System()
 	dir := t.TempDir()
 	db, err := database.Open(context.Background(), database.Options{
@@ -62,7 +74,7 @@ func newLiveEnvGuarded(t *testing.T, rootPassword string, guard *auth.LoginGuard
 	if _, err := migrate.Apply(context.Background(), db.SQL(), migrate.Options{Clock: clock}); err != nil {
 		t.Fatalf("套用遷移失敗：%v", err)
 	}
-	sessions, err := session.NewStore(clock, time.Hour)
+	sessions, err := session.NewStoreWithPolicy(clock, time.Hour, policy)
 	if err != nil {
 		t.Fatalf("建立會話倉儲失敗：%v", err)
 	}

@@ -400,12 +400,17 @@ func (s *Server) writeRotationFailure(w http.ResponseWriter, r *http.Request, er
 }
 
 // writeLoginFailure 把登入用例的錯誤對映為對外回應：
-// 拒絕收斂為 2001，限流收斂為 2006（附 Retry-After），其餘（資料庫故障等）屬內部缺陷——
-// 統一 500，細節只進日誌。
+// 拒絕收斂為 2001，限流收斂為 2006（附 Retry-After），裝置名額已滿收斂為 2008，
+// 其餘（資料庫故障等）屬內部缺陷——統一 500，細節只進日誌。
 //
 // 2001 與 2006 的界線就是「現在重試有沒有意義」：前者口令再來一百次也是錯，
 // 後者等冷卻到期就有全新預算。兩者都只有一句固定文案，沒有 details——
 // 限流回應不允許以任何形式指出被擋的是哪個帳戶（規格要求同形）。
+//
+// 2008 用 403 而不是 401／429：憑據本身已經被接受（401「憑據無效」在這裡是錯話，
+// 那會讓人對著一個正確的口令反覆懷疑自己），而立刻重試也不會變好（429 的語意是
+// 「等一會兒就有預算」，名額要等到某個會話被登出或到期才釋放）。
+// 回應同樣只有固定一句文案：不含上限值、現有會話數或任何裝置標識。
 func (s *Server) writeLoginFailure(w http.ResponseWriter, r *http.Request, err error) {
 	var throttled *auth.ThrottledError
 	if errors.As(err, &throttled) {
@@ -416,6 +421,10 @@ func (s *Server) writeLoginFailure(w http.ResponseWriter, r *http.Request, err e
 		}
 		w.Header().Set("Retry-After", strconv.FormatInt(seconds, 10))
 		writeError(w, r, CodeLoginThrottled, http.StatusTooManyRequests)
+		return
+	}
+	if errors.Is(err, auth.ErrLoginDeviceLimit) {
+		writeError(w, r, CodeDeviceLimitReached, http.StatusForbidden)
 		return
 	}
 	if errors.Is(err, auth.ErrInvalidCredentials) {

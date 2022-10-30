@@ -37,6 +37,15 @@ var (
 	// 但冷卻對「查無此人」與「真帳戶口令錯」完全同形：計量發生在查庫之前，
 	// 觸發條件只看來源×目標的失敗次數，回應裡沒有任何欄位指出觸發的是誰。
 	ErrLoginThrottled = errors.New("auth: 登入嘗試過於頻繁")
+	// ErrLoginDeviceLimit 表示憑據已經校驗通過，但該主體的有效會話名額已滿，
+	// 因此這次登入整個沒有發生（既沒簽發新會話，也沒撤銷任何既有會話）。
+	//
+	// 它必須與 ErrInvalidCredentials 分開，因為兩者的處置完全不同：口令錯的人該再想一次口令，
+	// 而這個人在這裡的失敗跟口令毫無關係，把兩件事說成同一句「憑據無效」會讓人
+	// 對著一個正確的口令反覆懷疑自己。分開報也**不**提供任何新資訊：能收到這一句的
+	// 前提是他剛剛證明瞭自己是誰，因此它不是可列舉帳戶的訊號（計數發生在憑據校驗之後）。
+	// 結論本身只有一句固定文字：不含上限值、現有會話數或任何裝置標識。
+	ErrLoginDeviceLimit = errors.New("auth: 裝置登入名額已滿")
 )
 
 // ThrottledError 是帶著剩餘冷卻時間的 ErrLoginThrottled。
@@ -225,7 +234,11 @@ func loginTargetKind(target string) string {
 //  4. 口令比對用入庫時自帶的參數檔；比對先於狀態檢查——「禁用＋正確口令」與
 //     「口令錯」的外部耗時與結論同形，狀態本身不是可枚舉的信號；
 //  5. 主體構造（NewAccountPrincipal 再擋一次禁用，讀與構造之間的競態方向保守）；
-//  6. 同一個交易裡簽發會話並推進 accounts.last_login_at。
+//  6. 同一個交易裡執行裝置名額策略、簽發會話並推進 accounts.last_login_at。
+//
+// 第 6 步的策略拒絕（ErrLoginDeviceLimit）不計入守衛的失敗帳，也不勾銷已有預算：
+// 被擋的原因是「這個主體的會話佔滿了」，與這次嘗試的口令對錯無關，
+// 讓它消耗來源額度等於把裝置策略變成第二把限流刀。
 //
 // 普通帳戶的登入事件不寫審計表（已批准決定：無角色帳戶的審計主體類別未落地），
 // 成敗都只進執行日誌；日誌記內部原因，但永不記口令。
@@ -302,13 +315,16 @@ func (s *Service) attemptAccount(ctx context.Context, loginName, password, reque
 		return Outcome{}, false, fmt.Errorf("auth: 構造帳戶主體失敗: %w", err)
 	}
 
-	outcome, err := s.issue(ctx, principal, a.ID)
+	outcome, err := s.issue(ctx, principal, a.ID, requestID)
 	if err != nil {
 		// issue 把「主體此刻不可用」的拒絕也收斂成 ErrInvalidCredentials 鏈；
 		// 區分靠 errors.Is——那是憑據路徑的拒絕，不是內部故障。
 		if errors.Is(err, ErrInvalidCredentials) {
 			return Outcome{}, true, nil
 		}
+		// 名額已滿（ErrLoginDeviceLimit）原樣上報：它既不是憑據拒絕（不記失敗帳、
+		// 不勾銷預算，否則一個佔滿名額的主體會順帶把來源的登入額度耗光），
+		// 也不是內部故障（不該報 5xx）。
 		return Outcome{}, false, err
 	}
 	s.log.Info("帳戶登入成功", "account", a.ID.String(), "request_id", requestID)
@@ -332,6 +348,12 @@ func (s *Service) attemptAccount(ctx context.Context, loginName, password, reque
 // 冷卻中的嘗試連失敗審計都不追加：root_audit 的寫入速率被 fail_limit 封頂，
 // 這正是「有攻擊而無痕跡」的反面——痕跡留在觸發冷卻的那一筆與執行日誌，
 // 而不是留給攻擊者免費的寫入放大。
+//
+// 裝置名額策略對 Root 與對普通帳戶用的是同一條規則、同一個上限，沒有例外也沒有繞過入口：
+// Root 主體按 subject_kind='root' 計數（全服務只有一個 Root）。這同時意味著
+// 「Root 把自己鎖在門外」在上限模式下是可發生的（名額佔滿時新登入被拒），
+// 而解法仍是既有那兩條——從任一線上裝置登出釋放名額，或等會話到期；
+// 伺服器不為 Root 保留一條「永遠能登入」的後門，因為那正是任何人想繞過限制時的路徑。
 func (s *Service) LoginRoot(ctx context.Context, password, requestID, ip string) (Outcome, error) {
 	if err := s.guardCheck(ip, RootTarget); err != nil {
 		return Outcome{}, err
@@ -385,10 +407,29 @@ func (s *Service) attemptRoot(ctx context.Context, password, requestID string) (
 	}
 
 	var outcome Outcome
+	var revokedPrior int
 	err = s.db.InTx(ctx, func(tctx context.Context, tx *database.Tx) error {
+		revoked, err := s.sessions.ApplyLoginSlotPolicy(tctx, tx, principal)
+		if err != nil {
+			return err
+		}
+		revokedPrior = revoked
 		sess, secret, err := s.sessions.Create(tctx, tx, principal)
 		if err != nil {
 			return err
+		}
+		// single 模式這次真的停掉了舊會話：Root 域的會話生命週期事件必須在 Root 審計留痕，
+		// 「誰的 Root 會話被停掉、為什麼」不該只存在於會被輪轉的執行日誌裡。
+		// target 帶的是這一次新簽發的會話標識：被撤銷的是「其餘全部」，逐行 ID 無以復數，
+		// 而「是哪一次登入造成的」永遠只有一個答案；撤銷的個數記在 reason。
+		// 名額已滿的拒絕不寫任何審計（跟其它被拒的 Root 登入同一口徑：拒絕的結論
+		// 不該給任何能碰到這個端點的來源一個寫入放大器）。
+		if revoked > 0 {
+			rec := s.rootSessionRecord(subjectID, "auth.device_revoke", sess.ID.String(), requestID,
+				fmt.Sprintf("單裝置策略：新登入前撤銷 %d 個舊會話", revoked))
+			if _, err := s.audits.Append(tctx, tx, rec); err != nil {
+				return err
+			}
 		}
 		if _, err := s.audits.Append(tctx, tx, s.rootSessionRecord(subjectID, "auth.login_success", sess.ID.String(), requestID, "")); err != nil {
 			return err
@@ -397,8 +438,15 @@ func (s *Service) attemptRoot(ctx context.Context, password, requestID string) (
 		return nil
 	})
 	if err != nil {
+		if errors.Is(err, session.ErrDeviceLimitReached) {
+			// 策略拒絕：整個交易已回滾，沒簽發會話、也沒撤銷任何既有會話。
+			return Outcome{}, false, fmt.Errorf("%w（%v）", ErrLoginDeviceLimit, err)
+		}
 		// 交易失敗不猜原因是哪一半：會話與審計同生同滅，這次登入就是沒有發生。
 		return Outcome{}, false, fmt.Errorf("auth: Root 登入落地失敗: %w", err)
+	}
+	if revokedPrior > 0 {
+		s.log.Info("Root 單裝置策略已撤銷舊會話", "revoked", revokedPrior, "request_id", requestID)
 	}
 	s.log.Info("Root 登入成功", "request_id", requestID)
 	return outcome, false, nil
@@ -582,14 +630,25 @@ func (s *Service) RotateSession(ctx context.Context, secret, requestID string) (
 	return outcome, nil
 }
 
-// issue 在一個交易裡簽發會話並推進帳戶的最近登入時刻。
+// issue 在一個交易裡執行裝置名額策略、簽發會話並推進帳戶的最近登入時刻。
 //
-// 兩者同交易是「何時登入成功」這句話的完整性：會話存在而 last_login_at 未動，
+// 三者同交易是「何時登入成功」這句話的完整性：會話存在而 last_login_at 未動，
 // 或反過來，都讓帳戶頁面上的登入時間與裝置列表對不上同一次登入。
-// 普通帳戶這條路不寫審計（見套件檔案），交易裡只有這兩筆寫入。
-func (s *Service) issue(ctx context.Context, principal identity.Principal, accountID idgen.ID) (Outcome, error) {
+// 名額檢查也必須在這裡、而且在 Create 之前：檢查與寫入之間一旦跨出事務邊界，
+// 併發的兩次登入會各自數到「還差一格」（見 session.Store.ApplyLoginSlotPolicy）。
+// single 模式的撤銷同樣落在這個交易裡，所以「舊會話被停掉但新會話沒簽發」
+// 這種把人關在門外的半套結果，在事務回滾時一起不存在。
+// 普通帳戶這條路不寫審計（見套件檔案），交易裡只有這些寫入。
+func (s *Service) issue(ctx context.Context, principal identity.Principal, accountID idgen.ID,
+	requestID string) (Outcome, error) {
 	var outcome Outcome
+	var revokedPrior int
 	err := s.db.InTx(ctx, func(tctx context.Context, tx *database.Tx) error {
+		revoked, err := s.sessions.ApplyLoginSlotPolicy(tctx, tx, principal)
+		if err != nil {
+			return err
+		}
+		revokedPrior = revoked
 		sess, secret, err := s.sessions.Create(tctx, tx, principal)
 		if err != nil {
 			return err
@@ -601,10 +660,18 @@ func (s *Service) issue(ctx context.Context, principal identity.Principal, accou
 		return nil
 	})
 	if err != nil {
+		if errors.Is(err, session.ErrDeviceLimitReached) {
+			// 名額已滿是策略拒絕：既沒寫會話也沒改 last_login_at，整個交易回滾。
+			return Outcome{}, fmt.Errorf("%w（%v）", ErrLoginDeviceLimit, err)
+		}
 		if errors.Is(err, session.ErrSubjectUnavailable) || errors.Is(err, session.ErrInvalidSubject) {
 			return Outcome{}, fmt.Errorf("%w（%v）", ErrInvalidCredentials, err)
 		}
 		return Outcome{}, fmt.Errorf("auth: 登入落地失敗: %w", err)
+	}
+	if revokedPrior > 0 {
+		s.log.Info("單裝置策略已撤銷該主體的舊會話",
+			"account", accountID.String(), "revoked", revokedPrior, "request_id", requestID)
 	}
 	return outcome, nil
 }

@@ -44,6 +44,16 @@ type env struct {
 // newEnv 建立現場；rootConfigured=false 時 Root 憑據欄留空（重現「尚未初始化」部署）。
 func newEnv(t *testing.T, rootConfigured bool) *env {
 	t.Helper()
+	return newEnvWithPolicy(t, rootConfigured, session.Policy{}, time.Hour, nil)
+}
+
+// newEnvWithPolicy 同 newEnv，但會話倉儲帶指定策略與期限，並可接上真實登入守衛。
+//
+// 存在的理由是裝置名額用例需要「同一現場、不同策略」：名額的判定就落在登入事務裡，
+// 換一套現場等於換一組前提，斷言就不再指向同一件事。
+func newEnvWithPolicy(t *testing.T, rootConfigured bool, policy session.Policy,
+	ttl time.Duration, guard *LoginGuard) *env {
+	t.Helper()
 	clock := timeutil.NewTest(testBase)
 	dir := t.TempDir()
 	t.Cleanup(func() {
@@ -64,7 +74,7 @@ func newEnv(t *testing.T, rootConfigured bool) *env {
 	if _, err := migrate.Apply(context.Background(), db.SQL(), migrate.Options{Clock: clock}); err != nil {
 		t.Fatalf("套用遷移失敗：%v", err)
 	}
-	sessions, err := session.NewStore(clock, time.Hour)
+	sessions, err := session.NewStoreWithPolicy(clock, ttl, policy)
 	if err != nil {
 		t.Fatalf("建立會話倉儲失敗：%v", err)
 	}
@@ -82,6 +92,7 @@ func newEnv(t *testing.T, rootConfigured bool) *env {
 		Audits:           audit.NewStore(clock),
 		RootPasswordHash: rootHash,
 		Hashing:          credential.TestParams,
+		Guard:            guard,
 	})
 	if err != nil {
 		t.Fatalf("建立登入用例失敗：%v", err)

@@ -188,6 +188,8 @@ type SecurityConfig struct {
 	Hashing HashingConfig `yaml:"hashing"`
 	// LoginGuard 是登入失敗控制與限流的閾值（見 internal/auth 的 LoginGuard）。
 	LoginGuard LoginGuardConfig `yaml:"login_guard"`
+	// DevicePolicy 是裝置登入策略：一個主體能同時握有幾份有效會話（見 DevicePolicyConfig）。
+	DevicePolicy DevicePolicyConfig `yaml:"device_policy"`
 	// Headers 為 HTTP 安全回應頭。
 	Headers SecurityHeadersConfig `yaml:"headers"`
 	// CORS 為跨來源存取策略；預設不開放任何來源。
@@ -250,6 +252,66 @@ const (
 	maxLoginGuardMinutes = 1440
 	maxLoginGuardEntries = 100000
 )
+
+// DevicePolicyConfig 為裝置登入策略組態（伺服器級，套用全部可擁有會話的主體）。
+//
+// 「一個主體能同時握有幾份有效會話」是部署決定，不是客戶端偏好：三個模式都只由
+// 服務端在登入事務裡判定，請求裡沒有任何可自報的裝置欄位。名額算的是「此刻還換得出
+// 身份」的會話數（未撤銷、未過絕對期限、未過閒置線），因此輪換不新增名額
+// （同一行換秘密）、撤銷與到期立即釋放名額。
+type DevicePolicyConfig struct {
+	// Mode 是模式：single（一人一機，新登入成功時讓該主體的舊會話全部失效）、
+	// multi（允許多裝置並存，不封頂）或 limited（並存但封頂，名額已滿時拒絕新登入）。
+	// 空值表示沿用內建預設（multi）。
+	Mode string `yaml:"mode"`
+	// MaxDevices 是 limited 模式下的有效會話名額（1..maxDeviceSlots）。
+	// 其它模式必須留 0：在 single 之下寫一個名額是「兩個互相矛盾的決定」，
+	// 靜默忽略只會讓部署者以為自己設過。
+	MaxDevices int `yaml:"max_devices"`
+}
+
+// limited 模式的裝置名額上界。
+//
+// 50 臺的依據是執行環境本身：這個平台以區域網為主，一個真實的人同時能用來登入的
+// 手機、平板、桌機與瀏覽器個數在個位數到十幾之間。把上界放到三位數，
+// 那個數字不再描述任何部署意圖，只是把「打錯一個 0」變成一個永久佔用會話表的授權。
+const maxDeviceSlots = 50
+
+// Validate 正規化並校驗裝置登入策略；空模式表示沿用預設（multi）。
+func (d *DevicePolicyConfig) Validate() error {
+	if d.Mode == "" {
+		d.Mode = "multi"
+	}
+	switch d.Mode {
+	case "single", "multi", "limited":
+	default:
+		return fmt.Errorf("config: security.device_policy.mode 需為 single|multi|limited，實際為 %q", d.Mode)
+	}
+	if d.Mode == "limited" {
+		if d.MaxDevices < 1 || d.MaxDevices > maxDeviceSlots {
+			return fmt.Errorf("config: security.device_policy.max_devices 需為 1..%d（mode=limited），實際為 %d",
+				maxDeviceSlots, d.MaxDevices)
+		}
+		return nil
+	}
+	if d.MaxDevices != 0 {
+		return fmt.Errorf("config: security.device_policy.max_devices 只在 mode=limited 時使用，"+
+			"mode=%q 時必須留 0（實際為 %d）", d.Mode, d.MaxDevices)
+	}
+	return nil
+}
+
+// summary 回傳裝置登入策略在啟動摘要裡的樣子。
+//
+// 空模式按預設值顯示而不是留白：這個鍵上的「沒寫」就是沿用預設，
+// 摘要裡留一個空字反而讓部署者以為設了個不認識的模式。
+func (d DevicePolicyConfig) summary() string {
+	mode := d.Mode
+	if mode == "" {
+		mode = Default().Security.DevicePolicy.Mode
+	}
+	return fmt.Sprintf("[mode=%s max_devices=%d]", mode, d.MaxDevices)
+}
 
 // 會話有效期與清理策略的硬界限。
 //
@@ -440,6 +502,12 @@ func Default() Config {
 				CooldownMinutes: 15,
 				SourceFailLimit: 50,
 				MaxEntries:      10000,
+			},
+			// 裝置登入策略預設 multi：這正是本項存在之前的行為（每次登入各簽發一份
+			// 互不影響的會話）。把它改成 single 或 limited 會真的把人踢下線或把人擋在門外，
+			// 屬部署者的明確決定，不該由一次「新增策略開關」的改動順帶代勞。
+			DevicePolicy: DevicePolicyConfig{
+				Mode: "multi",
 			},
 			CORS: CORSConfig{
 				// 來源清單刻意留空：跨域預設關閉，需要時由部署者明確開啟。
@@ -730,6 +798,11 @@ func (c *Config) Validate() error {
 		return err
 	}
 
+	// 裝置登入策略：模式限列舉值（空值正規化為預設 multi），名額只在 limited 下要求。
+	if err := c.Security.DevicePolicy.Validate(); err != nil {
+		return err
+	}
+
 	// 安全回應頭：Frame 限制正規化為大寫並限枚舉值；
 	// CSP 覆寫必須是有效策略且不得引入 'unsafe-eval'（專案安全基線）。
 	c.Security.Headers.FrameOptions = strings.ToUpper(strings.TrimSpace(c.Security.Headers.FrameOptions))
@@ -988,13 +1061,14 @@ func (c Config) DisplayLocation() *time.Location {
 
 // Redacted 回傳組態的脫敏摘要（供啟動日誌），機密欄位一律顯示 [REDACTED]。
 func (c Config) Redacted() string {
-	return fmt.Sprintf("組態摘要：listen=%s data_dir=%s timezone=%s db=%s busy_timeout_ms=%d media=%s documents=%s attachments=%s backups=%s logs_dir=%s logs_level=%s logs_prefix=%s logs_retention_days=%d session_ttl_hours=%d session_idle_hours=%d session_touch_minutes=%d session_cleanup=[minutes=%d grace_hours=%d] root_password_hash=%s%s%s hashing=[%s] http_timeouts_ms=[read_header=%d read=%d write=%d idle=%d request=%d shutdown=%d] max_body_bytes=%d security_headers=[frame_options=%s csp=%s referrer_policy=%s permissions_policy=%s] cors=[%s] disk=[%s] tx=[begin_mode=%s nested=%s busy_retry_max=%d busy_retry_backoff_ms=%d timeout_ms=%d schema_guard=%s]",
+	return fmt.Sprintf("組態摘要：listen=%s data_dir=%s timezone=%s db=%s busy_timeout_ms=%d media=%s documents=%s attachments=%s backups=%s logs_dir=%s logs_level=%s logs_prefix=%s logs_retention_days=%d session_ttl_hours=%d session_idle_hours=%d session_touch_minutes=%d session_cleanup=[minutes=%d grace_hours=%d] device_policy=%s root_password_hash=%s%s%s hashing=[%s] http_timeouts_ms=[read_header=%d read=%d write=%d idle=%d request=%d shutdown=%d] max_body_bytes=%d security_headers=[frame_options=%s csp=%s referrer_policy=%s permissions_policy=%s] cors=[%s] disk=[%s] tx=[begin_mode=%s nested=%s busy_retry_max=%d busy_retry_backoff_ms=%d timeout_ms=%d schema_guard=%s]",
 		c.Server.Listen, c.Server.DataDir, c.Server.DisplayTimezone,
 		c.Database.Path, c.Database.BusyTimeoutMS,
 		c.Media, c.Documents, c.Attachments, c.Backups,
 		c.Logs.Dir, c.Logs.Level, c.Logs.FilePrefix, c.Logs.RetentionDays,
 		c.Security.SessionTTLHours, c.Security.SessionIdleHours, c.Security.SessionTouchMinutes,
 		c.Security.SessionCleanupMinutes, c.Security.SessionCleanupGraceHours,
+		c.Security.DevicePolicy.summary(),
 		redact(c.Security.RootPasswordHash), c.RootHashNotice, c.SessionIdleNotice,
 		c.Security.Hashing.summary(),
 		c.Server.ReadHeaderTimeoutMS, c.Server.ReadTimeoutMS, c.Server.WriteTimeoutMS,
@@ -1105,6 +1179,7 @@ func applyEnv(cfg *Config) error {
 		{&cfg.Logs.Level, "ER_LOGS_LEVEL"},
 		{&cfg.Logs.FilePrefix, "ER_LOGS_FILE_PREFIX"},
 		{&cfg.Security.RootPasswordHash, "ER_SECURITY_ROOT_PASSWORD_HASH"},
+		{&cfg.Security.DevicePolicy.Mode, "ER_SECURITY_DEVICE_POLICY_MODE"},
 		{&cfg.Security.Headers.ContentSecurityPolicy, "ER_SECURITY_HEADERS_CONTENT_SECURITY_POLICY"},
 		{&cfg.Security.Headers.FrameOptions, "ER_SECURITY_HEADERS_FRAME_OPTIONS"},
 		{&cfg.Security.Headers.ReferrerPolicy, "ER_SECURITY_HEADERS_REFERRER_POLICY"},
@@ -1151,6 +1226,7 @@ func applyEnv(cfg *Config) error {
 		{&cfg.Security.LoginGuard.CooldownMinutes, "ER_SECURITY_LOGIN_GUARD_COOLDOWN_MINUTES"},
 		{&cfg.Security.LoginGuard.SourceFailLimit, "ER_SECURITY_LOGIN_GUARD_SOURCE_FAIL_LIMIT"},
 		{&cfg.Security.LoginGuard.MaxEntries, "ER_SECURITY_LOGIN_GUARD_MAX_ENTRIES"},
+		{&cfg.Security.DevicePolicy.MaxDevices, "ER_SECURITY_DEVICE_POLICY_MAX_DEVICES"},
 		{&cfg.Logs.RetentionDays, "ER_LOGS_RETENTION_DAYS"},
 		{&cfg.Disk.CheckIntervalMS, "ER_DISK_CHECK_INTERVAL_MS"},
 		{&cfg.Server.ReadHeaderTimeoutMS, "ER_SERVER_READ_HEADER_TIMEOUT_MS"},
@@ -1256,6 +1332,16 @@ security:
                                     # 這段窗口面向運維與未來的裝置清單；不改變對外機器碼
                                     # （行已過期與行已刪除對客戶端都是同一個 2003）；
                                     # 清理只動 sessions 表，絕不刪審計記錄
+
+  # 裝置登入策略：一個主體（含 Root，同一規則、沒有例外）能同時握有幾份有效會話。
+  # 名額算的是「此刻還換得出身份」的會話數，由服務端在登入事務裡判定：
+  # 輪換只換秘密、不換行，因此不佔新名額；撤銷或到期即刻釋放名額。
+  # 請求裡沒有任何可自報的裝置欄位——裝置顯示名稱或標識不是認證因子，改它換不來名額。
+  device_policy:
+    mode: multi                   # single = 一人一機（新登入成功時讓舊會話失效）
+                                  # multi  = 允許多裝置並存、不封頂（預設，即本鍵存在之前的行為）
+                                  # limited= 並存但封頂，名額已滿時新登入被拒（機器碼 2008）
+    max_devices: 0                # 僅 mode=limited 時必填（1..50）；其它模式必須留 0
 
   # 登入失敗控制與限流（純記憶體狀態：服務重啟即清空，不寫入資料庫）。
   # 計量主軸是「來源位址 × 登入目標」配對；來源級總量是橫掃大量帳戶時的補集。

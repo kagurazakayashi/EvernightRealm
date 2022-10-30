@@ -218,4 +218,12 @@ var (
 	// ErrNotFound 表示按标识找不到可撤销的会话（不存在的，以及已被撤销的——
 	// 撤销不可逆，第二次撤销没有新事实可写，报告目标不存在最接近真相）。
 	ErrNotFound = errors.New("session: 会话不存在")
+	// ErrDeviceLimitReached 表示該主體的有效會話名額已滿，新的登入因此被拒絕。
+	//
+	// 它是「策略拒絕」而不是「憑據無效」：走到這個結論的前提是憑據已經校驗通過
+	// （見 internal/session 的 ApplyLoginSlotPolicy 與 internal/auth 的登入用例），
+	// 因此它只對已經證明自己是誰的主體說話，不是可用來列舉賬戶的訊號。
+	// 錯誤文字刻意不含上限值、現有會話數或任何裝置標識——這個結論會被回給使用者，
+	// 而那些屬於伺服器的內部配置事實。
+	ErrDeviceLimitReached = errors.New("session: 裝置登入名額已滿")
 )

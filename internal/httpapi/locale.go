@@ -120,6 +120,12 @@ var errorMessages = map[ErrorCode]map[string]string{
 		LocaleEnUS: "The session credential in this request has been superseded by a newer one. Please retry this operation.",
 		LocaleJaJP: "このリクエストのセッション資格情報は新しいものに置き換えられました。この操作をもう一度実行してください。",
 	},
+	CodeDeviceLimitReached: {
+		LocaleZhCN: "此账号的登录设备数已达服务器设定的上限，本次登录未生效。请先在其他设备退出登录，或等待现有登录到期后再试。",
+		LocaleZhTW: "此帳號已達伺服器設定的登入裝置數量上限，本次登入未生效。請先在其他裝置登出，或等待現有登入到期後再試。",
+		LocaleEnUS: "This account has reached the server's limit on signed-in devices, so this sign-in was not applied. Sign out on another device, or wait for an existing session to expire, then try again.",
+		LocaleJaJP: "このアカウントのログイン済み端末数がサーバーの設定上限に達しているため、今回のログインは適用されませんでした。他の端末でログアウトするか、既存のセッションの期限切れを待ってから再度お試しください。",
+	},
 }
 
 // messageFor 取得錯誤碼在指定語言的使用者訊息；語言未支援或訊息為空時回退 defaultLocale。

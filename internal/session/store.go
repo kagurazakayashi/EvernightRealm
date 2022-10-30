@@ -39,6 +39,13 @@ type Policy struct {
 	// 寬限期真正保住的是「這一枚憑據是什麼時候失效的」這條事實還能被查到的時間；
 	// 設 0 就是失效即刪，表最小，但剛失效的會話在運維側也一起消失。
 	CleanupGrace time.Duration
+	// DeviceMode 是裝置登入策略（一個主體能同時握有幾份有效會話）；空值＝DeviceModeMulti，
+	// 即「並存且不封頂」，也就是本項存在之前的行為（見 internal/session/device.go）。
+	// 零值沿用既有語意而不是挑一個更安全的規定：策略是組態決定，不該由倉儲構造代勞。
+	DeviceMode DeviceMode
+	// MaxDevices 是 DeviceModeLimited 下的名額（主體可並存的有效會話數）。
+	// 只在 DeviceModeLimited 時要求正值；其它模式下這個欄位不參與任何判定。
+	MaxDevices int
 }
 
 // Store 是會話的領域服務兼持久倉儲：建立、驗證、輪換、撤銷四個入口覆蓋全部生命週期，
@@ -98,6 +105,9 @@ func NewStoreWithPolicy(clock timeutil.Clock, ttl time.Duration, policy Policy) 
 	}
 	if policy.CleanupGrace < 0 {
 		return nil, fmt.Errorf("session: 清理寬限期不可為負值，實際 %s", policy.CleanupGrace)
+	}
+	if err := policy.validate(); err != nil {
+		return nil, err
 	}
 	if clock == nil {
 		clock = timeutil.System()
