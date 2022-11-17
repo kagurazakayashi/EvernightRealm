@@ -36,6 +36,7 @@ import (
 
 	"github.com/kagurazakayashi/EvernightRealm/internal/auth"
 	"github.com/kagurazakayashi/EvernightRealm/internal/identity"
+	"github.com/kagurazakayashi/EvernightRealm/internal/idgen"
 	"github.com/kagurazakayashi/EvernightRealm/internal/session"
 	"github.com/kagurazakayashi/EvernightRealm/internal/timeutil"
 )
@@ -78,6 +79,13 @@ type AuthUseCase interface {
 	// RotateSession 用一枚當代會話秘密換發一枚新秘密（同一行、同一裝置、同一絕對期限）。
 	// 授權就是那枚秘密本身：呼叫端不得先把請求裡任何可自報的欄位當成身分。
 	RotateSession(ctx context.Context, secret, requestID string) (auth.Outcome, error)
+	// ListDevices 列舉當前受信主體名下的全部裝置（會話）。
+	// 範圍只由主體決定：請求裡沒有任何欄位可以改寫「列誰的裝置」，包括 account_id。
+	ListDevices(ctx context.Context, principal identity.Principal) ([]session.Session, error)
+	// RevokeDevice 在當前主體的範圍內按 device_id 撤銷一枚會話（撤銷他人/不存在一律
+	// 收斂為 session.ErrNotFound）。呼叫端必須先讓本次請求的憑據過一次解析，
+	// 才拿得到 principal——這是「敏感操作重檢當前會話有效」的落點。
+	RevokeDevice(ctx context.Context, principal identity.Principal, deviceID idgen.ID, requestID string) (auth.DeviceRevokeResult, error)
 }
 
 // loginRequest 為普通帳戶登入的請求本體。欄位只准出現這兩個：
@@ -146,6 +154,8 @@ func (s *Server) authEndpoints() []apiRoute {
 		{"/auth/session", s.allowMethods(s.handleSession, http.MethodGet, http.MethodHead)},
 		{"/auth/logout", s.allowMethods(s.handleLogout, http.MethodPost)},
 		{"/auth/session/rotate", s.allowMethods(s.handleRotate, http.MethodPost)},
+		{"/auth/devices", s.allowMethods(s.handleDevices, http.MethodGet, http.MethodHead)},
+		{"/auth/devices/revoke", s.allowMethods(s.handleDeviceRevoke, http.MethodPost)},
 	}
 }
 
@@ -356,6 +366,162 @@ func (s *Server) handleRotate(w http.ResponseWriter, r *http.Request) {
 	case credInvalid:
 		// 失效憑據在瀏覽器裡只會讓下一次請求再撞同一堵牆，清掉它；
 		// 這裡的刪除指令不撤銷任何東西，也不簽發新會話。
+		if res.viaCookie {
+			http.SetCookie(w, s.clearedSessionCookie(r))
+		}
+		writeError(w, r, CodeSessionInvalid, http.StatusUnauthorized)
+		return
+	case credStale:
+		writeError(w, r, CodeSessionStale, http.StatusUnauthorized)
+		return
+	case credNotReady:
+		writeError(w, r, CodeNotReady, http.StatusServiceUnavailable)
+		return
+	case credConflict:
+		writeError(w, r, CodeAuthMethodConflict, http.StatusBadRequest)
+		return
+	case credUnavailable:
+		writeError(w, r, CodeUnknown, http.StatusInternalServerError)
+		return
+	}
+}
+
+// deviceResponse 是「我的裝置」清單裡的一枚裝置。
+//
+// 只帶可展示事實：裝置標識、建立／最近活動／到期時刻、推導狀態、是否本請求所用的這一臺。
+// 刻意不帶的：任何憑據材料（库里本就只有雜湊，見 secret.go）、內部會話 ID、來源位址
+// 與瀏覽器指紋——後兩項本服務根本沒有採集（見遷移 0004 的欄位），因此無從洩露。
+// device_id 即使用者可見的裝置展示名：它帶了 UNIQUE 約束、隨機 UUIDv7，看到也換不來任何
+// 操作能力（認證只認秘密），所以可以放心展示與用於指認撤銷目標。
+type deviceResponse struct {
+	DeviceID     string `json:"device_id"`
+	CreatedAt    string `json:"created_at"`
+	LastActiveAt string `json:"last_active_at"`
+	ExpiresAt    string `json:"expires_at"`
+	Status       string `json:"status"`
+	Current      bool   `json:"current"`
+}
+
+// deviceListResponse 是 GET /auth/devices 的回應本體。
+type deviceListResponse struct {
+	Devices   []deviceResponse `json:"devices"`
+	RequestID string           `json:"request_id"`
+}
+
+// deviceRevokeRequest 是定向撤銷的請求本體：只准帶目標裝置標識。
+// 沒有任何可自報的 account_id／主體類別欄位——歸屬由解析出來的受信主體決定，
+// 多帶的欄位會被 decodeJSON 的未知欄位規則打成 1004。
+type deviceRevokeRequest struct {
+	DeviceID string `json:"device_id"`
+}
+
+// deviceRevokeResponse 是撤銷成功的回應本體。
+//
+// Revoked 區分「這次真的停掉了一枚原本有效的會話」與「目標本就已是失效態」（冪等 no-op）；
+// Current 告訴呼叫端「剛撤的是不是自己這臺」——為 true 時客戶端要進入退出態。
+type deviceRevokeResponse struct {
+	DeviceID  string `json:"device_id"`
+	Revoked   bool   `json:"revoked"`
+	Current   bool   `json:"current"`
+	RequestID string `json:"request_id"`
+}
+
+// handleDevices 列舉當前主體自己的裝置：GET /auth/devices。
+//
+// 這是 Cookie／Bearer 防護鏈又一個只讀消費點：解析走共用的 resolveSession，
+// 未帶憑據 2002、失效 2003、混用 2004、上一代 2007 全部沿用既有合同，不另起一套。
+// 查詢範圍來自解析出的受信主體（見 auth.ListDevices），因此「改一個 account_id 就看到
+// 別人裝置」在這條路上沒有入口——GET 沒有任何請求體。
+func (s *Server) handleDevices(w http.ResponseWriter, r *http.Request) {
+	s.noStore(w)
+	resolved, ok := s.resolveSession(w, r)
+	if !ok {
+		return
+	}
+	list, err := s.auth.ListDevices(r.Context(), resolved.Principal)
+	if err != nil {
+		s.logger.Error("列舉裝置失敗", "request_id", requestIDFromRequest(r), "err", err)
+		writeError(w, r, CodeUnknown, http.StatusInternalServerError)
+		return
+	}
+	now := s.clock.Now()
+	currentDevice := resolved.Session.DeviceID.String()
+	items := make([]deviceResponse, 0, len(list))
+	for _, sess := range list {
+		items = append(items, deviceResponse{
+			DeviceID:     sess.DeviceID.String(),
+			CreatedAt:    timeutil.FormatUTC(sess.CreatedAt),
+			LastActiveAt: timeutil.FormatUTC(sess.LastActiveAt),
+			ExpiresAt:    timeutil.FormatUTC(sess.ExpiresAt),
+			Status:       string(sess.State(now)),
+			Current:      sess.DeviceID.String() == currentDevice,
+		})
+	}
+	writeJSON(w, http.StatusOK, deviceListResponse{
+		Devices:   items,
+		RequestID: requestIDFromRequest(r),
+	})
+}
+
+// handleDeviceRevoke 撤銷當前主體名下的一枚裝置：POST /auth/devices/revoke。
+//
+// 四道關卡，逐字複用既有策略，不新造第二套：
+//  1. 有副作用的方法——先過 allowRequestOrigin（CSRF 來源策略）；
+//  2. 憑據解析走共用的 resolveCredentials，credOK 意味著「本次請求的憑據此刻仍換得出身份」——
+//     這正是敏感操作要求的「重檢當前會話有效」，不是拿到一個舊 principal 就放行；
+//  3. 目標 device_id 經 idgen 解析，形狀不合格屬客戶端輸入錯誤，回 1004（不對外猜它是誰的）；
+//  4. 撤銷落在本主體範圍內（auth.RevokeDevice），別人的 device_id 與不存在的 device_id
+//     收斂為同一個 ErrNotFound → 2009，給「列表已陳舊」這句真實提示而不洩露存在性。
+//
+// 撤銷的正是本請求這一臺時：該行已被撤銷，本憑據再換不出身份；Web 路徑順帶下發刪除指令
+// （與登出同一條通路），Current=true 讓客戶端進入退出態。撤銷別的裝置不影響本會話，
+// Current=false、不發刪除指令。冪等：重複撤銷同一枚早已失效的裝置回 200 且 revoked=false。
+func (s *Server) handleDeviceRevoke(w http.ResponseWriter, r *http.Request) {
+	s.noStore(w)
+	if !s.allowRequestOrigin(r) {
+		writeError(w, r, CodeOriginForbidden, http.StatusForbidden)
+		return
+	}
+	res := s.resolveCredentials(r)
+	switch res.status {
+	case credOK:
+		var in deviceRevokeRequest
+		if !decodeJSON(w, r, &in) {
+			return
+		}
+		deviceID, err := idgen.Parse(in.DeviceID)
+		if err != nil {
+			// 形狀不合格的 device_id 是請求本體錯誤，不是「查無此裝置」：
+			// 客戶端連一個合法標識都沒給出來，沒有可歸屬的目標可言。
+			writeError(w, r, CodeInvalidBody, http.StatusBadRequest)
+			return
+		}
+		result, err := s.auth.RevokeDevice(r.Context(), res.resolved.Principal, deviceID,
+			requestIDFromRequest(r))
+		if err != nil {
+			if errors.Is(err, session.ErrNotFound) {
+				writeError(w, r, CodeDeviceNotFound, http.StatusNotFound)
+				return
+			}
+			s.logger.Error("撤銷裝置失敗", "request_id", requestIDFromRequest(r), "err", err)
+			writeError(w, r, CodeUnknown, http.StatusInternalServerError)
+			return
+		}
+		current := result.Session.DeviceID.String() == res.resolved.Session.DeviceID.String()
+		if res.viaCookie && result.Revoked && current {
+			http.SetCookie(w, s.clearedSessionCookie(r))
+		}
+		writeJSON(w, http.StatusOK, deviceRevokeResponse{
+			DeviceID:  result.Session.DeviceID.String(),
+			Revoked:   result.Revoked,
+			Current:   current,
+			RequestID: requestIDFromRequest(r),
+		})
+		return
+	case credAbsent:
+		writeError(w, r, CodeNotAuthenticated, http.StatusUnauthorized)
+		return
+	case credInvalid:
 		if res.viaCookie {
 			http.SetCookie(w, s.clearedSessionCookie(r))
 		}

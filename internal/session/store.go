@@ -550,12 +550,19 @@ const selectSessionSQL = `SELECT id, device_id, subject_kind, account_id, rotati
 		created_at, last_active_at, expires_at, revoked_at
 	FROM sessions`
 
+// rowScanner 是「掃描一行結果」的最小抽象：*sql.Row 與 *sql.Rows 都滿足它，
+// 於是單行查詢（按秘密、按標識）與多行遍歷（裝置清單）共用同一份列解析，
+// 欄序與取值順序只在 scanSession 一處定義，不會長成兩套會互相漂移的讀取。
+type rowScanner interface {
+	Scan(dest ...any) error
+}
+
 // scanSession 把一列读回实体。
 //
 // 标识读不回来、主体枚举不认识时一律报错：那代表数据库被绕过校验写入过东西
 // （或执行档比数据库旧），静默跳过会让那条会话在验证里永远「查无秘密」，
 // 把一个数据问题伪装成一个安全问题。
-func scanSession(row *sql.Row) (Session, error) {
+func scanSession(row rowScanner) (Session, error) {
 	var (
 		idText, deviceText, kindText string
 		accountID                    sql.NullString

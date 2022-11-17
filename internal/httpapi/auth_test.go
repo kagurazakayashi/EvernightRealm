@@ -46,6 +46,17 @@ type fakeAuth struct {
 	// lastIP 記錄收到的來源位址：限流把「傳輸層只交實際連線位址、不交轉發標頭」
 	// 的責任放在 handler，這裡釘住「handler 確實交了 remoteHost 而不是標頭值」。
 	lastIP string
+	// devicesFn 覆寫「列舉裝置」的回傳形態；未設定時回一個空清單。
+	devicesFn func(principal identity.Principal) ([]session.Session, error)
+	// listErr 是未設定 devicesFn 時列舉裝置的回傳錯誤（nil 即回空清單）。
+	listErr error
+	// revokeFn 覆寫「撤銷裝置」的回傳形態；未設定時一律回 revokeErr。
+	revokeFn func(principal identity.Principal, deviceID idgen.ID) (auth.DeviceRevokeResult, error)
+	// revokeErr 是未設定 revokeFn 時撤銷裝置的回傳錯誤。
+	revokeErr error
+	// lastRevokeDevice 記錄撤銷收到的目標裝置標識：斷言「端點把請求裡的 device_id
+	// 原樣交下去，且主體是本請求解析出來的受信主體」。
+	lastRevokeDevice idgen.ID
 }
 
 func (f *fakeAuth) LoginAccount(ctx context.Context, loginName, password, requestID, ip string) (auth.Outcome, error) {
@@ -85,6 +96,21 @@ func (f *fakeAuth) RotateSession(ctx context.Context, secret, requestID string) 
 		return f.rotateFn(secret)
 	}
 	return auth.Outcome{}, f.rotateErr
+}
+
+func (f *fakeAuth) ListDevices(ctx context.Context, principal identity.Principal) ([]session.Session, error) {
+	if f.devicesFn != nil {
+		return f.devicesFn(principal)
+	}
+	return nil, f.listErr
+}
+
+func (f *fakeAuth) RevokeDevice(ctx context.Context, principal identity.Principal, deviceID idgen.ID, requestID string) (auth.DeviceRevokeResult, error) {
+	f.lastRevokeDevice = deviceID
+	if f.revokeFn != nil {
+		return f.revokeFn(principal, deviceID)
+	}
+	return auth.DeviceRevokeResult{}, f.revokeErr
 }
 
 // testOutcome 構造一個帳戶主體的登入結果（秘密固定，便於斷言它只進 Cookie）。

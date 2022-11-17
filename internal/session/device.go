@@ -165,21 +165,34 @@ func (s *Store) ApplyLoginSlotPolicy(ctx context.Context, q database.Querier,
 	}
 }
 
-// liveScope 產生「此刻還換得出身份」的 WHERE 片段與對應引數。
+// subjectFilter 產生「屬於這個主體」的 WHERE 片段與對應引數（不含任何有效性判定）。
 //
-// 三個條件都必須有：revoked_at 與 expires_at 是資料庫裡的事實，閒置線則由本倉儲的
-// 政策決定（IdleTTL 不為正時整個條件不成立，也就是不啟用）。
-// 閒置寫成算術（last_active_at + 閒置毫秒 > 現在毫秒）而不是把換算好的截止時刻交出去：
-// 這樣閒置閾值始終只在 Policy 一處，呼叫端不可能拿一個自己算的閾值來繞過計數。
-// 主體範圍與 RevokeSubject 同形（Root 按 subject_kind、帳戶按 account_id），
-// 一個人的額度只由他自己是誰決定，與請求裡的其他欄位無關。
-func (s *Store) liveScope(subject Subject, now time.Time) (string, []any) {
-	clause := "subject_kind = ? AND revoked_at IS NULL AND expires_at > ?"
-	args := []any{string(subject.kind), timeutil.ToMillis(now)}
+// 主體範圍與 RevokeSubject 同形（Root 按 subject_kind、帳戶按 account_id）：一個人的
+// 裝置清單、名額計數、定向撤銷都只由「他是誰」決定，與請求裡的其他欄位無關。
+// Root 沒有帳戶標識，只按 subject_kind 過濾（全服務只有一個 Root）；帳戶主體必須
+// 疊 account_id，否則同一 subject_kind='account' 下會把別人的會話一起撈進來。
+// 這是「裝置範圍」的唯一定義點，liveScope 與清單/撤銷都由它往外加條件，不各寫一套。
+func subjectFilter(subject Subject) (string, []any) {
+	clause := "subject_kind = ?"
+	args := []any{string(subject.kind)}
 	if subject.kind == SubjectAccount {
 		clause += " AND account_id = ?"
 		args = append(args, subject.accountID.String())
 	}
+	return clause, args
+}
+
+// liveScope 產生「此刻還換得出身份」的 WHERE 片段與對應引數。
+//
+// 主體範圍取自 subjectFilter，再疊上三條有效性條件。三個條件都必須有：
+// revoked_at 與 expires_at 是資料庫裡的事實，閒置線則由本倉儲的政策決定
+// （IdleTTL 不為正時整個條件不成立，也就是不啟用）。
+// 閒置寫成算術（last_active_at + 閒置毫秒 > 現在毫秒）而不是把換算好的截止時刻交出去：
+// 這樣閒置閾值始終只在 Policy 一處，呼叫端不可能拿一個自己算的閾值來繞過計數。
+func (s *Store) liveScope(subject Subject, now time.Time) (string, []any) {
+	clause, args := subjectFilter(subject)
+	clause += " AND revoked_at IS NULL AND expires_at > ?"
+	args = append(args, timeutil.ToMillis(now))
 	if s.policy.IdleTTL > 0 {
 		clause += " AND last_active_at + ? > ?"
 		args = append(args, s.policy.IdleTTL.Milliseconds(), timeutil.ToMillis(now))

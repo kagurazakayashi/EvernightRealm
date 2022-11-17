@@ -630,6 +630,109 @@ func (s *Service) RotateSession(ctx context.Context, secret, requestID string) (
 	return outcome, nil
 }
 
+// DeviceRevokeResult 是一次定向撤銷的結果（僅供「我的裝置」撤銷端點使用）。
+//
+// Revoked 區分「這次真的停掉了一枚原本有效的會話」與「目標早已不在有效狀態」——
+// 後者是冪等 no-op，不是錯誤。Session 帶回被撤銷（或本就撤銷過）的那一行，
+// 讓傳輸層能判出「撤的是不是目前這臺」。不含任何憑據材料。
+type DeviceRevokeResult struct {
+	// Session 是被指向的會話行（在本主體範圍內讀得）。
+	Session session.Session
+	// Revoked 為 true 表示本次寫入了 revoked_at；false 表示目標本就已是失效態。
+	Revoked bool
+}
+
+// ListDevices 列舉當前受信主體名下的全部裝置（會話）。
+//
+// 查詢範圍只由 Principal 換得的 Subject 決定（見 session.ListBySubject）：請求裡沒有任何
+// 可以改寫「列誰的裝置」的欄位——連 account_id 都不是輸入，它是解析出來的身份。
+// 因此 Root 與普通帳戶走同一個機制，沒有一條靠客戶端特判放寬的旁路。
+// 回傳的實體不含任何秘密；失效行是否出現由倉儲的收錄範圍決定（含寬限期內尚未清理的行）。
+func (s *Service) ListDevices(ctx context.Context, principal identity.Principal) ([]session.Session, error) {
+	subject, err := session.SubjectOf(principal)
+	if err != nil {
+		return nil, err
+	}
+	list, err := s.sessions.ListBySubject(ctx, s.db.SQL(), subject)
+	if err != nil {
+		return nil, fmt.Errorf("auth: 列舉裝置失敗: %w", err)
+	}
+	return list, nil
+}
+
+// RevokeDevice 在當前受信主體的範圍內按 device_id 撤銷一枚會話。
+//
+// 誰準它：只有「剛經 Resolve 換回的一個有效主體」——呼叫它的傳輸層入口必須先讓本次
+// 請求的憑據過一次 Verify（見 handleDeviceRevoke），這就兌現了「敏感操作重新檢查當前
+// 會話有效」。目標歸屬由 Subject 範圍把關：只能撤自己的裝置，別人的 device_id 與
+// 根本不存在的裝置收斂為同一個 ErrNotFound（session 層保證），不給枚舉留信号。
+//
+// 幂等邊界：重複撤銷一枚已撤銷的裝置不是錯誤（Revoked=false 的 no-op）；撤銷一枚
+// 已到期但還留在庫裡的行仍寫下 revoked_at，統一走「已撤銷」這個最終態。
+//
+// 審計落地沿用 Root 域事件的既有口徑（見 Logout／RotateSession）：
+//   - Root 主體：撤銷與 root_audit 的 auth.device_revoke 落在同一個交易，審計寫不進去
+//     就不撤銷；只在「這次真的撤銷成功（Revoked=true）」時記一筆，重複撤銷的 no-op 不記。
+//   - 普通帳戶：只進執行日誌，不進審計表（審計主體類別未批准，與登入/登出/輪換同一口徑）。
+//   - 被拒（查無此裝置）不寫任何審計，也不給寫入放大器。
+//
+// 日誌與審計只記可展示事實（主體、裝置標識、請求關聯 ID）；本方法全程不經手任何秘密。
+// 「被撤銷裝置後續請求立即被拒」由 revoked_at 落庫 guarantees：那枚會話的下一個請求在
+// Verify 的第一道關卡就拿到 ErrRevoked。本步不假裝已透過 WebSocket 強制斷開連線——
+// 目前尚無即時通道，撤銷的生效邊界是「下一個請求」。
+func (s *Service) RevokeDevice(ctx context.Context, principal identity.Principal,
+	deviceID idgen.ID, requestID string) (DeviceRevokeResult, error) {
+	subject, err := session.SubjectOf(principal)
+	if err != nil {
+		return DeviceRevokeResult{}, err
+	}
+	if principal.IsRoot() {
+		subjectID, err := identity.RootSubjectID()
+		if err != nil {
+			return DeviceRevokeResult{}, fmt.Errorf("auth: Root 審計主體標識異常: %w", err)
+		}
+		var res DeviceRevokeResult
+		err = s.db.InTx(ctx, func(tctx context.Context, tx *database.Tx) error {
+			sess, revoked, err := s.sessions.RevokeDeviceBySubject(tctx, tx, subject, deviceID)
+			if err != nil {
+				return err
+			}
+			if revoked {
+				rec := s.rootSessionRecord(subjectID, "auth.device_revoke", sess.ID.String(), requestID,
+					"本人從裝置清單撤銷一台裝置")
+				if _, err := s.audits.Append(tctx, tx, rec); err != nil {
+					return err
+				}
+			}
+			res = DeviceRevokeResult{Session: sess, Revoked: revoked}
+			return nil
+		})
+		if err != nil {
+			if errors.Is(err, session.ErrNotFound) {
+				// 查無此裝置：原樣透出 ErrNotFound 鏈，讓傳輸層回「目標不存在」，
+				// 不進撤銷審計（撤銷根本沒發生）。
+				return DeviceRevokeResult{}, err
+			}
+			return DeviceRevokeResult{}, fmt.Errorf("auth: Root 裝置撤銷落地失敗: %w", err)
+		}
+		s.log.Info("Root 撤銷裝置會話",
+			"device", res.Session.DeviceID.String(), "revoked", res.Revoked, "request_id", requestID)
+		return res, nil
+	}
+
+	sess, revoked, err := s.sessions.RevokeDeviceBySubject(ctx, s.db.SQL(), subject, deviceID)
+	if err != nil {
+		if errors.Is(err, session.ErrNotFound) {
+			return DeviceRevokeResult{}, err
+		}
+		return DeviceRevokeResult{}, fmt.Errorf("auth: 撤銷裝置會話失敗: %w", err)
+	}
+	s.log.Info("帳戶撤銷裝置會話",
+		"account", principal.AccountID().String(), "device", sess.DeviceID.String(),
+		"revoked", revoked, "request_id", requestID)
+	return DeviceRevokeResult{Session: sess, Revoked: revoked}, nil
+}
+
 // issue 在一個交易裡執行裝置名額策略、簽發會話並推進帳戶的最近登入時刻。
 //
 // 三者同交易是「何時登入成功」這句話的完整性：會話存在而 last_login_at 未動，

@@ -126,6 +126,12 @@ var errorMessages = map[ErrorCode]map[string]string{
 		LocaleEnUS: "This account has reached the server's limit on signed-in devices, so this sign-in was not applied. Sign out on another device, or wait for an existing session to expire, then try again.",
 		LocaleJaJP: "このアカウントのログイン済み端末数がサーバーの設定上限に達しているため、今回のログインは適用されませんでした。他の端末でログアウトするか、既存のセッションの期限切れを待ってから再度お試しください。",
 	},
+	CodeDeviceNotFound: {
+		LocaleZhCN: "该设备已不在你的登录设备中，可能已被移除，或列表在刷新前已过期，请刷新后重试。",
+		LocaleZhTW: "該裝置已不在你的登入裝置中，可能已被移除，或清單在重新整理前已過期，請重新整理後重試。",
+		LocaleEnUS: "This device is no longer among your signed-in devices. It may have been removed, or your list is out of date. Please refresh and try again.",
+		LocaleJaJP: "この端末はサインイン済み端末の一覧に存在しません。削除されたか、一覧が最新でない可能性があります。更新してからもう一度お試しください。",
+	},
 }
 
 // messageFor 取得錯誤碼在指定語言的使用者訊息；語言未支援或訊息為空時回退 defaultLocale。
