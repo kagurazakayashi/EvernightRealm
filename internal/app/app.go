@@ -516,9 +516,11 @@ func run(ctx context.Context, releaseSignals func(), args []string, out io.Write
 		Accounts:         account.NewStore(timeutil.System()),
 		Audits:           audit.NewStore(timeutil.System()),
 		RootPasswordHash: cfg.Security.RootPasswordHash,
-		Hashing:          hashingParams,
-		Guard:            loginGuard,
-		Log:              lg.Logger,
+		// Root 憑據的正式來源：登入讀它、改密經同一個互斥區覆寫它（見 root_creds.go）。
+		RootCreds: newRootCredentialStore(cfg),
+		Hashing:   hashingParams,
+		Guard:     loginGuard,
+		Log:       lg.Logger,
 	})
 	if err != nil {
 		lg.Error("登入用例組裝失敗", "err", err)

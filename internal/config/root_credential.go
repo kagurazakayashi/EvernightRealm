@@ -11,10 +11,19 @@
 //   - 送進來的值必須是 internal/credential 解得開的 Argon2id 編碼；這一層不收「看起來像
 //     但解不開」的字串，因為這一欄寫下去就關不上了，留著壞值等於造出一個登不進去的 Root；
 //   - 檔案已帶有非空值時一律拒絕，不做第二次初始化，也不覆蓋既有 Root；
+//     （覆蓋既有 Root 是「已認證情況下的改密」的職責，由 UpdateRootPasswordHash 承擔，
+//     見下方「覆寫」一節；兩條路各自把關，不共用一個函式的分支。）
 //   - 落盤方式為同目錄臨時檔 → 寫入 → Sync → 一次改名覆蓋，失敗即清掉臨時檔，
 //     原檔案在任何失敗路徑上維持位元組不變；
 //   - 回傳 nil 之前一定把檔案重新讀回來逐字比對過，所以「回了成功但沒寫進去」
 //     在這條路上不存在（改名之外還要求目錄 fsync，做不到時只在支援的平台嘗試）。
+//
+// 覆寫（UpdateRootPasswordHash）的約定與上面同源，但前提相反：它只換「已有的那一份」，
+//   - 必須帶上「預期中的現有雜湊」，寫入前在互斥區內重讀檔案逐字比對——對不上就整個不動；
+//     這是比較-and-set，為的是兩個並行的改密不會有一個無聲蓋掉另一個；
+//   - 尚未初始化（檔案沒有非空值）時拒絕：把「建立 Root」與「更換 Root」分成兩條路，
+//     各自只有一種成功形態；
+//   - 同樣要求新值是可用的 Argon2id 編碼、同樣原子落盤、同樣回讀比對。
 //
 // 重新編碼會正規化縮排與註解位置（值、鍵序、註解文字與不認識的欄位都保留，
 // 但不是逐字不動的 diff）：節點級編輯換來的是「不會把部署者的檔案重寫成結構體的形狀」，
@@ -48,6 +57,13 @@ const RootPasswordHashEnvKey = "ER_SECURITY_ROOT_PASSWORD_HASH"
 // 它是「一次性」這句話的程式形態：初始化成功之後，同一條寫入通路必須永遠走到這個錯誤，
 // 而不是把既有憑據換掉。要換 Root 口令屬「已認證情況下的改密」流程，是另一件事。
 var ErrRootAlreadyInitialized = errors.New("config: 組態檔已帶有 Root 憑據雜湊，拒絕第二次初始化")
+
+// ErrRootCredentialMismatch 表示覆寫時檔案現行值與「預期要換掉的舊雜湊」不一致。
+//
+// 它是「兩個並行的改密只能成功一個」的程式形態：比對發生在進程級互斥區內的現讀，
+// 所以輸家拿到的永遠是這個錯誤而不是無聲蓋掉對手。錯誤本身不回顯任何一方的雜湊值——
+// 那兩個值都是高敏感材料，差在哪裡屬呼叫端（與內部日誌）的事，不是訊息的內容。
+var ErrRootCredentialMismatch = errors.New("config: 現有 Root 憑據與預期不符，覆寫中止")
 
 // rootPasswordHashKey 是組態檔裡那個欄位的 YAML 鍵名（唯一拼寫來源）。
 const rootPasswordHashKey = "root_password_hash"
@@ -188,6 +204,112 @@ func WriteRootPasswordHash(configPath, encodedHash string) error {
 		return errors.New("config: 寫入後回讀到的 Root 憑據與送入值不符，本次初始化不算成功")
 	}
 	return nil
+}
+
+// UpdateRootPasswordHash 以比較-and-set 覆寫組態檔中的 Root 憑據：只有檔案現行值
+// 逐字等於 expectedOldHash 時，才把它換成 newHash。
+//
+// 這條通路存在的理由是「已認證情況下的 Root 改密」：一次性初始化（WriteRootPasswordHash）
+// 之後檔案永久關上，換口令必須有一條能覆蓋既有值的路，而覆蓋的風險恰是「蓋掉別人
+// 剛換好的那份」。因此這裡的把關順序與初始化同形、但檢查的對象換成現值：
+//  1. 新值先過 Argon2id 嚴格解析（壞值不落盤，這條路寫下去同樣是要長期用的憑據）；
+//  2. 取進程級互斥（與初始化共用 rootHashWriteMu：兩條寫入通路串行，不出現交錯的半套）；
+//  3. 互斥區內重讀檔案，要求已初始化且現值與預期逐字一致，否則整個不動
+//     （跨進程的窗口照舊由單寫入實例鎖擋在外面）；
+//  4. 節點級覆寫那一個值（註解、鍵序、未知欄位保留），同目錄臨時檔原子替換；
+//  5. 回讀逐字比對，對不上就報失敗。
+//
+// 呼叫端（internal/auth 的改密用例）在成功回傳後才準把新雜湊生效於記憶體：
+// 回傳 nil 就意味著「檔案裡現在讀得到這份新憑據」。錯誤訊息不含任何一方的雜湊值。
+func UpdateRootPasswordHash(configPath, expectedOldHash, newHash string) error {
+	if strings.TrimSpace(expectedOldHash) == "" {
+		return errors.New("config: 覆寫 Root 憑據必須帶上預期中的現有雜湊（尚無憑據時請走一次性初始化）")
+	}
+	if err := validateRootHashShape(newHash); err != nil {
+		return err
+	}
+
+	rootHashWriteMu.Lock()
+	defer rootHashWriteMu.Unlock()
+
+	state, err := ReadRootFile(configPath)
+	if err != nil {
+		return err
+	}
+	if !state.FileExists {
+		return fmt.Errorf("config: 組態檔 %s 不存在，無法覆寫 Root 憑據", configPath)
+	}
+	if !state.Initialized() {
+		return fmt.Errorf("%w：組態檔目前沒有 Root 憑據；建立憑據屬一次性初始化（init-root），不是覆寫",
+			ErrRootCredentialMismatch)
+	}
+	if strings.TrimSpace(state.Hash) != strings.TrimSpace(expectedOldHash) {
+		return ErrRootCredentialMismatch
+	}
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return fmt.Errorf("config: 讀取組態檔 %s 失敗: %w", configPath, err)
+	}
+	updated, err := replaceRootHashInYAML(data, newHash)
+	if err != nil {
+		return err
+	}
+	if err := writeFileAtomically(configPath, updated); err != nil {
+		return err
+	}
+
+	after, err := ReadRootFile(configPath)
+	if err != nil {
+		return fmt.Errorf("config: 覆寫後回讀組態檔失敗: %w", err)
+	}
+	if after.Hash != newHash {
+		return errors.New("config: 覆寫後回讀到的 Root 憑據與送入值不符，本次覆寫不算成功")
+	}
+	return nil
+}
+
+// replaceRootHashInYAML 在保留全部既有內容的前提下，把已有的 root_password_hash
+// 換成新值。與 setRootHashInYAML 的分工就一句話：那個只準填空白格，這個只準換已有值；
+// 鍵不存在、不是純量、security 不是映射，都是「這個檔案不處於可覆寫的形態」，報錯不動它。
+func replaceRootHashInYAML(data []byte, encodedHash string) ([]byte, error) {
+	if strings.TrimSpace(string(data)) == "" {
+		return nil, errors.New("config: 空組態檔沒有可覆寫的 Root 憑據欄位")
+	}
+	var doc yaml.Node
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		return nil, fmt.Errorf("config: 解析組態檔失敗（請檢查 YAML 語法）: %w", err)
+	}
+	root, err := rootNodeMapping(&doc)
+	if err != nil {
+		return nil, err
+	}
+	_, secVal := mappingEntry(root, securityKey)
+	if secVal == nil || secVal.Kind != yaml.MappingNode {
+		return nil, fmt.Errorf("config: 組態檔的 %s 節點不是映射，無法覆寫 Root 憑據", securityKey)
+	}
+	keyIdx, hashVal := mappingEntry(secVal, rootPasswordHashKey)
+	if keyIdx < 0 {
+		return nil, fmt.Errorf("config: 組態檔的 %s 節點裡找不到 %s 欄位，無法覆寫", securityKey, rootPasswordHashKey)
+	}
+	if hashVal.Kind != yaml.ScalarNode {
+		return nil, fmt.Errorf("config: 組態檔的 %s.%s 不是純量值，無法覆寫 Root 憑據",
+			securityKey, rootPasswordHashKey)
+	}
+	// 換值不換鍵：鍵節點上的標頭註解（「由 init-root 寫入……」）屬於那一行本身，
+	// 覆寫只替換值純量，註解、鍵序與其他欄位一律原樣保留。
+	*hashVal = *plainHashNode(encodedHash)
+
+	var buf bytes.Buffer
+	enc := yaml.NewEncoder(&buf)
+	enc.SetIndent(2)
+	if err := enc.Encode(&doc); err != nil {
+		return nil, fmt.Errorf("config: 重新編碼組態檔失敗: %w", err)
+	}
+	if err := enc.Close(); err != nil {
+		return nil, fmt.Errorf("config: 結束組態檔編碼失敗: %w", err)
+	}
+	return buf.Bytes(), nil
 }
 
 // validateRootHashShape 擋下「根本不能當憑據用」的輸入，用的是 credential 的嚴格解析。

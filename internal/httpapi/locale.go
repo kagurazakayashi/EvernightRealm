@@ -132,6 +132,12 @@ var errorMessages = map[ErrorCode]map[string]string{
 		LocaleEnUS: "This device is no longer among your signed-in devices. It may have been removed, or your list is out of date. Please refresh and try again.",
 		LocaleJaJP: "この端末はサインイン済み端末の一覧に存在しません。削除されたか、一覧が最新でない可能性があります。更新してからもう一度お試しください。",
 	},
+	CodePasswordChangeRequired: {
+		LocaleZhCN: "此账号尚未完成首次登录的密码修改，请先修改密码或退出登录，再使用其他功能。",
+		LocaleZhTW: "此帳號尚未完成首次登入的密碼修改，請先修改密碼或登出，再使用其他功能。",
+		LocaleEnUS: "This account has not completed the password change required at first sign-in. Please change your password or sign out before using other features.",
+		LocaleJaJP: "このアカウントは初回サインイン時に必要なパスワード変更が未完了です。他の機能を使う前に、パスワードを変更するかサインアウトしてください。",
+	},
 }
 
 // messageFor 取得錯誤碼在指定語言的使用者訊息；語言未支援或訊息為空時回退 defaultLocale。

@@ -195,7 +195,7 @@ func RootStatus(ctx context.Context, args []string, out io.Writer) error {
 			"（會先建立組態檔，再把口令落成 Argon2id 憑據）")
 	case state.Initialized:
 		fmt.Fprintln(out, "Root 狀態：已初始化（組態檔帶有 Argon2id 憑據；雜湊值不在這裡顯示）")
-		fmt.Fprintln(out, "提示：要換 Root 口令需要已認證的改密流程（尚未實作），"+
+		fmt.Fprintln(out, "提示：要換 Root 口令請走服務內的已認證改密流程（Root 登入後 POST /auth/password/change），"+
 			"再跑一次 init-root 一律會被拒絕——那是設計，不是故障。")
 	default:
 		fmt.Fprintln(out, "Root 狀態：尚未初始化（組態檔已存在，但還沒有 Root 憑據）")
@@ -359,7 +359,7 @@ func rootInitReport(cfg config.Config, res rootinit.Result) string {
 	lines.WriteString("  本次未做：沒有啟動監聽、沒有動資料庫內容（只取單寫入實例鎖並追加 1 筆 Root 審計）、" +
 		"也沒有新增任何 HTTP 端點。\n")
 	lines.WriteString("  之後：再跑一次 init-root 會被拒絕，這是「一次性」的定義；" +
-		"要換 Root 口令需要已認證的改密流程（尚未實作）。\n")
+		"要換 Root 口令請走服務內的已認證改密流程（Root 登入後 POST /auth/password/change）。\n")
 	fmt.Fprintf(&lines, "下一步：evernight-server --data-dir \"%s\" 啟動服務。\n", cfg.Server.DataDir)
 	lines.WriteString("敏感性提示：組態檔現在是敏感檔（裡面的編碼雜湊可以被離線嘗試），" +
 		"備分包會原樣收錄它——存放位置與日後刪除都要當回事。\n")
@@ -381,7 +381,7 @@ func rootInitRefusalNote(initErr error) string {
 	if errors.Is(initErr, config.ErrRootAlreadyInitialized) {
 		return "Root 初始化：拒絕（這個資料目錄已經有 Root 憑據）\n" +
 			"  既有憑據與其口令都不受影響，組態檔維持原樣。\n" +
-			"  要換口令請走已認證的改密流程（尚未實作）；把既有憑據蓋掉不是一條支援的路。\n"
+			"  要換口令請走服務內的已認證改密流程（Root 登入後 POST /auth/password/change）；把既有憑據蓋掉不是一條支援的路。\n"
 	}
 	return fmt.Sprintf("Root 初始化：未成功（%v）\n  組態檔維持原樣。\n", initErr)
 }

@@ -86,6 +86,14 @@ type AuthUseCase interface {
 	// 收斂為 session.ErrNotFound）。呼叫端必須先讓本次請求的憑據過一次解析，
 	// 才拿得到 principal——這是「敏感操作重檢當前會話有效」的落點。
 	RevokeDevice(ctx context.Context, principal identity.Principal, deviceID idgen.ID, requestID string) (auth.DeviceRevokeResult, error)
+	// ChangePassword 更換「剛經解析換回主體」的本人口令，並按其名下全部會話。
+	// 呼叫端必須先帶本次請求的憑據過解析、並在請求本體裡交出現行口令——
+	// 「會話還活著」從來不是改密的授權，再認證是口令本身。
+	ChangePassword(ctx context.Context, principal identity.Principal,
+		currentPassword, newPassword, requestID string) (auth.PasswordChangeResult, error)
+	// MustChangePassword 現讀該主體是否仍帶有「首次登入必須改密」旗標。
+	// 逐請求現讀（不是會話簽發時的快照）：改密成功後的下一個請求就該看到解除。
+	MustChangePassword(ctx context.Context, principal identity.Principal) (bool, error)
 }
 
 // loginRequest 為普通帳戶登入的請求本體。欄位只准出現這兩個：
@@ -112,7 +120,13 @@ type loginResponse struct {
 	AccountID   string `json:"account_id,omitempty"`
 	DeviceID    string `json:"device_id"`
 	ExpiresAt   string `json:"expires_at"`
-	RequestID   string `json:"request_id"`
+	// MustChangePassword 是帳戶旗標的現讀值（只增不刪的合同演進）：為 true 時
+	// 客戶端必須先把人帶進改密流程——受保護功能在服務端本來就被 2010 擋著，
+	// 這個欄位的意義是讓界面能主動講對句話，而不是讓人撞上去才知道。
+	// 為 false 時欄位缺席（omitempty）：Root 與已完成義務的帳戶都讀不到它，
+	// 客戶端按「缺席即 false」解讀即可。
+	MustChangePassword bool   `json:"must_change_password,omitempty"`
+	RequestID          string `json:"request_id"`
 }
 
 // sessionResponse 是「當前會話」的回應本體，在登入回應之上多帶建立與最近活動時刻。
@@ -128,7 +142,11 @@ type sessionResponse struct {
 	CreatedAt    string `json:"created_at"`
 	LastActiveAt string `json:"last_active_at"`
 	ExpiresAt    string `json:"expires_at"`
-	RequestID    string `json:"request_id"`
+	// MustChangePassword 同 loginResponse：現讀的帳戶旗標，false 時欄位缺席。
+	// /auth/session 永遠不被本旗標擋（它正是客戶端得知「還欠一次改密」的入口），
+	// 這也讓「改密成功後刷新即放行」有一條單一的可輪詢事實來源。
+	MustChangePassword bool   `json:"must_change_password,omitempty"`
+	RequestID          string `json:"request_id"`
 }
 
 // logoutResponse 是登出成功的回應本體：只有請求關聯 ID。
@@ -156,6 +174,7 @@ func (s *Server) authEndpoints() []apiRoute {
 		{"/auth/session/rotate", s.allowMethods(s.handleRotate, http.MethodPost)},
 		{"/auth/devices", s.allowMethods(s.handleDevices, http.MethodGet, http.MethodHead)},
 		{"/auth/devices/revoke", s.allowMethods(s.handleDeviceRevoke, http.MethodPost)},
+		{"/auth/password/change", s.allowMethods(s.handlePasswordChange, http.MethodPost)},
 	}
 }
 
@@ -232,6 +251,15 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 	if id := resolved.Principal.AccountID(); !id.IsNil() {
 		body.AccountID = id.String()
 	}
+	// 旗標現讀：這一端點是客戶端得知「還欠改密」的唯一入口，本身必須永遠可讀——
+	// 讀取失敗屬內部故障（照 500 報），不借「還沒改密」的名義把人擋在門外。
+	mustChange, err := s.auth.MustChangePassword(r.Context(), resolved.Principal)
+	if err != nil {
+		s.logger.Error("讀取必須改密旗標失敗", "request_id", requestIDFromRequest(r), "err", err)
+		writeError(w, r, CodeUnknown, http.StatusInternalServerError)
+		return
+	}
+	body.MustChangePassword = mustChange
 	writeJSON(w, http.StatusOK, body)
 }
 
@@ -341,6 +369,9 @@ func (s *Server) handleRotate(w http.ResponseWriter, r *http.Request) {
 	res := s.resolveCredentials(r)
 	switch res.status {
 	case credOK:
+		if !s.requirePasswordChangeDone(w, r, res.resolved.Principal) {
+			return
+		}
 		// 到這裡res.secret 已是「當代」憑據：Resolve 成功意味著它此刻換得出身份。
 		outcome, err := s.auth.RotateSession(r.Context(), res.secret, requestIDFromRequest(r))
 		if err != nil {
@@ -438,6 +469,9 @@ func (s *Server) handleDevices(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if !s.requirePasswordChangeDone(w, r, resolved.Principal) {
+		return
+	}
 	list, err := s.auth.ListDevices(r.Context(), resolved.Principal)
 	if err != nil {
 		s.logger.Error("列舉裝置失敗", "request_id", requestIDFromRequest(r), "err", err)
@@ -485,6 +519,9 @@ func (s *Server) handleDeviceRevoke(w http.ResponseWriter, r *http.Request) {
 	res := s.resolveCredentials(r)
 	switch res.status {
 	case credOK:
+		if !s.requirePasswordChangeDone(w, r, res.resolved.Principal) {
+			return
+		}
 		var in deviceRevokeRequest
 		if !decodeJSON(w, r, &in) {
 			return
@@ -539,6 +576,137 @@ func (s *Server) handleDeviceRevoke(w http.ResponseWriter, r *http.Request) {
 	case credUnavailable:
 		writeError(w, r, CodeUnknown, http.StatusInternalServerError)
 		return
+	}
+}
+
+// requirePasswordChangeDone 是「首次登入必須改密」在服務端的執行點：帶有旗標的帳戶
+// 只準訪問完成改密與退出所需的入口，其餘已認證端點在這裡統一喫 2010。
+//
+// 為什麼閘必須在這裡而不是界面：規格裏「必須改密」這句話的強度，等於它在
+// 最直接的繞過路徑（不看界面的呼叫者）面前還剩多少。藏按鈕從來不是授權，
+// 提示也不是——只有每一個受保護端點在每一次請求上現讀旗標，「只能訪問必要入口」
+// 才是事實。必要入口的清單此刻是：/auth/session（得知欠改）、/auth/logout（退出）、
+// /auth/password/change（還清義務）；三者之外一律擋，未來新增的業務端點接同一條
+// resolve 通路時也調用這把閘，不在各處另寫一份「他改過密了沒有」。
+// 判定現讀帳戶行（見 AuthUseCase.MustChangePassword）：改密成功的下一個請求即放行。
+// 回傳 false 時回應已由本函式寫好，呼叫端必須立即返回。
+func (s *Server) requirePasswordChangeDone(w http.ResponseWriter, r *http.Request, principal identity.Principal) bool {
+	mustChange, err := s.auth.MustChangePassword(r.Context(), principal)
+	if err != nil {
+		// 「查不出旗標」不能當成「沒欠改密」放行，也不能借 2010 的名義拒絕——
+		// 那是把內部故障僞裝成一個會誤導排查方向的策略結論。照 500 報，細節進日誌。
+		s.logger.Error("讀取必須改密旗標失敗", "request_id", requestIDFromRequest(r), "err", err)
+		writeError(w, r, CodeUnknown, http.StatusInternalServerError)
+		return false
+	}
+	if mustChange {
+		writeError(w, r, CodePasswordChangeRequired, http.StatusForbidden)
+		return false
+	}
+	return true
+}
+
+// passwordChangeRequest 是本人改密的請求本體：只準帶現行口令與新口令。
+// 沒有任何可自報的 account_id／主體類別——改誰由憑據解析出的受信主體決定，
+// 多帶的欄位被 decodeJSON 的未知欄位規則打成 1004。
+type passwordChangeRequest struct {
+	CurrentPassword string `json:"current_password"`
+	NewPassword     string `json:"new_password"`
+}
+
+// passwordChangeResponse 是改密成功的回應本體。
+//
+// 刻意不回任何「新憑據相關」的東西：新口令不復述，帳戶與會話內部標識也不 echo。
+// revoked_sessions 是本人名下會話的數量——改密已讓全部失效（已批準策略），
+// 客戶端據此講出「已讓 N 臺裝置重新登入」，並進入退出態。
+type passwordChangeResponse struct {
+	RevokedSessions int    `json:"revoked_sessions"`
+	RequestID       string `json:"request_id"`
+}
+
+// handlePasswordChange 更換本人的口令：POST /auth/password/change。
+//
+// 關卡順序與其餘敏感寫入端點逐字同族，不新造第二套：
+//  1. allowRequestOrigin（CSRF 來源策略）——Web 的強制改密攻擊先被來源擋下；
+//  2. resolveCredentials——credOK 意味著本次請求的憑據此刻仍換得出身份；
+//     它只是必要條件：用例還要求當場交出現行口令（再認證），
+//     「客戶端自報已經驗證過」在這條路上沒有任何對應字段；
+//  3. ChangePassword 用例：帳戶側單一交易換雜湊＋清旗標＋撤銷全部會話，
+//     Root 側按「先覆寫配置、後撤會話、失敗回滾」的順序跨存儲落地（見 internal/auth）。
+//
+// 失敗映射各是各的處置，不互相冒充：現行口令不對 2001（會話仍有效，
+// 不發刪除指令）；新口令形狀或等於現行 1004（改的是表單輸入）；
+// 部署形態不接受覆寫或存儲故障 500（細節只進日誌）。
+// 成功時 Web 路徑下發刪除指令：剛生效的改密已讓這一枚會話一起失效，
+// Cookie 留在瀏覽器裡只會在下一次請求撞上 2003。
+func (s *Server) handlePasswordChange(w http.ResponseWriter, r *http.Request) {
+	s.noStore(w)
+	if !s.allowRequestOrigin(r) {
+		writeError(w, r, CodeOriginForbidden, http.StatusForbidden)
+		return
+	}
+	res := s.resolveCredentials(r)
+	switch res.status {
+	case credOK:
+		var in passwordChangeRequest
+		if !decodeJSON(w, r, &in) {
+			return
+		}
+		result, err := s.auth.ChangePassword(r.Context(), res.resolved.Principal,
+			in.CurrentPassword, in.NewPassword, requestIDFromRequest(r))
+		if err != nil {
+			s.writePasswordChangeFailure(w, r, err)
+			return
+		}
+		if res.viaCookie {
+			http.SetCookie(w, s.clearedSessionCookie(r))
+		}
+		writeJSON(w, http.StatusOK, passwordChangeResponse{
+			RevokedSessions: result.RevokedSessions,
+			RequestID:       requestIDFromRequest(r),
+		})
+		return
+	case credAbsent:
+		writeError(w, r, CodeNotAuthenticated, http.StatusUnauthorized)
+		return
+	case credInvalid:
+		if res.viaCookie {
+			http.SetCookie(w, s.clearedSessionCookie(r))
+		}
+		writeError(w, r, CodeSessionInvalid, http.StatusUnauthorized)
+		return
+	case credStale:
+		writeError(w, r, CodeSessionStale, http.StatusUnauthorized)
+		return
+	case credNotReady:
+		writeError(w, r, CodeNotReady, http.StatusServiceUnavailable)
+		return
+	case credConflict:
+		writeError(w, r, CodeAuthMethodConflict, http.StatusBadRequest)
+		return
+	case credUnavailable:
+		writeError(w, r, CodeUnknown, http.StatusInternalServerError)
+		return
+	}
+}
+
+// writePasswordChangeFailure 把改密用例的錯誤對映為對外回應（口徑見 handler 註解）。
+func (s *Server) writePasswordChangeFailure(w http.ResponseWriter, r *http.Request, err error) {
+	switch {
+	case errors.Is(err, auth.ErrInvalidCredentials):
+		// 現行口令不對／現值已被並發改掉：兩者對外的處置同一句——重新想一次口令。
+		// 刻意不發刪除指令：這一枚會話還好好的，把人踢下線才是多餘的傷害。
+		writeError(w, r, CodeInvalidCredentials, http.StatusUnauthorized)
+	case errors.Is(err, auth.ErrSamePassword):
+		writeErrorDetails(w, r, CodeInvalidBody, http.StatusBadRequest,
+			map[string]any{"reason": "same_as_current"})
+	case errors.Is(err, auth.ErrInvalidNewPassword):
+		writeError(w, r, CodeInvalidBody, http.StatusBadRequest)
+	default:
+		// ErrRootCredentialLocked（部署形態要有人去動環境）與存儲層故障都屬
+		// 「不是使用者能重試解決」的內部問題：統一 500，細節只進日誌。
+		s.logger.Error("改密處理失敗", "request_id", requestIDFromRequest(r), "err", err)
+		writeError(w, r, CodeUnknown, http.StatusInternalServerError)
 	}
 }
 
@@ -604,9 +772,10 @@ func (s *Server) writeLoginFailure(w http.ResponseWriter, r *http.Request, err e
 // loginResponseFor 產生登入成功回應本體（秘密不在這裡，見 loginResponse 註解）。
 func (s *Server) loginResponseFor(outcome auth.Outcome) loginResponse {
 	body := loginResponse{
-		SubjectKind: subjectKindOf(outcome.Principal),
-		DeviceID:    outcome.Session.DeviceID.String(),
-		ExpiresAt:   timeutil.FormatUTC(outcome.Session.ExpiresAt),
+		SubjectKind:        subjectKindOf(outcome.Principal),
+		DeviceID:           outcome.Session.DeviceID.String(),
+		ExpiresAt:          timeutil.FormatUTC(outcome.Session.ExpiresAt),
+		MustChangePassword: outcome.MustChangePassword,
 	}
 	if id := outcome.Principal.AccountID(); !id.IsNil() {
 		body.AccountID = id.String()

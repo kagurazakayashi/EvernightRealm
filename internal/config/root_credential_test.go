@@ -600,3 +600,237 @@ func TestWriteRootPasswordHashKeepsEveryOtherValue(t *testing.T) {
 		t.Errorf("除了 Root 憑據，其他組態值被改動了：before=%+v after=%+v", before, after)
 	}
 }
+
+func TestUpdateRootPasswordHashReplacesExistingValue(t *testing.T) {
+	path := writeConfig(t, ExampleYAML)
+	oldHash := fakeHash("b2xkcm9vdA")
+	newHash := fakeHash("bmV3cm9vdA")
+	if err := WriteRootPasswordHash(path, oldHash); err != nil {
+		t.Fatalf("前置初始化失敗: %v", err)
+	}
+
+	if err := UpdateRootPasswordHash(path, oldHash, newHash); err != nil {
+		t.Fatalf("覆寫失敗: %v", err)
+	}
+	state, err := ReadRootFile(path)
+	if err != nil || !state.Initialized() || state.Hash != newHash {
+		t.Fatalf("覆寫後的檔案狀態不正確: %+v err=%v", state, err)
+	}
+	after := readFileOrFail(t, path)
+	if strings.Contains(after, oldHash) {
+		t.Errorf("舊憑據仍留在檔案裡")
+	}
+	// 註解文字裡本來就提過 security.root_password_hash，所以數的是「帶值的鍵」而不是裸鍵名。
+	if got := strings.Count(after, "root_password_hash: \""); got != 1 {
+		t.Errorf("值鍵行出現 %d 次，期望 1 次：\n%s", got, after)
+	}
+	cfg, err := Load(Options{ConfigPath: path})
+	if err != nil {
+		t.Fatalf("覆寫後的檔案不可載入: %v", err)
+	}
+	if cfg.Security.RootPasswordHash != newHash {
+		t.Errorf("Load 讀到的不是新憑據")
+	}
+}
+
+func TestUpdateRootPasswordHashPreservesCommentsAndOtherValues(t *testing.T) {
+	// 覆寫同樣只準動那一個值：註解、鍵序、未知欄位與其餘全部欄位都要活下來。
+	content := `# 開檔說明行
+server:
+  listen: "127.0.0.1:5206"          # 監聽地址註解
+  data_dir: "."
+
+operations:
+  note: "this line must survive"
+
+security:
+  session_ttl_hours: 48             # 會話時數註解
+  root_password_hash: "PLACEHOLDER"
+  headers:
+    frame_options: "DENY"
+`
+	path := writeConfig(t, strings.Replace(content, "PLACEHOLDER", fakeHash("cHJlc2VydmUtbWU"), 1))
+	before, err := Load(Options{ConfigPath: path})
+	if err != nil {
+		t.Fatalf("覆寫前 Load 失敗: %v", err)
+	}
+	before.RootHashNotice = ""
+
+	newHash := fakeHash("bmV3LXByZXNlcnZl")
+	if err := UpdateRootPasswordHash(path, before.Security.RootPasswordHash, newHash); err != nil {
+		t.Fatalf("覆寫失敗: %v", err)
+	}
+	after := readFileOrFail(t, path)
+	for _, must := range []string{
+		"開檔說明行", "監聽地址註解", "this line must survive", "會話時數註解", "frame_options",
+		"session_ttl_hours", newHash,
+	} {
+		if !strings.Contains(after, must) {
+			t.Errorf("覆寫後的檔案少了 %q：\n%s", must, after)
+		}
+	}
+
+	reloaded, err := Load(Options{ConfigPath: path})
+	if err != nil {
+		t.Fatalf("覆寫後 Load 失敗: %v", err)
+	}
+	reloaded.Security.RootPasswordHash = before.Security.RootPasswordHash
+	reloaded.RootHashNotice = ""
+	if !reflect.DeepEqual(reloaded, before) {
+		t.Errorf("除了 Root 憑據，其他組態值被改動了：before=%+v after=%+v", before, reloaded)
+	}
+}
+
+func TestUpdateRootPasswordHashMismatchLeavesFileUntouched(t *testing.T) {
+	path := writeConfig(t, ExampleYAML)
+	current := fakeHash("Y3VycmVudA")
+	if err := WriteRootPasswordHash(path, current); err != nil {
+		t.Fatalf("前置初始化失敗: %v", err)
+	}
+	before := readFileOrFail(t, path)
+
+	err := UpdateRootPasswordHash(path, fakeHash("b3RoZXJvbmU"), fakeHash("bmV3b25l"))
+	if !errors.Is(err, ErrRootCredentialMismatch) {
+		t.Fatalf("現值不符應回 ErrRootCredentialMismatch，實際 %v", err)
+	}
+	if after := readFileOrFail(t, path); after != before {
+		t.Errorf("拒絕路徑改動了組態檔：\n%s\n---\n%s", before, after)
+	}
+	if strings.Contains(err.Error(), current) {
+		t.Errorf("拒絕錯誤回顯了憑據內容: %v", err)
+	}
+	dir := filepath.Dir(path)
+	if names := listDir(t, dir); len(names) != 1 || names[0] != "config.yaml" {
+		t.Errorf("拒絕路徑留下殘骸: %v", names)
+	}
+}
+
+func TestUpdateRootPasswordHashRefusesMissingPrerequisites(t *testing.T) {
+	// 這四種都不是「可覆寫的形態」：尚未初始化、檔案不存在、沒給預期現值、新值形狀不合格。
+	t.Run("尚未初始化", func(t *testing.T) {
+		path := writeConfig(t, ExampleYAML)
+		err := UpdateRootPasswordHash(path, fakeHash("YW55"), fakeHash("bmV3b25l"))
+		if !errors.Is(err, ErrRootCredentialMismatch) {
+			t.Fatalf("沒有現值時應回現值不符，實際 %v", err)
+		}
+		state, err := ReadRootFile(path)
+		if err != nil || state.Initialized() {
+			t.Errorf("拒絕路徑建立了憑據: %+v err=%v", state, err)
+		}
+	})
+	t.Run("檔案不存在", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "nested", "config.yaml")
+		err := UpdateRootPasswordHash(path, fakeHash("YW55"), fakeHash("bmV3b25l"))
+		if err == nil || !strings.Contains(err.Error(), "不存在") {
+			t.Fatalf("組態檔不存在時應明確回報，實際 %v", err)
+		}
+	})
+	t.Run("預期現值為空", func(t *testing.T) {
+		path := writeConfig(t, ExampleYAML)
+		err := UpdateRootPasswordHash(path, "   ", fakeHash("bmV3b25l"))
+		if err == nil || !strings.Contains(err.Error(), "預期") {
+			t.Fatalf("缺少預期現值應被拒絕，實際 %v", err)
+		}
+	})
+	for name, bad := range map[string]string{
+		"空字串":        "",
+		"非 Argon2id": "$argon2i$v=19$m=1024,t=1,p=1$c2FsdA$ZGln",
+		"一般文字":       "hunter2",
+	} {
+		t.Run("新值不合格："+name, func(t *testing.T) {
+			path := writeConfig(t, ExampleYAML)
+			current := fakeHash("Y3VycmVudA")
+			if err := WriteRootPasswordHash(path, current); err != nil {
+				t.Fatalf("前置初始化失敗: %v", err)
+			}
+			before := readFileOrFail(t, path)
+			if err := UpdateRootPasswordHash(path, current, bad); err == nil {
+				t.Fatal("形狀不合格的新值應被拒絕")
+			}
+			if after := readFileOrFail(t, path); after != before {
+				t.Errorf("拒絕路徑改動了組態檔")
+			}
+		})
+	}
+}
+
+func TestUpdateRootPasswordHashFailureAtRenameLeavesOriginal(t *testing.T) {
+	path := writeConfig(t, ExampleYAML)
+	current := fakeHash("Y3VycmVudA")
+	if err := WriteRootPasswordHash(path, current); err != nil {
+		t.Fatalf("前置初始化失敗: %v", err)
+	}
+	before := readFileOrFail(t, path)
+	installSeams(t, nil, func(string, string) error {
+		return errors.New("模擬：佔用中")
+	}, nil)
+
+	if err := UpdateRootPasswordHash(path, current, fakeHash("bmV3b25l")); err == nil ||
+		!strings.Contains(err.Error(), "替換") {
+		t.Fatalf("改名失敗應回報替換失敗，實際 %v", err)
+	}
+	if after := readFileOrFail(t, path); after != before {
+		t.Errorf("失敗路徑改動了原檔案")
+	}
+	dir := filepath.Dir(path)
+	if names := listDir(t, dir); len(names) != 1 || names[0] != "config.yaml" {
+		t.Errorf("失敗路徑留下臨時檔殘骸: %v", names)
+	}
+}
+
+func TestUpdateRootPasswordHashConcurrentCallsOnlyOneWins(t *testing.T) {
+	// 併發改密：所有競跑者都帶著同一個「預期現值」，只能有一個成功；
+	// 輸家一律收到現值不符，檔案裡是贏家那次的值。
+	path := writeConfig(t, ExampleYAML)
+	current := fakeHash("Y3VycmVudA")
+	if err := WriteRootPasswordHash(path, current); err != nil {
+		t.Fatalf("前置初始化失敗: %v", err)
+	}
+	const racers = 8
+
+	var wg sync.WaitGroup
+	errs := make([]error, racers)
+	hashes := make([]string, racers)
+	start := make(chan struct{})
+	for i := 0; i < racers; i++ {
+		hashes[i] = fakeHash(fmt.Sprintf("bmV3cmFjZXIwMA%d", i))
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			errs[i] = UpdateRootPasswordHash(path, current, hashes[i])
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	var succeeded []string
+	for i, err := range errs {
+		switch {
+		case err == nil:
+			succeeded = append(succeeded, hashes[i])
+		case errors.Is(err, ErrRootCredentialMismatch):
+		default:
+			t.Fatalf("第 %d 個競跑的錯誤不在預期內: %v", i, err)
+		}
+	}
+	if len(succeeded) != 1 {
+		t.Fatalf("成功次數=%d，期望 1（%v）", len(succeeded), succeeded)
+	}
+	state, err := ReadRootFile(path)
+	if err != nil || state.Hash != succeeded[0] {
+		t.Errorf("檔案裡的憑據不是贏家那次的值: %+v err=%v", state, err)
+	}
+}
+
+func TestUpdateRootPasswordHashRealFileSystemFailure(t *testing.T) {
+	// 不走注入點：目標目錄不存在時，覆寫必須以真實檔案系統錯誤失敗而不是降級。
+	missing := filepath.Join(t.TempDir(), "does-not-exist", "config.yaml")
+	if err := os.WriteFile(missing, nil, 0o600); err == nil {
+		t.Skip("此平臺允許在不存在的目錄建立檔案，改由注入點覆蓋失敗路徑")
+	}
+	installSeams(t, nil, nil, func(string) error { return nil })
+	if err := UpdateRootPasswordHash(missing, fakeHash("YW55b25l"), fakeHash("bmV3b25l")); err == nil {
+		t.Fatal("目錄不存在時應回報失敗")
+	}
+}

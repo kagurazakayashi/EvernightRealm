@@ -131,6 +131,45 @@ func (s *Store) RecordLogin(ctx context.Context, q database.Querier, id idgen.ID
 	return nil
 }
 
+// RotatePassword 以比較-and-set 更換帳戶憑據：只有 password_hash 仍逐字等於
+// expectedOldHash 時，才把它換成 newHash 並清除 must_change_password 旗標。
+//
+// 兩個設計點各自擋的是不一樣的東西：
+//   - CAS 條件（WHERE 帶著預期舊值）：並發的兩次改密只可能有一次生效。讀舊值與寫
+//     新值之間哪怕只隔一個請求，輸家也不會把贏家剛換好的雜湊蓋回去——回傳
+//     changed=false 就是「你手上那份舊憑據已經不是現值」，呼叫端據此重走認證，
+//     而不是先查後寫地假裝窗口不存在。
+//   - 同一條 UPDATE 清掉 must_change_password：「換口令」與「首次改密義務解除」
+//     是同一個事實的兩面，分兩條語句就會出現改完密還被鎖在改密頁的半套狀態。
+//
+// newHash 必須通過與入庫同一個形狀閘（validatePasswordHash）：倉儲不接受
+// 「看起來像但解不開」的憑據，正如建立時不收一樣。
+// 目標不存在與現值不符收斂為同一個 changed=false：呼叫端帶來的標識來自
+// 它自己剛讀到的帳戶，兩者對它意味著同一句話——「前提已失效，重來」。
+func (s *Store) RotatePassword(ctx context.Context, q database.Querier, id idgen.ID,
+	newHash, expectedOldHash string) (bool, error) {
+	if q == nil {
+		return false, errors.New("account: 需要可用的資料庫連線或交易")
+	}
+	if err := validatePasswordHash(newHash); err != nil {
+		return false, err
+	}
+	if id.IsNil() || expectedOldHash == "" {
+		return false, errors.New("account: 更換憑據必須帶目標標識與預期中的現有雜湊")
+	}
+	res, err := q.ExecContext(ctx,
+		"UPDATE accounts SET password_hash = ?, must_change_password = 0 WHERE id = ? AND password_hash = ?",
+		newHash, id.String(), expectedOldHash)
+	if err != nil {
+		return false, fmt.Errorf("account: 更換帳戶憑據失敗: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("account: 讀取更換結果失敗: %w", err)
+	}
+	return n > 0, nil
+}
+
 // selectAccountSQL 是欄位清單的唯一定義點（查詢用的欄序與 scanRow 的取值順序同源）。
 const selectAccountSQL = `SELECT id, login_name, login_name_key, display_name, password_hash,
 		account_type, status, must_change_password, created_at, last_login_at, disabled_at

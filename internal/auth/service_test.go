@@ -52,7 +52,7 @@ func newEnv(t *testing.T, rootConfigured bool) *env {
 // 存在的理由是裝置名額用例需要「同一現場、不同策略」：名額的判定就落在登入事務裡，
 // 換一套現場等於換一組前提，斷言就不再指向同一件事。
 func newEnvWithPolicy(t *testing.T, rootConfigured bool, policy session.Policy,
-	ttl time.Duration, guard *LoginGuard) *env {
+	ttl time.Duration, guard *LoginGuard, mutate ...func(*Deps)) *env {
 	t.Helper()
 	clock := timeutil.NewTest(testBase)
 	dir := t.TempDir()
@@ -85,15 +85,23 @@ func newEnvWithPolicy(t *testing.T, rootConfigured bool, policy session.Policy,
 			t.Fatalf("產生測試 Root 憑據失敗：%v", err)
 		}
 	}
-	service, err := New(Deps{
-		DB:               db,
-		Sessions:         sessions,
-		Accounts:         account.NewStore(clock),
-		Audits:           audit.NewStore(clock),
-		RootPasswordHash: rootHash,
-		Hashing:          credential.TestParams,
-		Guard:            guard,
-	})
+	service, err := New(func() Deps {
+		deps := Deps{
+			DB:               db,
+			Sessions:         sessions,
+			Accounts:         account.NewStore(clock),
+			Audits:           audit.NewStore(clock),
+			RootPasswordHash: rootHash,
+			Hashing:          credential.TestParams,
+			Guard:            guard,
+		}
+		// mutate 讓測試在同一現場換掉單一依賴（例如 Root 憑據的可寫來源），
+		// 其餘前提與預設裝配逐字一致——換整套現場的斷言就不再指向同一件事。
+		for _, m := range mutate {
+			m(&deps)
+		}
+		return deps
+	}())
 	if err != nil {
 		t.Fatalf("建立登入用例失敗：%v", err)
 	}

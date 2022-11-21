@@ -77,6 +77,10 @@ type Outcome struct {
 	Session session.Session
 	// Secret 是會話秘密的一次性明文（只准進 Set-Cookie）。
 	Secret string
+	// MustChangePassword 是帳戶「下次登入必須改密」旗標的現讀值：登入照放行
+	// （既有批準口徑），但傳輸層要把它帶進回應，客戶端據此把人導向改密流程。
+	// Root 憑據不在 accounts 表，恆為 false。
+	MustChangePassword bool
 }
 
 // Deps 是登入用例的外部依賴，全部由組裝層（internal/app）注入。
@@ -90,7 +94,13 @@ type Deps struct {
 	// Audits 是 Root 登入事件的審計倉儲。
 	Audits *audit.Store
 	// RootPasswordHash 是組態中的 Root Argon2id 憑據；空字串代表尚未初始化。
+	// 未注入 RootCreds 時用它合成唯讀的靜態來源（見 root_store.go）——
+	// 那條路上 Root 改密一律被拒，登入與既有測試的行為則與從前逐字相同。
 	RootPasswordHash string
+	// RootCreds 是 Root 憑據的受信來源（裝配層注入接上配置檔寫入通路的實作）。
+	// nil 時退回 RootPasswordHash 的唯讀快照；改密用例在 Replaceable() 為 false
+	// 的來源上整個被拒，不動資料庫也不動檔案。
+	RootCreds RootCredentialStore
 	// Hashing 是佔位派生使用的當前參數檔（令「查無此人」與「口令不符」外部耗時同階）。
 	Hashing credential.Params
 	// Guard 是登入失敗控制與限流（見 guard.go）；nil 表示不啟用——
@@ -106,7 +116,7 @@ type Service struct {
 	sessions *session.Store
 	accounts *account.Store
 	audits   *audit.Store
-	rootHash string
+	root     RootCredentialStore
 	hashing  credential.Params
 	guard    *LoginGuard
 	log      *slog.Logger
@@ -131,12 +141,18 @@ func New(deps Deps) (*Service, error) {
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
+	root := deps.RootCreds
+	if root == nil {
+		// 沒接配置寫入通路的裝配（含既有測試）：退回唯讀快照，Root 改密在這種
+		// 來源上會被 Replaceable() 擋下——讀得到、換不掉，是一句誠實的話。
+		root = staticRootStore{hash: deps.RootPasswordHash}
+	}
 	return &Service{
 		db:       deps.DB,
 		sessions: deps.Sessions,
 		accounts: deps.Accounts,
 		audits:   deps.Audits,
-		rootHash: deps.RootPasswordHash,
+		root:     root,
 		hashing:  params,
 		guard:    deps.Guard,
 		log:      logger,
@@ -328,6 +344,9 @@ func (s *Service) attemptAccount(ctx context.Context, loginName, password, reque
 		return Outcome{}, false, err
 	}
 	s.log.Info("帳戶登入成功", "account", a.ID.String(), "request_id", requestID)
+	// 旗標取的是這次登入現讀到的帳戶事實：登入照放行（既有批準口徑），
+	// 但限制在哪一邊由傳輸層把這個值帶進回應、並在受限端點上逐請求現讀。
+	outcome.MustChangePassword = a.MustChangePassword
 	return outcome, false, nil
 }
 
@@ -372,7 +391,10 @@ func (s *Service) LoginRoot(ctx context.Context, password, requestID, ip string)
 
 // attemptRoot 是 LoginRoot 的校驗本體；rejected/err 分工與 attemptAccount 相同。
 func (s *Service) attemptRoot(ctx context.Context, password, requestID string) (Outcome, bool, error) {
-	if s.rootHash == "" {
+	// 現值只讀一次：比對、編碼診斷與「未設定」判定必須面對同一個瞬間的值，
+	// 改密進行中時才不會一半按舊雜湊、一半按新雜湊說話。
+	rootHash := s.root.CurrentHash()
+	if rootHash == "" {
 		s.equalize(password)
 		s.appendRootFailureAudit(ctx, requestID, "組態未設定 Root 憑據")
 		s.log.Warn("Root 登入被拒：組態未設定 Root 憑據", "request_id", requestID)
@@ -383,12 +405,12 @@ func (s *Service) attemptRoot(ctx context.Context, password, requestID string) (
 		s.log.Warn("Root 登入被拒：口令形狀不合格", "request_id", requestID)
 		return Outcome{}, true, nil
 	}
-	proof, err := identity.VerifyRootCredential(s.rootHash, password)
+	proof, err := identity.VerifyRootCredential(rootHash, password)
 	if err != nil {
 		// identity 刻意把「口令不符」與「編碼損壞」收斂成同一個錯誤，這裡也不猜：
 		// 用 credential.CheckEncoding 問一次「庫裡那串本身可用嗎」，只為決定日誌口徑，
 		// 對外的結論與審計的 reason 都不因它而變。
-		if checkErr := credential.CheckEncoding(s.rootHash); checkErr != nil {
+		if checkErr := credential.CheckEncoding(rootHash); checkErr != nil {
 			s.log.Error("Root 憑據編碼不可校驗（組態缺陷）", "err", checkErr, "request_id", requestID)
 		} else {
 			s.log.Warn("Root 登入被拒：憑據不符", "request_id", requestID)

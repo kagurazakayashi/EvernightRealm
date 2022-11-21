@@ -421,3 +421,63 @@ func TestTxScopedCreate(t *testing.T) {
 		t.Errorf("提交交易內的帳戶應可讀回：%v", err)
 	}
 }
+
+// TestRotatePasswordCAS 釘住換密三件事：CAS 只認預期舊值、同一條語句清掉旗標、
+// 以及不合格輸入在觸碰資料庫之前就被擋下。
+func TestRotatePasswordCAS(t *testing.T) {
+	store, db, _ := newTestStore(t)
+	ctx := context.Background()
+	a, err := store.Create(ctx, db.SQL(), standardInput("rotate_ok"))
+	if err != nil {
+		t.Fatalf("建立測試帳戶失敗：%v", err)
+	}
+	const newHash = "$argon2id$v=19$m=65536,t=3,p=4$c2FsdA$dGhpc2lzbm90YXJlYWxoYXNo"
+
+	// 現值對不上：不換、不報錯成「已換」，changed=false 就是「前提已失效」。
+	if changed, err := store.RotatePassword(ctx, db.SQL(), a.ID, newHash, "不是現值"); err != nil || changed {
+		t.Errorf("預期舊值不符應回 changed=false 且無錯誤：%v %v", changed, err)
+	}
+	// 成功一次：雜湊與旗標同行落定。
+	if changed, err := store.RotatePassword(ctx, db.SQL(), a.ID, newHash, testHash); err != nil || !changed {
+		t.Fatalf("CAS 命中時應回 changed=true：%v %v", changed, err)
+	}
+	got, err := store.ByID(ctx, db.SQL(), a.ID)
+	if err != nil {
+		t.Fatalf("讀回失敗：%v", err)
+	}
+	if got.PasswordHash != newHash || got.MustChangePassword {
+		t.Errorf("換密後的欄位不正確：%+v", got)
+	}
+	// 用同一個「預期舊值」再打一次：現值已經不是它了，第二次不該有任何效果。
+	if changed, err := store.RotatePassword(ctx, db.SQL(), a.ID, testHash, testHash); err != nil || changed {
+		t.Errorf("重複 CAS 應失敗：%v %v", changed, err)
+	}
+	// 查無此人也收斂為 changed=false（呼叫端帶來的標識來自它剛讀到的帳戶）。
+	ghostID, err := idgen.New()
+	if err != nil {
+		t.Fatalf("產生測試標識失敗：%v", err)
+	}
+	if changed, err := store.RotatePassword(ctx, db.SQL(), ghostID, newHash, testHash); err != nil || changed {
+		t.Errorf("幽靈帳戶應回 changed=false：%v %v", changed, err)
+	}
+	// 不合格輸入在 Exec 之前擋下：新雜湊形狀、空預期值、零值標識。
+	for name, call := range map[string]func() (bool, error){
+		"新雜湊不是 Argon2id": func() (bool, error) {
+			return store.RotatePassword(ctx, db.SQL(), a.ID, "hunter2", newHash)
+		},
+		"預期舊值為空": func() (bool, error) {
+			return store.RotatePassword(ctx, db.SQL(), a.ID, newHash, "")
+		},
+		"零值標識": func() (bool, error) {
+			return store.RotatePassword(ctx, db.SQL(), idgen.ID{}, newHash, newHash)
+		},
+	} {
+		if changed, err := call(); err == nil || changed {
+			t.Errorf("%s：應回報錯誤且未寫入（changed=%v err=%v）", name, changed, err)
+		}
+	}
+	// 上述拒絕路徑都不該動到現值。
+	if got, err := store.ByID(ctx, db.SQL(), a.ID); err != nil || got.PasswordHash != newHash {
+		t.Errorf("拒絕路徑動到了憑據：%+v err=%v", got, err)
+	}
+}

@@ -57,6 +57,17 @@ type fakeAuth struct {
 	// lastRevokeDevice 記錄撤銷收到的目標裝置標識：斷言「端點把請求裡的 device_id
 	// 原樣交下去，且主體是本請求解析出來的受信主體」。
 	lastRevokeDevice idgen.ID
+	// changeFn 覆寫「本人改密」用例的回傳形態；未設定時一律回 changeErr。
+	changeFn func(principal identity.Principal, currentPassword, newPassword string) (auth.PasswordChangeResult, error)
+	// changeErr 是未設定 changeFn 時改密用例的回傳錯誤。
+	changeErr error
+	// lastChange 記錄改密收到的兩個口令欄：斷言「端點把請求本體原樣交下去」，
+	// 以及測試自己知道哪些字串是本次專屬的假口令。
+	lastChange struct{ current, newPassword string }
+	// mustChangeFn 覆寫「必須改密旗標」的回傳形態；未設定時回 mustChange。
+	mustChangeFn func(principal identity.Principal) (bool, error)
+	// mustChange 是未設定 mustChangeFn 時旗標的回傳值。
+	mustChange bool
 }
 
 func (f *fakeAuth) LoginAccount(ctx context.Context, loginName, password, requestID, ip string) (auth.Outcome, error) {
@@ -111,6 +122,23 @@ func (f *fakeAuth) RevokeDevice(ctx context.Context, principal identity.Principa
 		return f.revokeFn(principal, deviceID)
 	}
 	return auth.DeviceRevokeResult{}, f.revokeErr
+}
+
+func (f *fakeAuth) ChangePassword(ctx context.Context, principal identity.Principal,
+	currentPassword, newPassword, requestID string) (auth.PasswordChangeResult, error) {
+	f.lastChange.current = currentPassword
+	f.lastChange.newPassword = newPassword
+	if f.changeFn != nil {
+		return f.changeFn(principal, currentPassword, newPassword)
+	}
+	return auth.PasswordChangeResult{}, f.changeErr
+}
+
+func (f *fakeAuth) MustChangePassword(ctx context.Context, principal identity.Principal) (bool, error) {
+	if f.mustChangeFn != nil {
+		return f.mustChangeFn(principal)
+	}
+	return f.mustChange, nil
 }
 
 // testOutcome 構造一個帳戶主體的登入結果（秘密固定，便於斷言它只進 Cookie）。
