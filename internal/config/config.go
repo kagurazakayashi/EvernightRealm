@@ -783,7 +783,9 @@ func (c *Config) Validate() error {
 		}
 		if err := credential.CheckEncoding(c.Security.RootPasswordHash); err != nil {
 			c.RootHashNotice = " Root 憑據形狀不合格（" + err.Error() + "）：這個 Root 口令無法通過校驗，" +
-				"請用 evernight-server init-root 建立可用憑據（它在寫入前會先確認形狀）"
+				"請先確認是不是打字錯誤；要換一個可用憑據，口令還記得就走服務內的已認證改密，" +
+				"已遺失則在服務停止時用 evernight-server recover-root --password-stdin --confirm 覆寫" +
+				"（init-root 不會覆蓋既有憑據，它在這種狀態下本來就拒絕）"
 		}
 	}
 	// 雜湊參數檔在啟動即整體校驗：把「打錯一個參數導致憑據檔半生不熟」
@@ -1281,6 +1283,8 @@ const ExampleYAML = `# EvernightRealm 服務端組態（首次啟動自動建立
 #   evernight-server init-root --password-stdin --data-dir <這個目錄>
 # 它只從標準輸入讀口令（前兩行是口令與確認），存進檔案的是 Argon2id 編碼而不是明文，
 # 而且這個欄位一旦有值就不再開放第二次初始化。
+# 口令真的遺失時，才用另一條本機命令覆寫那個欄位（同樣只讀標準輸入，且要求服務已停止）：
+#   evernight-server recover-root --password-stdin --confirm --data-dir <這個目錄>
 # 想知道現在有沒有 Root，用不寫任何東西的只讀命令：evernight-server root-status
 # 修改後重啟服務端生效。
 

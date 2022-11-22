@@ -37,6 +37,7 @@ const Version = "0.1.0-dev"
 // 第一個參數為 `migrate` 時改執行遷移子命令（見 Migrate），為 `backup` 時改執行備份子命令
 // （見 Backup），為 `restore` 時改執行恢復子命令（見 Restore），
 // 為 `init-root` 時改執行 Root 一次性初始化（見 InitRoot），
+// 為 `recover-root` 時改執行 Root 憑據的本機恢復（見 RecoverRoot），
 // 為 `root-status` 時只讀地回報 Root 是否已初始化（見 RootStatus）；
 // 它們都不啟動 HTTP 服務，也不佔用連接埠。
 //
@@ -56,6 +57,8 @@ func Run(args []string) error {
 			return Restore(ctx, args[1:], os.Stdout)
 		case "init-root":
 			return InitRoot(ctx, args[1:], os.Stdin, os.Stdout)
+		case "recover-root":
+			return RecoverRoot(ctx, args[1:], os.Stdin, os.Stdout)
 		case "root-status":
 			return RootStatus(ctx, args[1:], os.Stdout)
 		}
@@ -215,10 +218,12 @@ func diskNote(cfg config.Config) string {
 		cfg.Server.DataDir, strings.Join(effective, " 或 "))
 }
 
-// checkSpaceBeforeWrite 在啟動期寫入（遷移）之前問一次磁碟。
+// checkSpaceBeforeWrite 在任何會落盤的寫入開始之前問一次磁碟（啟動期的遷移、
+// 一次性命令的憑據覆寫都走這一道）。
 //
-// 空間不足時回錯誤讓啟動中止：遷移會改結構並寫 WAL，是典型的「不完整就更糟」的寫入，
-// 而在還沒開放監聽器之前停下，用戶端就不會拿到一個「已確認但未持久化」的結果。
+// 空間不足時回錯誤讓流程中止：遷移會改結構並寫 WAL，憑據恢復則要寫一筆「撤銷＋審計」
+// 的資料庫交易，兩者都是典型的「不完整就更糟」的寫入，而在還沒動任何東西之前停下，
+// 用戶端就不會拿到一個「已確認但未持久化」的結果。
 func checkSpaceBeforeWrite(space *disk.Monitor, lg *slog.Logger) error {
 	verdict, err := space.Verify()
 	if err != nil {
@@ -231,7 +236,7 @@ func checkSpaceBeforeWrite(space *disk.Monitor, lg *slog.Logger) error {
 			"free", verdict.Usage.Free, "total", verdict.Usage.Total)
 	}
 	if verdict.Status == disk.StatusLow {
-		lg.Error("磁碟空間不足，拒絕開始遷移", "reason", verdict.Reason)
+		lg.Error("磁碟空間不足，拒絕開始本次寫入", "reason", verdict.Reason)
 		return fmt.Errorf("%w：%s", disk.ErrNoSpace, verdict.Reason)
 	}
 	return nil

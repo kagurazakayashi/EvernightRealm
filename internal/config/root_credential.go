@@ -416,8 +416,9 @@ func applyRootHash(secVal *yaml.Node, encodedHash string) error {
 		Tag:   "!!str",
 		Value: rootPasswordHashKey,
 		// 標頭註解會變成該鍵上方的一行：讓日後打開檔案的人知道這欄不是手工填的，
-		// 也不是明文口令。
-		HeadComment: "由 evernight-server init-root 寫入：Argon2id 編碼雜湊，不是明文口令。",
+		// 也不是明文口令。這句話同時涵蓋兩條寫入通路，因為 recover-root 覆寫之後，
+		// 這一欄的值已經不是 init-root 留下的那一份，而註解是跟著鍵留在那裡的。
+		HeadComment: "本機 Root 命令寫入：Argon2id 編碼雜湊，不是明文口令（首次由 init-root 建立，口令遺失時由 recover-root 覆寫）。",
 	}
 	secVal.Content = insertNodes(secVal.Content, at, key, plainHashNode(encodedHash))
 	return nil

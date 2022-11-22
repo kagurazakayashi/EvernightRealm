@@ -451,6 +451,25 @@ func (s *Store) RevokeSubject(ctx context.Context, q database.Querier, subject S
 	return int(n), nil
 }
 
+// RevokeAllRootSessions 撤銷 Root 主體名下全部未撤銷的會話，回傳撤銷數量。
+//
+// 這是 RevokeSubject 的本機維護變體，存在的理由只有一件事：口令遺失後的憑據恢復
+// 拿不出舊口令，因此也換不到 RootProof，而那恰恰是 SubjectOf 構造 Root 主體的必要條件。
+// 換句話說，「恢復 Root 口令」這個用例在型別層就無法湊出自己需要撤銷的那批會話的
+// 主體憑證——這不是缺口，而是它不需要的憑證：撤銷的授權依據是「持有資料庫單寫入實例鎖
+// 的本機命令」，不是「已經以 Root 身分登進來」。
+//
+// 因此這裡刻意不收 Subject 也不收 Principal：主體由本套件內部凍結為 Root，呼叫端
+// 沒有任何可以填錯或自報的東西（全服務只有一個 Root 主體，見遷移 0004 的 subject_kind
+// 檢查）。除了撤銷自己一個函式都不做，不簽發憑據、不發會話、不回覆「我是 Root」。
+//
+// 已到期但尚未清理的 Root 會話照樣寫下 revoked_at（與 RevokeSubject 同口徑）：
+// 恢復之後的審計要能說出「這次讓 N 臺裝置重新登入」，而統一收斂到「已撤銷」這個
+// 最終態才算得出來。第二次呼叫回傳 0 而不是錯誤——沒有未撤銷的行就沒有要撤銷的東西。
+func (s *Store) RevokeAllRootSessions(ctx context.Context, q database.Querier) (int, error) {
+	return s.RevokeSubject(ctx, q, Subject{kind: SubjectRoot})
+}
+
 // ResolvePrincipal 驗證會話秘密，並把通過的結果換回一個受信主體。
 //
 // 這是「會話 → 身份」的唯一生產通路，存在的理由是傳輸層需要把一枚 Cookie／Bearer

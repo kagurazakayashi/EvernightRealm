@@ -513,6 +513,52 @@ func TestRevokeSubjectScopesCorrectly(t *testing.T) {
 	}
 }
 
+// TestRevokeAllRootSessionsIsMaintenanceOnly 釘住本機維護用的撤銷入口（口令遺失後
+// 拿不出 RootProof，因此換不到 Subject）：它只動 Root 名下未撤銷的行，
+// 且與 RevokeSubject 共用同一套最終態語意（已到期但尚未清理的行照樣寫 revoked_at）。
+func TestRevokeAllRootSessionsIsMaintenanceOnly(t *testing.T) {
+	db, clock, store := newTestEnv(t, time.Hour)
+	ctx := context.Background()
+	root := identitytest.Root(t, identity.OriginHTTPRequest)
+	_, rootSecret1 := mustCreate(t, store, db, root)
+	_, rootSecret2 := mustCreate(t, store, db, root)
+	_, aliceP := createAccountDirect(t, db, clock, "alice")
+	_, aliceSecret := mustCreate(t, store, db, aliceP)
+
+	n, err := store.RevokeAllRootSessions(ctx, db.SQL())
+	if err != nil {
+		t.Fatalf("撤銷 Root 全部會話失敗：%v", err)
+	}
+	if n != 2 {
+		t.Errorf("應撤銷 2 枚 Root 會話，實際 %d", n)
+	}
+	for _, s := range []string{rootSecret1, rootSecret2} {
+		if _, err := store.Verify(ctx, db.SQL(), s); !errors.Is(err, ErrRevoked) {
+			t.Errorf("Root 會話應已被撤銷（秘密一律打碼不入輸出），實際 %v", err)
+		}
+	}
+	// 普通帳戶的會話一枚都不該被這個命令動到——恢復 Root 口令不是登出所有人。
+	if _, err := store.Verify(ctx, db.SQL(), aliceSecret); err != nil {
+		t.Errorf("alice 會話不應被波及：%v", err)
+	}
+
+	// 重複執行回 0 而不是錯誤：沒有未撤銷的行就沒有要撤銷的東西。
+	if n, err := store.RevokeAllRootSessions(ctx, db.SQL()); err != nil || n != 0 {
+		t.Errorf("第二次應為 0 筆且無錯誤，實際 %d（%v）", n, err)
+	}
+
+	// 已到期但尚未清理的行照樣寫下 revoked_at：審計要能說出「這次讓 N 臺裝置登出」，
+	// 而那句話的依據是同一個最終態，不是「到期」與「撤銷」兩套事實各記一處。
+	_, lateSecret := mustCreate(t, store, db, root)
+	clock.Advance(2 * time.Hour)
+	if n, err := store.RevokeAllRootSessions(ctx, db.SQL()); err != nil || n != 1 {
+		t.Fatalf("到期未清理的 Root 會話應仍可撤銷 1 筆，實際 %d（%v）", n, err)
+	}
+	if _, err := store.Verify(ctx, db.SQL(), lateSecret); !errors.Is(err, ErrRevoked) {
+		t.Errorf("到期又被撤銷的行應以撤銷為準，實際 %v", err)
+	}
+}
+
 // TestCreateDoesNotWriteLoginFacts 钉住分工：会话仓储不写 accounts.last_login_at，
 // 「何时登录成功」属登录用例在同一交易里写的事实。
 func TestCreateDoesNotWriteLoginFacts(t *testing.T) {

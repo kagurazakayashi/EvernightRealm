@@ -44,8 +44,10 @@ var ErrRootSecretMismatch = errors.New("app: 兩次輸入的 Root 口令不一�
 // ErrServerStillLocked 表示資料庫的單寫入實例鎖已被佔用（服務正在運行）。
 //
 // 它存在的目的不是文案好讀，而是讓呼叫端能把「先把服務停下來」這句話只講一次：
-// database 那邊的訊息已經點出鎖檔與持有者，這一層只補一句操作者用得上的結論。
-var ErrServerStillLocked = errors.New("app: 資料目錄已被執行中的服務鎖定，Root 初始化要在服務停止時進行")
+// database 那邊的訊息已經點出鎖檔與持有者，這一層因此只補一句操作者用得上的結論。
+// Root 的兩條本機寫入通路（init-root 與 recover-root）共用它：兩者在服務運行中
+// 都會做出「終端報成功了，但還在跑的進程不認得」那種比拒絕更難查的狀態。
+var ErrServerStillLocked = errors.New("app: 資料目錄已被執行中的服務鎖定，Root 憑據的本機命令要在服務停止時進行")
 
 // InitRoot 執行 `evernight-server init-root --password-stdin`：
 // 把標準輸入前兩行當作口令與其確認，通過全部前置檢查後才一次性寫進組態檔。
@@ -197,6 +199,8 @@ func RootStatus(ctx context.Context, args []string, out io.Writer) error {
 		fmt.Fprintln(out, "Root 狀態：已初始化（組態檔帶有 Argon2id 憑據；雜湊值不在這裡顯示）")
 		fmt.Fprintln(out, "提示：要換 Root 口令請走服務內的已認證改密流程（Root 登入後 POST /auth/password/change），"+
 			"再跑一次 init-root 一律會被拒絕——那是設計，不是故障。")
+		fmt.Fprintln(out, "口令已遺失時：停掉服務後在本機執行 evernight-server recover-root "+
+			"--password-stdin --confirm（它覆寫那份憑據並讓 Root 全部裝置登出，不問舊口令）。")
 	default:
 		fmt.Fprintln(out, "Root 狀態：尚未初始化（組態檔已存在，但還沒有 Root 憑據）")
 		fmt.Fprintln(out, "下一步：在本機執行 evernight-server init-root --password-stdin")
@@ -359,7 +363,8 @@ func rootInitReport(cfg config.Config, res rootinit.Result) string {
 	lines.WriteString("  本次未做：沒有啟動監聽、沒有動資料庫內容（只取單寫入實例鎖並追加 1 筆 Root 審計）、" +
 		"也沒有新增任何 HTTP 端點。\n")
 	lines.WriteString("  之後：再跑一次 init-root 會被拒絕，這是「一次性」的定義；" +
-		"要換 Root 口令請走服務內的已認證改密流程（Root 登入後 POST /auth/password/change）。\n")
+		"要換 Root 口令請走服務內的已認證改密流程（Root 登入後 POST /auth/password/change），" +
+		"口令遺失時才用本機的 recover-root。\n")
 	fmt.Fprintf(&lines, "下一步：evernight-server --data-dir \"%s\" 啟動服務。\n", cfg.Server.DataDir)
 	lines.WriteString("敏感性提示：組態檔現在是敏感檔（裡面的編碼雜湊可以被離線嘗試），" +
 		"備分包會原樣收錄它——存放位置與日後刪除都要當回事。\n")
@@ -375,13 +380,15 @@ func rootInitRefusalNote(initErr error) string {
 	if errors.Is(initErr, rootinit.ErrUnusableExistingCredential) {
 		return "Root 初始化：拒絕（組態檔已經有一份「不可用」的 Root 憑據）\n" +
 			"  那一串不是可用的 Argon2id 編碼，也就是現在的 Root 登不進去。\n" +
-			"  本命令刻意不把它換掉：先確認那是打字錯誤、被動過，還是真的要放棄這個口令，\n" +
-			"  再自行處置組態檔裡那個欄位——處理完重跑本命令即可。\n"
+			"  本命令刻意不把它換掉：先確認那是打字錯誤、被動過，還是真的要放棄這個口令。\n" +
+			"  要放棄並換一個新口令：停掉服務後跑 evernight-server recover-root --password-stdin --confirm；\n" +
+			"  若你想保留原本那個口令，就自己把那個欄位改回可用的值，處理完重跑本命令即可。\n"
 	}
 	if errors.Is(initErr, config.ErrRootAlreadyInitialized) {
 		return "Root 初始化：拒絕（這個資料目錄已經有 Root 憑據）\n" +
 			"  既有憑據與其口令都不受影響，組態檔維持原樣。\n" +
-			"  要換口令請走服務內的已認證改密流程（Root 登入後 POST /auth/password/change）；把既有憑據蓋掉不是一條支援的路。\n"
+			"  要換口令請走服務內的已認證改密流程（Root 登入後 POST /auth/password/change）；\n" +
+			"  只有口令已遺失時才用本機的 evernight-server recover-root --password-stdin --confirm 覆寫。\n"
 	}
 	return fmt.Sprintf("Root 初始化：未成功（%v）\n  組態檔維持原樣。\n", initErr)
 }
