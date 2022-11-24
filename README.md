@@ -36,6 +36,31 @@ It also reads the new password from stdin (two lines, password and confirmation)
 
 A first-run screen has to state honestly whether the server is not initialized yet, so the server also answers a read-only `GET /root/init-status`: three booleans only — whether the config file exists, whether a Root credential is present, and whether the environment override is set. It returns no path, no length, no fragment of any credential, and it writes neither to the database nor to the audit log. It says whether, never how to change: initializing Root is still reachable only through `init-root` run on the server host itself (overwriting a lost credential is the `recover-root` command above, and neither one is reachable over the network).
 
+## Signing in and managing your own account
+
+The identity stage is implemented and usable today: signing in, reading the current session, signing out, managing your own devices, changing your own password, and Root creating server administrators (next section). Two limits are stated just as plainly. First, Root remains the only subject that can create anyone: the Root credential itself comes from `init-root` on the server host, server administrators come from `POST /root/admins`, and administrator-created ordinary accounts, self-registration, invitation codes and guest accounts are not implemented — so no account that is neither Root nor an administrator has any way to exist yet, and no sign-up entry is offered or pretended. Second, the server terminates no TLS itself — the default listen address is plain HTTP on `127.0.0.1:5206`, and the session cookie is marked `Secure` (with HSTS sent) only when a request actually arrives over TLS, that is, when you put your own TLS-terminating reverse proxy in front of it. There is no bundled certificate handling, and HTTPS is a deployment choice outside this program.
+
+The identity endpoints carry no version prefix — there is no `/api/v1`:
+
+- `POST /auth/root/login` (Root password only) and `POST /auth/login` (login name and password). Every success issues a brand-new session and replaces any previous cookie, so an old cookie is never carried on.
+- `GET /auth/session`, `POST /auth/logout` and `POST /auth/session/rotate` — read the current session, revoke exactly this session (idempotent), or rotate this session's secret.
+- `GET /auth/devices` and `POST /auth/devices/revoke` — list and revoke the sessions of the signed-in subject only; no request can name another account's device.
+- `POST /auth/password/change` — the current password must be handed over in the request itself; on success every session of that subject, this device included, is revoked.
+
+On the browser path the session secret lives in an `HttpOnly` cookie; native clients carry it as a bearer secret read from the response header. Sign-in is throttled per source address and target after repeated failures (HTTP 429 with `Retry-After`), and the Root entry is covered too; a throttled attempt does not reveal which account was hit. With `device_policy` set to `single` or `limited`, older sessions are dropped or a new sign-in is refused once the cap is reached. Accounts flagged "must change password at first sign-in" are served only the session read, sign-out and the change-password flow; every other protected endpoint answers 2010 until the change is done.
+
+Two operational boundaries are unchanged: backup and restore stay `evernight-server` subcommands with no HTTP entry point, and audit records are written by the service layer only — there is still no audit query endpoint or web console. The run log is rotated by calendar day and is not deleted automatically by default (`retention_days=0`): keeping the log from growing without bound is the operator's job, and nothing in the server caps the total volume over time.
+
+## Root creates server administrators
+
+A Root session is how the first human operators get in: `POST /root/admins` with `login_name`, `display_name` and `password`, plus `GET /root/admins` — a minimal list for confirming what was just created, with no search and no paging. What makes the new account an administrator is the endpoint, not the body: there is no `role`, `account_type` or `subject_kind` field to fill, and an unexpected field is refused with 1004. The authorization input is the session that resolved to Root, so an ordinary account and an administrator's own session both get 2011 (403) — an administrator cannot create a peer or promote themselves, and signing in again changes nothing about that.
+
+The initial password is handed over by Root and is single-use. It is hashed by the same Argon2id service that every other credential uses, the account is stored with `must_change_password` set, the server never echoes the password back in any response, and there is no default password anywhere. That person's first sign-in therefore gets a session that is allowed only the session read, sign-out and the change-password flow — every other protected endpoint answers 2010 until the change is done — and completing the change signs every device of that account out. These are the rules that already existed for any account; this step is where the flag now comes from.
+
+Login name uniqueness is the same normalized key the login path uses (NFKC plus full case folding), enforced by the unique index on the account table: a name that is already taken answers 2012 and creates nothing, so a double submit or a retry after a lost response cannot produce a second account, and that refusal echoes neither the existing account's data nor any credential. Creating the account, granting `server_admin` and appending the `admin.create` record to the Root audit happen inside one transaction — a failure anywhere leaves no half-created administrator and no unrecorded privilege change — and the audit entry carries the identity fields, never the password or its hash.
+
+Two response fields were added, both following the append-only evolution rule: the sign-in and current-session responses now include `roles`, the grants the server read for that principal (absent when there are none), and clients use it to decide which entries to load. It authorizes nothing on its own — every endpoint re-checks the trusted principal on every request.
+
 ## How it will work (once released)
 
 - One person hosts the server on their machine (Windows or Linux)
@@ -53,6 +78,8 @@ The Windows executable carries an icon that is generated, not committed: `cmd/ev
     python tools/icons/generate_icons.py
 
 before building, otherwise the executable is produced without an icon and `go build` reports nothing. `python tools/icons/generate_icons.py --check` reports the current state without writing anything; see `tools/icons/README.md`.
+
+There is no hosted CI for this project: run the local quality entry point `go run ./tools/check` (formatting, `go vet` and tests for the backend, plus the frontend gates) before you commit.
 
 ## License
 

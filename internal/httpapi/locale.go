@@ -138,6 +138,18 @@ var errorMessages = map[ErrorCode]map[string]string{
 		LocaleEnUS: "This account has not completed the password change required at first sign-in. Please change your password or sign out before using other features.",
 		LocaleJaJP: "このアカウントは初回サインイン時に必要なパスワード変更が未完了です。他の機能を使う前に、パスワードを変更するかサインアウトしてください。",
 	},
+	CodePermissionDenied: {
+		LocaleZhCN: "该账号没有执行这项操作的权限。重新登录不会改变这一点，请勿以此为由反复尝试。",
+		LocaleZhTW: "此帳號沒有執行這項操作的權限。重新登入不會改變這一點，請勿因此反覆嘗試。",
+		LocaleEnUS: "This account does not have permission for this operation. Signing in again will not change that, so retrying won't help.",
+		LocaleJaJP: "このアカウントにはこの操作を実行する権限がありません。サインインし直しても変わらないため、繰り返しても解決しません。",
+	},
+	CodeLoginNameTaken: {
+		LocaleZhCN: "该登录名已被占用（比对会吸收大小写与全角／半角等差异写法）。请换一个名字后重新提交。",
+		LocaleZhTW: "此登入名已被佔用（比對會吸收大小寫與全形／半形等差異寫法）。請換一個名字後重新提交。",
+		LocaleEnUS: "This login name is already taken (matching absorbs case and width variants such as full-width letters). Choose another name and submit again.",
+		LocaleJaJP: "このログイン名はすでに使用されています（比較では大小文字や全角・半角などの表記の差異が吸収されます）。別の名前を選んで再度送信してください。",
+	},
 }
 
 // messageFor 取得錯誤碼在指定語言的使用者訊息；語言未支援或訊息為空時回退 defaultLocale。

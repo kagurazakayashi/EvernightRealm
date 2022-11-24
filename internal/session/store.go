@@ -10,6 +10,7 @@ import (
 
 	"github.com/kagurazakayashi/EvernightRealm/internal/account"
 	"github.com/kagurazakayashi/EvernightRealm/internal/database"
+	"github.com/kagurazakayashi/EvernightRealm/internal/grant"
 	"github.com/kagurazakayashi/EvernightRealm/internal/identity"
 	"github.com/kagurazakayashi/EvernightRealm/internal/idgen"
 	"github.com/kagurazakayashi/EvernightRealm/internal/timeutil"
@@ -74,6 +75,10 @@ type Store struct {
 	newID      func() (idgen.ID, error)
 	randReader io.Reader
 	accounts   *account.Store
+	// grants 是伺服器級角色的授予來源（見 internal/grant 與遷移 0006）。
+	// 與 accounts 同一取向：由构造自行建立，不要求呼叫端換一個參數欄位——
+	// 「誰持有哪個角色」是解析主體時的事實，不是可以被裝配錯誤繞過的選擇項。
+	grants *grant.Store
 }
 
 // NewStore 建立會話倉儲：只有絕對期限，閒置判定與活動寫入節流都關閉。
@@ -118,6 +123,7 @@ func NewStoreWithPolicy(clock timeutil.Clock, ttl time.Duration, policy Policy) 
 		policy:   policy,
 		newID:    idgen.New,
 		accounts: account.NewStore(clock),
+		grants:   grant.NewStore(clock),
 	}, nil
 }
 
@@ -482,9 +488,10 @@ func (s *Store) RevokeAllRootSessions(ctx context.Context, q database.Querier) (
 //     文件裡（會話行只能由帶著真實證明的 Create 簽發，token_hash 又不可變），
 //     並由 internal/identity 的結構閘鎖在本包。
 //
-// Grants 一律為零值：伺服器級角色的授予資料來源至今不存在，解析結果因此不帶任何角色。
-// 未來的授予表落地時，唯一要改的是這裡（把授予讀出來填入），各端點不會各長出一套
-// 「從 Cookie 裡讀角色」的平行語意。
+// Grants 在帳戶分支現讀自 internal/grant（遷移 0006 的授予表）——這是本套件註定
+// 「未來授予資料落地時唯一要改的地方」，如今落地就在這一個點：各端點不會各長出一套
+// 「從 Cookie 裡讀角色」的平行語意。讀取失敗（資料庫故障或表外的角色值）原樣上報，
+// 不降級成「他沒有角色」：把資料缺陷報成權限不足，會讓排查朝錯誤的方向走。
 func (s *Store) ResolvePrincipal(ctx context.Context, q database.Querier, secret string,
 	origin identity.Origin) (identity.Principal, Session, error) {
 	sess, err := s.Verify(ctx, q, secret)
@@ -506,9 +513,14 @@ func (s *Store) ResolvePrincipal(ctx context.Context, q database.Querier, secret
 			}
 			return identity.Principal{}, Session{}, err
 		}
+		grants, err := s.grants.Roles(ctx, q, sess.Subject.accountID)
+		if err != nil {
+			return identity.Principal{}, Session{}, err
+		}
 		p, err := identity.NewAccountPrincipal(identity.AccountInput{
 			Subject: identity.SubjectOf(a),
 			Origin:  origin,
+			Grants:  grants,
 		})
 		if err != nil {
 			return identity.Principal{}, Session{}, err

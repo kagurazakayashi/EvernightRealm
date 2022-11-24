@@ -364,6 +364,21 @@ func TestValidRequestID(t *testing.T) {
 
 func TestErrorMessagesCoverAllLocales(t *testing.T) {
 	locales := []string{LocaleZhCN, LocaleZhTW, LocaleEnUS, LocaleJaJP}
+	// 已發布的錯誤碼逐一列在这里（而不是只掃目錄）：少寫一语言的訊息时，
+	// 只掃 map 的寫法會安静地通過，而呼叫端拿到的是空字串。
+	published := []ErrorCode{
+		CodeUnknown, CodeNotFound, CodeMethodNotAllowed, CodePayloadTooLarge,
+		CodeInvalidBody, CodeUnsupportedMediaType, CodeRequestTimeout, CodeNotReady,
+		CodeNoSpace, CodeInvalidCredentials, CodeNotAuthenticated, CodeSessionInvalid,
+		CodeAuthMethodConflict, CodeOriginForbidden, CodeLoginThrottled, CodeSessionStale,
+		CodeDeviceLimitReached, CodeDeviceNotFound, CodePasswordChangeRequired,
+		CodePermissionDenied, CodeLoginNameTaken,
+	}
+	for _, code := range published {
+		if _, ok := errorMessages[code]; !ok {
+			t.Errorf("錯誤碼 %d 未在地化目錄裡（對外會回空訊息）", code)
+		}
+	}
 	for code := range errorMessages {
 		for _, locale := range locales {
 			if messageFor(code, locale) == "" {

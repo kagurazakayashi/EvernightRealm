@@ -12,6 +12,7 @@ import (
 	"github.com/kagurazakayashi/EvernightRealm/internal/audit"
 	"github.com/kagurazakayashi/EvernightRealm/internal/credential"
 	"github.com/kagurazakayashi/EvernightRealm/internal/database"
+	"github.com/kagurazakayashi/EvernightRealm/internal/grant"
 	"github.com/kagurazakayashi/EvernightRealm/internal/identity"
 	"github.com/kagurazakayashi/EvernightRealm/internal/idgen"
 	"github.com/kagurazakayashi/EvernightRealm/internal/session"
@@ -91,6 +92,10 @@ type Deps struct {
 	Sessions *session.Store
 	// Accounts 是帳戶倉儲。
 	Accounts *account.Store
+	// Grants 是伺服器級角色授予的讀取來源（internal/grant）。
+	// nil 時在構造期自行建立一份（見 New）：本包只讀授予（登入時現讀），
+	// 寫入授予屬帳戶開設用例（internal/adminacct），兩邊共用同一個倉儲實作即可。
+	Grants *grant.Store
 	// Audits 是 Root 登入事件的審計倉儲。
 	Audits *audit.Store
 	// RootPasswordHash 是組態中的 Root Argon2id 憑據；空字串代表尚未初始化。
@@ -115,6 +120,7 @@ type Service struct {
 	db       *database.DB
 	sessions *session.Store
 	accounts *account.Store
+	grants   *grant.Store
 	audits   *audit.Store
 	root     RootCredentialStore
 	hashing  credential.Params
@@ -147,10 +153,17 @@ func New(deps Deps) (*Service, error) {
 		// 來源上會被 Replaceable() 擋下——讀得到、換不掉，是一句誠實的話。
 		root = staticRootStore{hash: deps.RootPasswordHash}
 	}
+	grants := deps.Grants
+	if grants == nil {
+		// 沒注入也要能讀：本包對授予只有讀的一條路（登入現讀），
+		// 用預設時鐘建立的倉儲在讀取路徑上不使用時鐘，行為與注入版逐字相同。
+		grants = grant.NewStore(nil)
+	}
 	return &Service{
 		db:       deps.DB,
 		sessions: deps.Sessions,
 		accounts: deps.Accounts,
+		grants:   grants,
 		audits:   deps.Audits,
 		root:     root,
 		hashing:  params,
@@ -317,11 +330,19 @@ func (s *Service) attemptAccount(ctx context.Context, loginName, password, reque
 		s.log.Warn("帳戶登入被拒：帳戶已禁用", "account", a.ID.String(), "request_id", requestID)
 		return Outcome{}, true, nil
 	}
+	// 角色授予現讀，而且讀在口令校驗之後：它既不是一個可以在未證明身分時探測的內容，
+	// 也不能被凍結進會話行（授予改變之後的下一條請求必須現讀到最新狀態，見 session.ResolvePrincipal）。
+	// 讀取失敗原樣上報成內部故障，不降級成「他沒有角色」——那等於用一次資料庫打嗝
+	// 把管理員降成普通帳戶，而且外部看起來像一次正常登入。
+	grants, err := s.grants.Roles(ctx, s.db.SQL(), a.ID)
+	if err != nil {
+		return Outcome{}, false, fmt.Errorf("auth: 讀取角色授予失敗: %w", err)
+	}
 
 	principal, err := identity.NewAccountPrincipal(identity.AccountInput{
 		Subject: identity.SubjectOf(a),
 		Origin:  identity.OriginHTTPRequest,
-		// Grants 為零值：伺服器級角色的授予資料來源尚未存在，登入不假裝讀得出來。
+		Grants:  grants,
 	})
 	if err != nil {
 		if errors.Is(err, identity.ErrNotAuthenticated) {

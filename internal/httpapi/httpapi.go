@@ -54,6 +54,9 @@ type Deps struct {
 	// 為 nil 表示本執行檔不開放 auth 端點：路由、回退清單與錯誤面都和未掛載時
 	// 逐字相同（與 Web Deps 同一取向——「裝配了什麼就服務什麼」，傳輸層不猜）。
 	Auth AuthUseCase
+	// Admins 為「Root 開設管理員帳戶」用例的入口（internal/app 注入 *adminacct.Service）。
+	// 為 nil 表示本執行檔不開放該端點：路徑、回退清單與錯誤面都和未掛載時逐字相同。
+	Admins RootAdminUseCase
 	// InitStatus 為 Root 初始化狀態的只讀來源（internal/app 從 internal/rootinit 取）。
 	// 為 nil 表示不登記該端點：這個執行檔不對外回報初始化狀態。
 	// 注入的實作只准讀、不准寫——它會被一個匿名可讀的 GET 端點直接呼叫。
@@ -84,6 +87,8 @@ type Server struct {
 	// auth 為登入用例入口（可為 nil）；nil 時 authEndpoints 回空清單，
 	// 一個 auth 端點都不掛。
 	auth AuthUseCase
+	// admins 為開設用例入口（可為 nil）；nil 時 rootAdminEndpoints 回空清單。
+	admins RootAdminUseCase
 	// initStatus 為 Root 初始化狀態的只讀來源（可為 nil）；nil 時同樣一個端點都不掛。
 	initStatus func() (RootInitStatus, error)
 }
@@ -114,6 +119,7 @@ func New(cfg *config.Config, version string, deps Deps) *Server {
 		displayZone: cfg.DisplayLocation(),
 		web:         deps.Web,
 		auth:        deps.Auth,
+		admins:      deps.Admins,
 		initStatus:  deps.InitStatus,
 	}
 	s.httpSrv = &http.Server{

@@ -16,12 +16,14 @@ import (
 	"time"
 
 	"github.com/kagurazakayashi/EvernightRealm/internal/account"
+	"github.com/kagurazakayashi/EvernightRealm/internal/adminacct"
 	"github.com/kagurazakayashi/EvernightRealm/internal/audit"
 	"github.com/kagurazakayashi/EvernightRealm/internal/auth"
 	"github.com/kagurazakayashi/EvernightRealm/internal/config"
 	"github.com/kagurazakayashi/EvernightRealm/internal/database"
 	"github.com/kagurazakayashi/EvernightRealm/internal/database/migrate"
 	"github.com/kagurazakayashi/EvernightRealm/internal/disk"
+	"github.com/kagurazakayashi/EvernightRealm/internal/grant"
 	"github.com/kagurazakayashi/EvernightRealm/internal/httpapi"
 	"github.com/kagurazakayashi/EvernightRealm/internal/runlog"
 	"github.com/kagurazakayashi/EvernightRealm/internal/session"
@@ -515,11 +517,17 @@ func run(ctx context.Context, releaseSignals func(), args []string, out io.Write
 		lg.Error("登入守衛組裝失敗", "err", err)
 		return err
 	}
+	// 三個倉儲各建立一次、共用一份時鐘：帳戶、授予與審計在登入用例與開設用例之間
+	// 必須是同一個實例，否則「同一個欄位有兩份讀法」會隨裝配程式碼的長度慢慢長出來。
+	accountsStore := account.NewStore(timeutil.System())
+	grantsStore := grant.NewStore(timeutil.System())
+	auditStore := audit.NewStore(timeutil.System())
 	authService, err := auth.New(auth.Deps{
 		DB:               db,
 		Sessions:         sessionStore,
-		Accounts:         account.NewStore(timeutil.System()),
-		Audits:           audit.NewStore(timeutil.System()),
+		Accounts:         accountsStore,
+		Grants:           grantsStore,
+		Audits:           auditStore,
 		RootPasswordHash: cfg.Security.RootPasswordHash,
 		// Root 憑據的正式來源：登入讀它、改密經同一個互斥區覆寫它（見 root_creds.go）。
 		RootCreds: newRootCredentialStore(cfg),
@@ -531,6 +539,22 @@ func run(ctx context.Context, releaseSignals func(), args []string, out io.Write
 		lg.Error("登入用例組裝失敗", "err", err)
 		return err
 	}
+	// 開設管理員用例：依賴與登入用例共用同一批倉儲與同一份參數檔，
+	// 這樣「Argon2id 只有一套規則、Root 域審計只有一個出口」在裝配層也成立。
+	// 失敗一律中斷啟動：少了它，前端就沒有一個能让 Root 開出第一個管理員的入口，
+	// 而「只有 Root 能登入」的狀態不該被一次静默的裝配錯誤当成正常部署。
+	adminService, err := adminacct.New(adminacct.Deps{
+		DB:       db,
+		Accounts: accountsStore,
+		Grants:   grantsStore,
+		Audits:   auditStore,
+		Hashing:  hashingParams,
+		Log:      lg.Logger,
+	})
+	if err != nil {
+		lg.Error("開設管理員用例組裝失敗", "err", err)
+		return err
+	}
 	srv := httpapi.New(&cfg, Version, httpapi.Deps{
 		Ready:    readinessCheck(db, space),
 		Clock:    timeutil.System(),
@@ -538,6 +562,7 @@ func run(ctx context.Context, releaseSignals func(), args []string, out io.Write
 		Log:      lg.Logger,
 		ErrorLog: lg.ErrorLogWriter(slog.LevelError),
 		Auth:     authService,
+		Admins:   adminService,
 		// Root 初始化狀態的只讀來源：只查組態檔本身，不開任何寫入通路
 		// （初始化仍然只有 evernight-server init-root 這一條路）。
 		InitStatus: initStatusSource(cfg),

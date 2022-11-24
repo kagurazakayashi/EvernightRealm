@@ -125,8 +125,15 @@ type loginResponse struct {
 	// 這個欄位的意義是讓界面能主動講對句話，而不是讓人撞上去才知道。
 	// 為 false 時欄位缺席（omitempty）：Root 與已完成義務的帳戶都讀不到它，
 	// 客戶端按「缺席即 false」解讀即可。
-	MustChangePassword bool   `json:"must_change_password,omitempty"`
-	RequestID          string `json:"request_id"`
+	MustChangePassword bool `json:"must_change_password,omitempty"`
+	// Roles 是服務端現讀到的伺服器級角色授予（只增不刪的合同演進；無授予時欄位缺席）。
+	//
+	// 它存在的意義是「客戶端不必猜自己是誰」：主體類別只分 account／root（會話形态），
+	// 而「這個帳戶能不能做維運」由這裡給出，前端據此載入入口。它不是權限的依據——
+	// 每一次判定的真相仍在服務端（見 internal/identity.Authorize），
+	// 回應裡的這個清單只是可展示事實，改它不會讓任何端點放行。
+	Roles     []string `json:"roles,omitempty"`
+	RequestID string   `json:"request_id"`
 }
 
 // sessionResponse 是「當前會話」的回應本體，在登入回應之上多帶建立與最近活動時刻。
@@ -145,8 +152,10 @@ type sessionResponse struct {
 	// MustChangePassword 同 loginResponse：現讀的帳戶旗標，false 時欄位缺席。
 	// /auth/session 永遠不被本旗標擋（它正是客戶端得知「還欠一次改密」的入口），
 	// 這也讓「改密成功後刷新即放行」有一條單一的可輪詢事實來源。
-	MustChangePassword bool   `json:"must_change_password,omitempty"`
-	RequestID          string `json:"request_id"`
+	MustChangePassword bool `json:"must_change_password,omitempty"`
+	// Roles 同 loginResponse：服務端現讀到的伺服器級角色授予，無授予時欄位缺席。
+	Roles     []string `json:"roles,omitempty"`
+	RequestID string   `json:"request_id"`
 }
 
 // logoutResponse 是登出成功的回應本體：只有請求關聯 ID。
@@ -246,6 +255,7 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 		CreatedAt:    timeutil.FormatUTC(resolved.Session.CreatedAt),
 		LastActiveAt: timeutil.FormatUTC(resolved.Session.LastActiveAt),
 		ExpiresAt:    timeutil.FormatUTC(resolved.Session.ExpiresAt),
+		Roles:        rolesOf(resolved.Principal),
 		RequestID:    requestIDFromRequest(r),
 	}
 	if id := resolved.Principal.AccountID(); !id.IsNil() {
@@ -776,11 +786,30 @@ func (s *Server) loginResponseFor(outcome auth.Outcome) loginResponse {
 		DeviceID:           outcome.Session.DeviceID.String(),
 		ExpiresAt:          timeutil.FormatUTC(outcome.Session.ExpiresAt),
 		MustChangePassword: outcome.MustChangePassword,
+		Roles:              rolesOf(outcome.Principal),
 	}
 	if id := outcome.Principal.AccountID(); !id.IsNil() {
 		body.AccountID = id.String()
 	}
 	return body
+}
+
+// rolesOf 把主體持有的伺服器級角色換成對外表示；無角色時回 nil（欄位因此缺席）。
+//
+// Root 不在這裡出現：它的權限來自主體類別而不是授予（identity.Role 刻意不含 root），
+// 客戶端要用「是不是 Root」判分流仍看 subject_kind。
+func rolesOf(p identity.Principal) []string { return roleNames(p.Roles()) }
+
+// roleNames 把角色清單換成對外表示（與 rolesOf 同一個形状，來源不同而已）。
+func roleNames(roles []identity.Role) []string {
+	if len(roles) == 0 {
+		return nil
+	}
+	out := make([]string, len(roles))
+	for i, role := range roles {
+		out[i] = role.String()
+	}
+	return out
 }
 
 // subjectKindOf 把主體類別換成對外表示。只有兩類能拿到會話，
