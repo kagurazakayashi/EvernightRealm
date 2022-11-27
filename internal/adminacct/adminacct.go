@@ -1,20 +1,22 @@
-// Package adminacct 是「Root 開設伺服器級管理員帳戶」的應用服務層：
-// 把「授權判定 → 憑據派生 → 帳戶建立 → 角色授予 → 審計落地」編排成一個原子用例。
+// Package adminacct 是「Root 對伺服器級管理員帳戶的目錄性操作」的應用服務層：
+// 開設（憑據派生 → 帳戶建立 → 角色授予 → 審計落地的原子用例）、
+// 目錄分頁與單筆詳情、非安全資料（顯示名）的白名單編輯。
 //
 // 為什麼獨立成一個套件而不是放進 internal/auth：auth 回答的是「憑據換身份、身份換會話」，
-// 本套件回答的是「一個新的可登入主體如何被創造出來並被授予角色」。兩者共用的只有
+// 本套件回答的是「一個可登入主體如何被創造、被查到、被改名字」。兩者共用的只有
 // internal/credential 這一套派生規則與 internal/identity 的主體形態，
 // 混在一个套件裡會讓「登入不假裝會建號、建號不假裝會登入」這條邊界模糊。
 //
 // 三條不可讓步的規定：
-//   - 只有 Root 能開設管理員。判定經 identity.Authorize(principal, identity.NeedRoot)，
+//   - 只有 Root 能碰這些用例。判定經 identity.Authorize(principal, identity.NeedRoot)，
 //     而 NeedRoot 只放過 Root 主體：持 server_admin 的帳戶过不去（見 internal/identity/authorize.go）。
-//     「普通管理员能不能创建同级管理员」因此不是产品约定，而是唯一的判定入口；
-//   - 請求裡的任何角色/類型宣稱都不生效。本用例的輸入只有登入名、顯示名與初始口令，
-//     「建的是管理員」这件事由「調用的是哪一個用例」決定，沒有任何欄位可以讓呼叫端自報；
-//     identity.ServerGrants 的欄位不匯出，請求本體也填不進去；
-//   - 建立、授予與審計落在同一個交易。三者同生同滅：一個被授予了角色卻查不到的帳戶、
-//     或一個真實存在卻在 Root 審計裡查不到的管理員，都是不可解釋的半成品。
+//     「普通管理员能不能管理同级管理员」因此不是产品约定，而是唯一的判定入口；
+//   - 請求裡的任何角色/類型宣稱都不生效。開設的輸入只有登入名、顯示名與初始口令，
+//     編輯的輸入只有顯示名與它所依據的現值，「動的是哪一類資料」由「調用的是哪一個用例」
+//     決定，沒有任何欄位可以讓呼叫端自報；identity.ServerGrants 的欄位不匯出，
+//     請求本體也填不進去；
+//   - 寫入與審計落在同一個交易。同生同滅：一個被授予了角色卻查不到的帳戶、
+//     或一次真實存在卻在 Root 審計裡查不到的改名，都是不可解釋的半成品。
 //
 // 憑據一律經 internal/credential 以裝配層注入的當前參數檔派生（與登入、Root 初始化、
 // 本人改密同一個實作點），本套件不另寫一套口令規則，也不落庫、不回傳任何口令明文。
@@ -57,13 +59,6 @@ var (
 	ErrPermissionDenied = identity.ErrPermissionDenied
 )
 
-// adminListLimit 是「確認用的最小列表」一次回傳的上限。
-//
-// 由本套件定死而不是收呼叫端參數：這個清單的存在意義是讓 Root 核實剛開出的帳戶落地與否，
-// 不是一個可以一次拉出全部主體的口子。完整的搜尋與維護台屬後續步驟，
-// 到那时需要的是分頁契約，而不是把這裡的上限改成「0 代表全部」。
-const adminListLimit = 50
-
 // CreateInput 是開設一個管理員帳戶所需的領域輸入。
 //
 // 沒有任何角色、帳戶類型或狀態欄位：本用例建的就是「standard ＋ active ＋ server_admin ＋
@@ -95,27 +90,6 @@ type CreatedAdmin struct {
 	Roles []identity.Role
 	// CreatedAt 為建立時刻（UTC，取自注入時鐘）。
 	CreatedAt time.Time
-}
-
-// Summary 是確認用最小列表裡的一行。
-//
-// 它是「讀取呈現」而不是另一個領域實體：欄位全部來自帳戶倉儲已讀回的實體，
-// 少了任何一個都不影響授權判定（判定讀的是 internal/identity 的主體與授予）。
-type Summary struct {
-	// AccountID 為帳戶標識。
-	AccountID idgen.ID
-	// LoginName 為登入名原始寫法。
-	LoginName string
-	// DisplayName 為顯示名稱。
-	DisplayName string
-	// Status 為帳戶狀態。
-	Status account.Status
-	// MustChangePassword 為是否仍欠首次改密。
-	MustChangePassword bool
-	// CreatedAt 為建立時刻。
-	CreatedAt time.Time
-	// LastLoginAt 為最近一次登入時刻；零值代表從未登入。
-	LastLoginAt time.Time
 }
 
 // Deps 是本用例的外部依賴，全部由裝配層（internal/app）注入。
@@ -260,44 +234,6 @@ func (s *Service) CreateAdmin(ctx context.Context, principal identity.Principal,
 	s.log.Info("Root 已開設伺服器級管理員帳戶",
 		"account", created.AccountID.String(), "request_id", requestID)
 	return created, nil
-}
-
-// ListAdmins 列舉持有伺服器級管理員角色的帳戶，依授予時刻倒序。
-//
-// 授權與開設同一道閘（NeedRoot）。這是「確認剛纔那筆是否落地」的最小清單，
-// 不是搜尋與維護台：沒有分頁、沒有條件、也沒有任何按登入名的查詢通路。
-// 上限由本套件定死（adminListLimit），呼叫端無從放宽。
-//
-// 只讀不寫：查不到任何東西時回空清單與 nil（一個 Root 還沒開過管理員是常态，不是錯誤）。
-func (s *Service) ListAdmins(ctx context.Context, principal identity.Principal) ([]Summary, error) {
-	if err := identity.Authorize(principal, identity.NeedRoot); err != nil {
-		return nil, err
-	}
-	entries, err := s.grants.ListByRole(ctx, s.db.SQL(), identity.RoleServerAdmin, adminListLimit)
-	if err != nil {
-		return nil, fmt.Errorf("adminacct: 讀取管理員清單失敗: %w", err)
-	}
-	summaries := make([]Summary, 0, len(entries))
-	for _, entry := range entries {
-		// 逐筆按標識經帳戶倉儲讀回，而不是自己 JOIN 一次 accounts：
-		// 欄位清單與實體校驗在 internal/account 只有一份（selectAccountSQL），
-		// 這裡再寫一份讀法就多出一個「繞過校驗讀出半套帳戶」的入口。
-		// 管理員數量本身就是個位數到十位數的量級，這次取捨換來的是只有一份真相。
-		a, err := s.accounts.ByID(ctx, s.db.SQL(), entry.AccountID)
-		if err != nil {
-			return nil, fmt.Errorf("adminacct: 讀取管理員帳戶失敗: %w", err)
-		}
-		summaries = append(summaries, Summary{
-			AccountID:          a.ID,
-			LoginName:          a.LoginName,
-			DisplayName:        a.DisplayName,
-			Status:             a.Status,
-			MustChangePassword: a.MustChangePassword,
-			CreatedAt:          a.CreatedAt,
-			LastLoginAt:        a.LastLoginAt,
-		})
-	}
-	return summaries, nil
 }
 
 // creationRecord 產生一筆 Root 域的開設審計。

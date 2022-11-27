@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -479,5 +480,95 @@ func TestRotatePasswordCAS(t *testing.T) {
 	// 上述拒絕路徑都不該動到現值。
 	if got, err := store.ByID(ctx, db.SQL(), a.ID); err != nil || got.PasswordHash != newHash {
 		t.Errorf("拒絕路徑動到了憑據：%+v err=%v", got, err)
+	}
+}
+
+// TestUpdateDisplayNameCAS 顯示名的比較-and-set：只碰這一欄，其餘原位不動。
+//
+// 與 RotatePasswordCAS 同形但斷言對象不同：這裡要釘死的是「白名單編輯」的結構性——
+// UPDATE 的 WHERE 沒命中時一個欄位都不變，命中時也只有 display_name 變，
+// 憑據、狀態、旗標、類型與任何時刻欄位都原封不動（由整行直讀比對作證）。
+func TestUpdateDisplayNameCAS(t *testing.T) {
+	store, db, _ := newTestStore(t)
+	ctx := context.Background()
+	a, err := store.Create(ctx, db.SQL(), standardInput("cas_display"))
+	if err != nil {
+		t.Fatalf("建立測試帳戶失敗：%v", err)
+	}
+	rawRow := func() string {
+		t.Helper()
+		var row [10]string
+		err := db.SQL().QueryRowContext(ctx, `SELECT
+				id, login_name, login_name_key, display_name,
+				COALESCE(password_hash,''), account_type, status,
+				must_change_password, created_at, COALESCE(last_login_at,'')
+			FROM accounts WHERE id = ?`, a.ID.String()).
+			Scan(&row[0], &row[1], &row[2], &row[3], &row[4], &row[5], &row[6], &row[7], &row[8], &row[9])
+		if err != nil {
+			t.Fatalf("直讀帳戶行失敗：%v", err)
+		}
+		return strings.Join(row[:], "\x00")
+	}
+	before := rawRow()
+
+	// 現值對不上：changed=false、整行逐字不動。
+	if changed, err := store.UpdateDisplayName(ctx, db.SQL(), a.ID, "新名字", "沒見過的現值"); err != nil || changed {
+		t.Errorf("預期現值不符應回 changed=false 且無錯誤：%v %v", changed, err)
+	}
+	if got := rawRow(); got != before {
+		t.Error("落空的 CAS 不得留下任何欄位位移")
+	}
+
+	// 命中：只有 display_name 變，且帶進域規則的空白整理（首尾空白不落庫）。
+	if changed, err := store.UpdateDisplayName(ctx, db.SQL(), a.ID, "  更名後的顯示  ", "測試帳戶"); err != nil || !changed {
+		t.Fatalf("CAS 命中時應回 changed=true：%v %v", changed, err)
+	}
+	mid := rawRow()
+	got, err := store.ByID(ctx, db.SQL(), a.ID)
+	if err != nil {
+		t.Fatalf("讀回失敗：%v", err)
+	}
+	if got.DisplayName != "更名後的顯示" {
+		t.Errorf("落庫值應為去空白後的域規範形態，實際 %q", got.DisplayName)
+	}
+	if got.PasswordHash != testHash || got.Status != StatusActive || !got.MustChangePassword ||
+		got.Type != TypeStandard || got.CreatedAt.IsZero() || got.LoginName != "cas_display" ||
+		got.LoginKey != "cas_display" {
+		t.Errorf("隱藏欄位必須原封不動：%+v", got)
+	}
+
+	// 查無此人與不合格輸入：各自收斂，且都不動到既有行。
+	ghostID, err := idgen.New()
+	if err != nil {
+		t.Fatalf("產生測試標識失敗：%v", err)
+	}
+	if changed, err := store.UpdateDisplayName(ctx, db.SQL(), ghostID, "幽靈改名", "任何現值"); err != nil || changed {
+		t.Errorf("幽靈帳戶應回 changed=false：%v %v", err, changed)
+	}
+	for name, call := range map[string]func() (bool, error){
+		"空顯示名": func() (bool, error) { return store.UpdateDisplayName(ctx, db.SQL(), a.ID, "  ", "更名後的顯示") },
+		"超長顯示名": func() (bool, error) {
+			return store.UpdateDisplayName(ctx, db.SQL(), a.ID, strings.Repeat("長", maxDisplayNameRunes+1), "更名後的顯示")
+		},
+		"含控制字元": func() (bool, error) {
+			return store.UpdateDisplayName(ctx, db.SQL(), a.ID, "名字\x00壞", "更名後的顯示")
+		},
+		"零值標識": func() (bool, error) {
+			return store.UpdateDisplayName(ctx, db.SQL(), idgen.ID{}, "新名", "任何現值")
+		},
+		"nil 連線": func() (bool, error) {
+			return store.UpdateDisplayName(ctx, nil, a.ID, "新名", "任何現值")
+		},
+	} {
+		if changed, err := call(); err == nil || changed {
+			t.Errorf("%s：應回報錯誤或明確失敗且未寫入（changed=%v err=%v）", name, changed, err)
+		}
+	}
+	// 上一次成功 CAS 後的形態仍是唯一正解：本輪拒絕路徑不得再動行。
+	if again := rawRow(); again != mid {
+		t.Error("拒絕路徑不得再動到任何欄位")
+	}
+	if got, err := store.ByID(ctx, db.SQL(), a.ID); err != nil || got.DisplayName != "更名後的顯示" {
+		t.Errorf("拒絕路徑動到了顯示名：%+v err=%v", got, err)
 	}
 }

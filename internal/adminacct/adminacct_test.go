@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -22,6 +24,7 @@ import (
 	"github.com/kagurazakayashi/EvernightRealm/internal/grant"
 	"github.com/kagurazakayashi/EvernightRealm/internal/identity"
 	"github.com/kagurazakayashi/EvernightRealm/internal/identity/identitytest"
+	"github.com/kagurazakayashi/EvernightRealm/internal/idgen"
 	"github.com/kagurazakayashi/EvernightRealm/internal/session"
 	"github.com/kagurazakayashi/EvernightRealm/internal/timeutil"
 )
@@ -510,8 +513,9 @@ func TestUngrantedAccountResolvesWithoutRoles(t *testing.T) {
 	}
 }
 
-// TestListAdminsShowsOnlyGrantedAccounts 最小列表：只列持有授予者，普通帳戶不出现，且不携带凭据。
-func TestListAdminsShowsOnlyGrantedAccounts(t *testing.T) {
+// TestDirectoryListsOnlyGrantedNewestFirst 目錄只列持有授予者：普通帳戶不出現、授予倒序、
+// 不攜帶任何憑據，且同一道閘把非 Root 拒在門外。
+func TestDirectoryListsOnlyGrantedNewestFirst(t *testing.T) {
 	e := newEnv(t)
 	ctx := context.Background()
 	root := identitytest.Root(t, identity.OriginHTTPRequest)
@@ -531,45 +535,210 @@ func TestListAdminsShowsOnlyGrantedAccounts(t *testing.T) {
 		t.Fatalf("種入普通帳戶失敗：%v", err)
 	}
 
-	list, err := e.service.ListAdmins(ctx, root)
+	page, err := e.service.Directory(ctx, root, DirectoryQuery{
+		Page: 1, PageSize: DirectoryDefaultPageSize, StatusFilter: DirectoryStatusAll,
+	})
 	if err != nil {
-		t.Fatalf("列舉管理員失敗：%v", err)
+		t.Fatalf("列舉管理員目錄失敗：%v", err)
 	}
-	if len(list) != 2 {
-		t.Fatalf("應恰好列出兩位管理員，實際 %d 筆", len(list))
+	if page.Total != 2 || len(page.Rows) != 2 {
+		t.Fatalf("應恰好列到兩位管理員（總數 %d／本頁 %d 筆）", page.Total, len(page.Rows))
 	}
-	if list[0].AccountID != second.AccountID || list[1].AccountID != first.AccountID {
-		t.Errorf("清單應依授予時刻倒序，實際 %s 在前", list[0].AccountID)
+	if page.Rows[0].AccountID != second.AccountID.String() ||
+		page.Rows[1].AccountID != first.AccountID.String() {
+		t.Errorf("目錄應依授予時刻倒序，實際首行 %s", page.Rows[0].AccountID)
 	}
-	for _, item := range list {
-		if item.MustChangePassword != true {
-			t.Errorf("%s 仍欠首次改密，列表應如實回報", item.AccountID)
+	for _, row := range page.Rows {
+		if row.MustChangePassword != true {
+			t.Errorf("%s 仍欠首次改密，目錄應如實回報", row.AccountID)
 		}
-		if !item.LastLoginAt.IsZero() {
-			t.Errorf("從未登入的帳戶不得被填上登入時刻，實際 %v", item.LastLoginAt)
+		if !row.LastLoginAt.IsZero() {
+			t.Errorf("從未登入的帳戶不得被填上登入時刻，實際 %v", row.LastLoginAt)
+		}
+		if row.GrantedAt.IsZero() {
+			t.Errorf("目錄行必須帶授予時刻（成員資格本身就是授予）")
 		}
 	}
-	text := fmt.Sprintf("%+v", list)
+	text := fmt.Sprintf("%+v", page)
 	if strings.Contains(text, testInitialPassword) || strings.Contains(text, "$argon2id$") {
-		t.Error("列表結果不得含口令明文或憑據雜湊")
+		t.Error("目錄結果不得含口令明文或憑據雜湊")
 	}
 
 	// 同一道閘：普通帳戶（含持有角色的）都列不到。
-	if _, err := e.service.ListAdmins(ctx, identitytest.Account(t, identitytest.NewID(t),
-		identitytest.ServerAdmin())); !errors.Is(err, identity.ErrPermissionDenied) {
+	if _, err := e.service.Directory(ctx, identitytest.Account(t, identitytest.NewID(t),
+		identitytest.ServerAdmin()), DirectoryQuery{Page: 1, PageSize: 20, StatusFilter: DirectoryStatusAll}); !errors.Is(err, identity.ErrPermissionDenied) {
 		t.Errorf("非 Root 列舉應被拒為權限不足，實際 %v", err)
 	}
 }
 
-// TestListAdminsEmptyBeforeAnyCreation 一個管理員都還沒開過時：回空清單而不是錯誤。
-func TestListAdminsEmptyBeforeAnyCreation(t *testing.T) {
+// TestDirectoryEmptyBeforeAnyCreation 一個管理員都還沒開過時：回空行與總數 0，而不是錯誤。
+func TestDirectoryEmptyBeforeAnyCreation(t *testing.T) {
 	e := newEnv(t)
-	list, err := e.service.ListAdmins(context.Background(), identitytest.Root(t, identity.OriginHTTPRequest))
+	page, err := e.service.Directory(context.Background(),
+		identitytest.Root(t, identity.OriginHTTPRequest),
+		DirectoryQuery{Page: 1, PageSize: DirectoryDefaultPageSize, StatusFilter: DirectoryStatusAll})
 	if err != nil {
-		t.Fatalf("空清單不該是錯誤：%v", err)
+		t.Fatalf("空目錄不該是錯誤：%v", err)
 	}
-	if len(list) != 0 {
-		t.Errorf("尚無授予時應回空清單，實際 %d 筆", len(list))
+	if page.Total != 0 || len(page.Rows) != 0 {
+		t.Errorf("尚無授予時應回空頁與總數 0，實際 %d／%d", page.Total, len(page.Rows))
+	}
+	if page.Rows == nil {
+		t.Error("空頁必須是空切片：JSON 回應因此恆為數組而不是 null")
+	}
+}
+
+// TestDirectoryPaginationStatusFilterAndBounds 分頁翻頁、狀態篩選與非法參數各自的結論。
+//
+// 這三個語意都是目錄合同的一部分，逐條釘死：
+//   - 超出總數的合法頁碼回空頁與真實總數（翻過頭不是錯誤）；
+//   - 篩選後的 total 是篩選後的筆數（客戶端據此算頁數，拿全量總數會多算一頁空的）；
+//   - 非法參數回可判別的結論錯誤，傳輸層才點得出是哪個查詢參數壞了。
+func TestDirectoryPaginationStatusFilterAndBounds(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	root := identitytest.Root(t, identity.OriginHTTPRequest)
+
+	ids := make([]string, 0, 3)
+	for _, login := range []string{"page.a", "page.b", "page.c"} {
+		created := e.mustCreate(t, root, login)
+		ids = append(ids, created.AccountID.String())
+		e.clock.Advance(time.Minute)
+	}
+	// 把最早授予的那一位禁用（直寫 SQL 走 status/disabled_at 同生同滅的合法形態）：
+	// 禁用是後續步驟的能力，本測試只需要一個「狀態不同」的行存在。
+	if _, err := e.db.SQL().ExecContext(ctx,
+		"UPDATE accounts SET status = 'disabled', disabled_at = ? WHERE id = ?",
+		timeutil.ToMillis(e.clock.Now()), ids[0]); err != nil {
+		t.Fatalf("禁用測試帳戶失敗：%v", err)
+	}
+
+	all, err := e.service.Directory(ctx, root, DirectoryQuery{Page: 1, PageSize: 2, StatusFilter: DirectoryStatusAll})
+	if err != nil {
+		t.Fatalf("第一頁查詢失敗：%v", err)
+	}
+	if all.Total != 3 || len(all.Rows) != 2 {
+		t.Fatalf("全量應總數 3、本頁 2 筆，實際 %d／%d", all.Total, len(all.Rows))
+	}
+	// 授予倒序：最新（page.c）在前，被禁用的最早授予者排最後。
+	if all.Rows[0].AccountID != ids[2] || all.Rows[1].AccountID != ids[1] {
+		t.Errorf("第一頁順序應為最新授予在前，實際 %s、%s", all.Rows[0].AccountID, all.Rows[1].AccountID)
+	}
+	secondPage, err := e.service.Directory(ctx, root, DirectoryQuery{Page: 2, PageSize: 2, StatusFilter: DirectoryStatusAll})
+	if err != nil || secondPage.Total != 3 || len(secondPage.Rows) != 1 ||
+		secondPage.Rows[0].AccountID != ids[0] || secondPage.Rows[0].Status != "disabled" {
+		t.Fatalf("第二頁應剩最早授予那一位（disabled），實際 err=%v rows=%+v", err, secondPage.Rows)
+	}
+
+	disabled, err := e.service.Directory(ctx, root, DirectoryQuery{Page: 1, PageSize: 20, StatusFilter: "disabled"})
+	if err != nil || disabled.Total != 1 || len(disabled.Rows) != 1 {
+		t.Fatalf("disabled 篩選應恰好命中一筆（總數 %d／err %v）", disabled.Total, err)
+	}
+	active, err := e.service.Directory(ctx, root, DirectoryQuery{Page: 1, PageSize: 20, StatusFilter: "active"})
+	if err != nil || active.Total != 2 {
+		t.Fatalf("active 篩選應剩兩筆（總數 %d／err %v）", active.Total, err)
+	}
+	// 篩選後的 total 必須是篩選後的筆數，不是全量；且命中的都是啟用中的那兩位。
+	if active.Total != 2 || len(active.Rows) != 2 {
+		t.Fatalf("active 篩選應剩兩筆（總數 %d／本頁 %d）", active.Total, len(active.Rows))
+	}
+	for _, row := range active.Rows {
+		if row.AccountID != ids[1] && row.AccountID != ids[2] {
+			t.Errorf("active 篩選命中了被禁用的行：%s", row.AccountID)
+		}
+	}
+
+	beyond, err := e.service.Directory(ctx, root, DirectoryQuery{Page: 99, PageSize: 20, StatusFilter: DirectoryStatusAll})
+	if err != nil {
+		t.Fatalf("超出總數的頁碼不該是錯誤：%v", err)
+	}
+	if beyond.Total != 3 || len(beyond.Rows) != 0 {
+		t.Errorf("超出總數應回空頁與真實總數，實際 %d／%d", beyond.Total, len(beyond.Rows))
+	}
+
+	// 溢出保不住的巨大頁碼：等價於「翻不到的頁」，回空行而不是故障。
+	huge, err := e.service.Directory(ctx, root, DirectoryQuery{Page: math.MaxInt64, PageSize: 20, StatusFilter: DirectoryStatusAll})
+	if err != nil || len(huge.Rows) != 0 || huge.Total != 3 {
+		t.Errorf("極大頁碼應回空頁，實際 err=%v total=%d rows=%d", err, huge.Total, len(huge.Rows))
+	}
+
+	cases := []struct {
+		name string
+		q    DirectoryQuery
+		want error
+	}{
+		{"頁碼為零", DirectoryQuery{Page: 0, PageSize: 20}, ErrInvalidPage},
+		{"頁碼為負", DirectoryQuery{Page: -1, PageSize: 20}, ErrInvalidPage},
+		{"每頁為零", DirectoryQuery{Page: 1, PageSize: 0}, ErrInvalidPageSize},
+		{"每頁超上限", DirectoryQuery{Page: 1, PageSize: DirectoryMaxPageSize + 1}, ErrInvalidPageSize},
+		{"篩選值表外", DirectoryQuery{Page: 1, PageSize: 20, StatusFilter: "ghost"}, ErrInvalidStatusFilter},
+	}
+	for _, tc := range cases {
+		if _, err := e.service.Directory(ctx, root, tc.q); !errors.Is(err, tc.want) {
+			t.Errorf("%s 應被判為 %v，實際 %v", tc.name, tc.want, err)
+		}
+	}
+
+	// 空狀態篩選等價 all：傳輸層「參數缺席」的預設值不該被解讀成非法。
+	if _, err := e.service.Directory(ctx, root, DirectoryQuery{Page: 1, PageSize: 20}); err != nil {
+		t.Errorf("空 StatusFilter 應按不篩選處理，實際 %v", err)
+	}
+}
+
+// TestAdminProfileSingleView 單筆詳情：目錄成員讀得到全量可展示事實；
+// 非成員（不存在的標識、無授予的帳戶）收斂成同一句話；非 Root 一律被拒。
+func TestAdminProfileSingleView(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	root := identitytest.Root(t, identity.OriginHTTPRequest)
+
+	created := e.mustCreate(t, root, "detail.one")
+	profile, err := e.service.AdminProfile(ctx, root, created.AccountID)
+	if err != nil {
+		t.Fatalf("讀取詳情失敗：%v", err)
+	}
+	if profile.LoginName != "detail.one" || profile.DisplayName != "測試管理員" ||
+		profile.Status != account.StatusActive || !profile.MustChangePassword {
+		t.Errorf("詳情應為帳戶現值，實際 %+v", profile)
+	}
+	if len(profile.Roles) != 1 || profile.Roles[0] != identity.RoleServerAdmin {
+		t.Errorf("詳情角色由目錄成員資格核實換得，實際 %v", profile.Roles)
+	}
+	if profile.GrantedAt.IsZero() {
+		t.Error("詳情必須帶授予時刻")
+	}
+	if text := fmt.Sprintf("%+v", profile); strings.Contains(text, testInitialPassword) ||
+		strings.Contains(text, "$argon2id$") {
+		t.Error("詳情不得含口令明文或憑據雜湊")
+	}
+
+	// 「不存在」與「存在但不在目錄裡」同形：探測不到「這個人只是沒角色」的信號。
+	ghost, parseErr := idgen.Parse("00000000-0000-7000-8000-000000000000")
+	if parseErr != nil {
+		t.Fatalf("構造測試標識失敗：%v", parseErr)
+	}
+	for name, id := range map[string]idgen.ID{"零標識": idgen.Nil, "合法但無人": ghost} {
+		if _, err := e.service.AdminProfile(ctx, root, id); !errors.Is(err, ErrAdminNotFound) {
+			t.Errorf("%s 應被判為不在目錄，實際 %v", name, err)
+		}
+	}
+	hash, err := credential.Hash(testInitialPassword, credential.TestParams)
+	if err != nil {
+		t.Fatalf("產生測試憑據失敗：%v", err)
+	}
+	plain, err := e.service.accounts.Create(ctx, e.db.SQL(), account.NewInput{
+		LoginName: "detail.plain", DisplayName: "普通帳戶", PasswordHash: hash,
+		Type: account.TypeStandard, Status: account.StatusActive,
+	})
+	if err != nil {
+		t.Fatalf("種入普通帳戶失敗：%v", err)
+	}
+	if _, err := e.service.AdminProfile(ctx, root, plain.ID); !errors.Is(err, ErrAdminNotFound) {
+		t.Errorf("無授予的既有帳戶應與查無同形，實際 %v", err)
+	}
+	if _, err := e.service.AdminProfile(ctx, identitytest.Account(t, identitytest.NewID(t),
+		identitytest.ServerAdmin()), created.AccountID); !errors.Is(err, identity.ErrPermissionDenied) {
+		t.Errorf("非 Root 讀詳情應被拒為權限不足，實際 %v", err)
 	}
 }
 
@@ -597,3 +766,275 @@ func TestNewRejectsMissingDeps(t *testing.T) {
 		t.Error("全零參數檔應被拒：它無法產生可用的憑據")
 	}
 }
+
+// hiddenFieldsSnapshot 取一列帳戶的「不得被資料編輯觸碰」欄位的原樣拼接：
+// 編輯前後各取一次、必須逐字相等，這是「白名單保存不連隱藏欄位一起覆蓋」
+// 的直接證據（比讀實體更靠近資料庫真相：實體會替換零值，原始行不會）。
+func hiddenFieldsSnapshot(t *testing.T, db *database.DB, accountID string) string {
+	t.Helper()
+	var (
+		loginName, loginKey, displayName, passwordHash, accountType, status string
+		mustChange, createdAt, lastLoginAt, disabledAt                      int64
+	)
+	row := db.SQL().QueryRowContext(context.Background(), `SELECT COALESCE(login_name,''), COALESCE(login_name_key,''),
+		COALESCE(display_name,''), COALESCE(password_hash,''), COALESCE(account_type,''), COALESCE(status,''),
+		COALESCE(must_change_password,-1), COALESCE(created_at,-1),
+		COALESCE(last_login_at,-1), COALESCE(disabled_at,-1)
+		FROM accounts WHERE id = ?`, accountID)
+	if err := row.Scan(&loginName, &loginKey, &displayName, &passwordHash, &accountType,
+		&status, &mustChange, &createdAt, &lastLoginAt, &disabledAt); err != nil {
+		t.Fatalf("讀取帳戶原始行失敗：%v", err)
+	}
+	return strings.Join([]string{loginName, loginKey, passwordHash, accountType, status,
+		strconv.FormatInt(mustChange, 10), strconv.FormatInt(createdAt, 10),
+		strconv.FormatInt(lastLoginAt, 10), strconv.FormatInt(disabledAt, 10)}, "\x00")
+}
+
+// TestUpdateAdminProfileWritesAndAudits 成功編輯：顯示名落地、審計帶前後值、
+// 隱藏欄位逐字不動、回應與記錄都不含憑據材料。
+func TestUpdateAdminProfileWritesAndAudits(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	root := identitytest.Root(t, identity.OriginHTTPRequest)
+	created := e.mustCreate(t, root, "edit.one")
+	before := hiddenFieldsSnapshot(t, e.db, created.AccountID.String())
+
+	profile, err := e.service.UpdateAdminProfile(ctx, root, created.AccountID,
+		"  改名後的顯示名  ", "測試管理員", "req-edit-1")
+	if err != nil {
+		t.Fatalf("編輯顯示名失敗：%v", err)
+	}
+	if profile.DisplayName != "改名後的顯示名" {
+		t.Errorf("回應必須是保存後的現值（含去首尾空白），實際 %q", profile.DisplayName)
+	}
+	if profile.AccountID != created.AccountID || profile.LoginName != "edit.one" ||
+		profile.Status != account.StatusActive || !profile.MustChangePassword {
+		t.Errorf("其餘欄位應原樣如實，實際 %+v", profile)
+	}
+	if after := hiddenFieldsSnapshot(t, e.db, created.AccountID.String()); after != before {
+		t.Error("資料編輯不得觸碰憑據、狀態、旗標、類型、登入名鍵與任何時刻欄位")
+	}
+	var stored, display string
+	if err := e.db.SQL().QueryRowContext(ctx,
+		"SELECT display_name FROM accounts WHERE id = ?", created.AccountID.String()).Scan(&display); err != nil {
+		t.Fatalf("讀回顯示名失敗：%v", err)
+	}
+	if display != "改名後的顯示名" {
+		t.Errorf("落庫值應為去空白後的域規範形態，實際 %q", display)
+	}
+	stored = display
+
+	var (
+		action, targetID, changes string
+		actorKind                 string
+	)
+	if err := e.db.SQL().QueryRowContext(ctx,
+		`SELECT action, target_id, actor_kind, changes_json FROM root_audit WHERE action = 'admin.profile_update'`).
+		Scan(&action, &targetID, &actorKind, &changes); err != nil {
+		t.Fatalf("讀回編輯審計失敗：%v", err)
+	}
+	if targetID != created.AccountID.String() || actorKind != string(audit.ActorRoot) {
+		t.Errorf("審計應指向被編輯的帳戶且操作者為 root，實際 %s／%s", targetID, actorKind)
+	}
+	if !strings.Contains(changes, "測試管理員") || !strings.Contains(changes, stored) {
+		t.Errorf("審計前後摘要應只有顯示名一欄的新舊值，實際 %s", changes)
+	}
+	if strings.Contains(changes, testInitialPassword) || strings.Contains(changes, "$argon2id$") ||
+		strings.Contains(changes, "password") {
+		t.Error("編輯審計不得含口令、雜湊，甚至不得出現任何憑據欄位的影子")
+	}
+	if logs := e.logs.String(); strings.Contains(logs, testInitialPassword) || strings.Contains(logs, "$argon2id$") {
+		t.Error("執行日誌不得含口令明文或憑據雜湊")
+	}
+}
+
+// TestUpdateAdminProfileConflictIsWholeEditNotHappening 併發與陳舊現值：輸家一個字都不覆蓋。
+//
+// 兩段斷言各釘一件事：單發的「期望值不符」必須回可判別衝突而不是靜默成功；
+// 同期望值的兩路並發必須恰好一個生效、審計也只留贏家一筆——
+// 這證明比較-and-set 的真相在資料庫條件裡，而不是「先查再改」的時間窗裡。
+func TestUpdateAdminProfileConflictIsWholeEditNotHappening(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	root := identitytest.Root(t, identity.OriginHTTPRequest)
+	created := e.mustCreate(t, root, "race.edit")
+	snapshot := hiddenFieldsSnapshot(t, e.db, created.AccountID.String())
+
+	if _, err := e.service.UpdateAdminProfile(ctx, root, created.AccountID,
+		"對著舊畫面保存", "根本不存在的現值", "req-stale"); !errors.Is(err, ErrProfileConflict) {
+		t.Errorf("期望值不符應回衝突結論，實際 %v", err)
+	}
+	if got := hiddenFieldsSnapshot(t, e.db, created.AccountID.String()); got != snapshot {
+		t.Error("衝突的編輯不得留下任何寫入")
+	}
+	if n := countRows(t, e.db, "root_audit"); n != 1 {
+		t.Errorf("衝突的編輯不得追加審計（此刻只該剩開設那一筆），實際 %d 筆", n)
+	}
+
+	const attempts = 6
+	var (
+		wg      sync.WaitGroup
+		mu      sync.Mutex
+		okCount int
+		bad     []error
+	)
+	wg.Add(attempts)
+	for i := 0; i < attempts; i++ {
+		go func(i int) {
+			defer wg.Done()
+			_, err := e.service.UpdateAdminProfile(ctx, root, created.AccountID,
+				fmt.Sprintf("併發改名-%d", i), "測試管理員", fmt.Sprintf("req-race-%d", i))
+			mu.Lock()
+			defer mu.Unlock()
+			if err == nil {
+				okCount++
+			} else if !errors.Is(err, ErrProfileConflict) {
+				bad = append(bad, err)
+			}
+		}(i)
+	}
+	wg.Wait()
+	if len(bad) > 0 {
+		t.Fatalf("併發編輯只該出現成功或衝突，實際 %v", bad)
+	}
+	if okCount != 1 {
+		t.Errorf("同期望值的併發編輯應恰好一個生效，實際 %d", okCount)
+	}
+	var display string
+	if err := e.db.SQL().QueryRowContext(ctx,
+		"SELECT display_name FROM accounts WHERE id = ?", created.AccountID.String()).Scan(&display); err != nil {
+		t.Fatalf("讀回顯示名失敗：%v", err)
+	}
+	if !strings.HasPrefix(display, "併發改名-") {
+		t.Errorf("贏家的值應落庫，實際 %q", display)
+	}
+	// 贏家一筆 admin.create 之外只應多一筆 admin.profile_update：落敗者不配留下事實。
+	if n := countRows(t, e.db, "root_audit"); n != 2 {
+		t.Errorf("審計應為開設 1 筆＋贏家編輯 1 筆，實際 %d 筆", n)
+	}
+}
+
+// TestUpdateAdminProfileRejectsNonRootAndNonAdmin 非 Root 與非目錄成員都碰不到編輯通路。
+func TestUpdateAdminProfileRejectsNonRootAndNonAdmin(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	root := identitytest.Root(t, identity.OriginHTTPRequest)
+	created := e.mustCreate(t, root, "edit.target")
+
+	hash, err := credential.Hash(testInitialPassword, credential.TestParams)
+	if err != nil {
+		t.Fatalf("產生測試憑據失敗：%v", err)
+	}
+	plain, err := e.service.accounts.Create(ctx, e.db.SQL(), account.NewInput{
+		LoginName: "edit.plain", DisplayName: "普通帳戶", PasswordHash: hash,
+		Type: account.TypeStandard, Status: account.StatusActive,
+	})
+	if err != nil {
+		t.Fatalf("種入普通帳戶失敗：%v", err)
+	}
+	plainSnapshot := hiddenFieldsSnapshot(t, e.db, plain.ID.String())
+
+	// 普通管理員企圖編輯 Root 目錄裡的帳戶：身分可信、權限不足。
+	if _, err := e.service.UpdateAdminProfile(ctx,
+		identitytest.Account(t, identitytest.NewID(t), identitytest.ServerAdmin()),
+		created.AccountID, "越權改名", "測試管理員", "req-forbid"); !errors.Is(err, identity.ErrPermissionDenied) {
+		t.Errorf("非 Root 編輯應被拒為權限不足，實際 %v", err)
+	}
+	// Root 本人也碰不到目錄以外的人：與「查無此人」同形，不暴露「這個人存在但沒角色」。
+	if _, err := e.service.UpdateAdminProfile(ctx, root, plain.ID,
+		"改到目錄外", "普通帳戶", "req-outside"); !errors.Is(err, ErrAdminNotFound) {
+		t.Errorf("編輯目錄外帳戶應與查無同形，實際 %v", err)
+	}
+	if got := hiddenFieldsSnapshot(t, e.db, plain.ID.String()); got != plainSnapshot {
+		t.Error("被拒的編輯不得觸碰目標行")
+	}
+	if n := countRows(t, e.db, "root_audit"); n != 1 {
+		t.Errorf("只該有開設那筆審計，實際 %d 筆", n)
+	}
+}
+
+// TestUpdateAdminProfileRejectsInvalidNames 不合規的顯示名回域結論錯誤且零寫入。
+func TestUpdateAdminProfileRejectsInvalidNames(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	root := identitytest.Root(t, identity.OriginHTTPRequest)
+	created := e.mustCreate(t, root, "edit.invalid")
+	snapshot := hiddenFieldsSnapshot(t, e.db, created.AccountID.String())
+
+	for _, tc := range []struct{ name, value string }{
+		{"空顯示名", ""},
+		{"純空白", "   "},
+		{"超長", strings.Repeat("長", maxDisplayNameRunesForTest+1)},
+		{"含控制字元", "名字\x00壞"},
+		{"含零寬格式字元", "名字\u200b壞"},
+	} {
+		if _, err := e.service.UpdateAdminProfile(ctx, root, created.AccountID,
+			tc.value, "測試管理員", "req-bad-name"); !errors.Is(err, account.ErrInvalidDisplayName) {
+			t.Errorf("%s 應被判為顯示名不合法，實際 %v", tc.name, err)
+		}
+	}
+	if got := hiddenFieldsSnapshot(t, e.db, created.AccountID.String()); got != snapshot {
+		t.Error("不合規的顯示名不得留下任何寫入")
+	}
+	if n := countRows(t, e.db, "root_audit"); n != 1 {
+		t.Errorf("不合規的編輯不得追加審計，實際 %d 筆", n)
+	}
+}
+
+// TestUpdateAdminProfileRollsBackWhenAuditCannotBeWritten 審計寫不進去＝顯示名一起回滾。
+//
+// 與開設同一強度：「Root 域改動必留痕」不是日誌級偏好，是交易級約束。
+// 順序是先開設（此時審計表還在）、再 DROP、再編輯。
+func TestUpdateAdminProfileRollsBackWhenAuditCannotBeWritten(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	root := identitytest.Root(t, identity.OriginHTTPRequest)
+	created := e.mustCreate(t, root, "edit.rollback")
+	if _, err := e.db.SQL().ExecContext(ctx, "DROP TABLE root_audit"); err != nil {
+		t.Fatalf("移除審計表失敗（測試前提）：%v", err)
+	}
+	snapshot := hiddenFieldsSnapshot(t, e.db, created.AccountID.String())
+
+	if _, err := e.service.UpdateAdminProfile(ctx, root, created.AccountID,
+		"該回滾的名字", "測試管理員", "req-rollback"); err == nil {
+		t.Fatal("審計寫入失敗時編輯必須回報失敗")
+	}
+	if got := hiddenFieldsSnapshot(t, e.db, created.AccountID.String()); got != snapshot {
+		t.Error("回滾後不得留下顯示名改動")
+	}
+}
+
+// TestUpdateAdminProfileAllowsDisabledAdmin 已禁用的管理員仍改得動顯示名：
+// 「能不能停用」不是本步的能力（狀態欄位不在白名單），但目錄必須查得到、改得動
+// 禁用者的名字——禁用帳戶的授予按遷移 0006 保留，他仍然「是目錄裡的人」。
+// 編輯前後 status 與 disabled_at 逐字不動，由隱藏欄位快照作證。
+func TestUpdateAdminProfileAllowsDisabledAdmin(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	root := identitytest.Root(t, identity.OriginHTTPRequest)
+	created := e.mustCreate(t, root, "edit.disabled")
+	if _, err := e.db.SQL().ExecContext(ctx,
+		"UPDATE accounts SET status = 'disabled', disabled_at = ? WHERE id = ?",
+		timeutil.ToMillis(e.clock.Now()), created.AccountID.String()); err != nil {
+		t.Fatalf("禁用測試帳戶失敗：%v", err)
+	}
+	snapshot := hiddenFieldsSnapshot(t, e.db, created.AccountID.String())
+
+	profile, err := e.service.UpdateAdminProfile(ctx, root, created.AccountID,
+		"禁用了也要能改名", "測試管理員", "req-disabled")
+	if err != nil {
+		t.Fatalf("編輯禁用管理員的顯示名失敗：%v", err)
+	}
+	if profile.Status != account.StatusDisabled {
+		t.Errorf("詳情與結果都該如實帶出禁用狀態，實際 %s", profile.Status)
+	}
+	if got := hiddenFieldsSnapshot(t, e.db, created.AccountID.String()); got != snapshot {
+		t.Error("編輯不得讓禁用狀態或 disabled_at 有任何位移")
+	}
+}
+
+// maxDisplayNameRunesForTest 與 internal/account 的顯示名上限同值。
+//
+// 域規則的上限在 internal/account 裡不匯出；這裡以測試重述同一個數字，
+// 若兩邊哪天不同步，這條超長用例會第一時間紅——而那正是需要看到的信號。
+const maxDisplayNameRunesForTest = 64

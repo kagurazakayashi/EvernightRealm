@@ -170,6 +170,44 @@ func (s *Store) RotatePassword(ctx context.Context, q database.Querier, id idgen
 	return n > 0, nil
 }
 
+// UpdateDisplayName 以比較-and-set 更換帳戶顯示名：只有 display_name 仍逐字等於
+// expectedDisplayName 時，才把它換成新值。
+//
+// 這是 RotatePassword 同一形的併發控制搬到了可展示資料上：
+//   - CAS 條件擋的是「對著一份舊畫面保存」——讀現值與寫新值之間哪怕只隔一個請求，
+//     後到的那筆也不會把別人剛保存好的顯示名蓋回去；changed=false 就是
+//     「你手上那份現值已經不是資料庫裡的現值」，呼叫端據此重讀再改，而不是靜默覆蓋。
+//   - 目标不存在與現值不符收斂為同一個 changed=false：呼叫端帶來的標識來自
+//     它自己剛讀到的帳戶，兩者對它意味著同一句話——「前提已失效，重來」。
+//
+// 只碰 display_name 一欄：狀態、憑據、首次改密旗標與帳戶類型不在此通路之內，
+// 「普通資料的保存不能連隱藏欄位一起覆蓋」因此成立在 SQL 語句的形狀上，
+// 不靠呼叫端自律。新值經與建立同一個顯示名校驗（域規則只有一份），
+// 落庫的是去掉首尾空白後的寫法（與 New 的入庫形態一致）。
+func (s *Store) UpdateDisplayName(ctx context.Context, q database.Querier, id idgen.ID,
+	newDisplayName, expectedDisplayName string) (bool, error) {
+	if q == nil {
+		return false, errors.New("account: 需要可用的資料庫連線或交易")
+	}
+	if id.IsNil() {
+		return false, errors.New("account: 更換顯示名必須帶帳戶標識")
+	}
+	if err := validateDisplayName(newDisplayName); err != nil {
+		return false, err
+	}
+	res, err := q.ExecContext(ctx,
+		"UPDATE accounts SET display_name = ? WHERE id = ? AND display_name = ?",
+		trimSpaces(newDisplayName), id.String(), expectedDisplayName)
+	if err != nil {
+		return false, fmt.Errorf("account: 更換顯示名失敗: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("account: 讀取更換結果失敗: %w", err)
+	}
+	return n > 0, nil
+}
+
 // selectAccountSQL 是欄位清單的唯一定義點（查詢用的欄序與 scanRow 的取值順序同源）。
 const selectAccountSQL = `SELECT id, login_name, login_name_key, display_name, password_hash,
 		account_type, status, must_change_password, created_at, last_login_at, disabled_at

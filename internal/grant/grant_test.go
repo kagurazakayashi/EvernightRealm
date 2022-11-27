@@ -239,34 +239,29 @@ func TestGrantRollsWithTransaction(t *testing.T) {
 	}
 }
 
-// TestListByRoleOrdersNewestFirstAndCaps 按角色反查：最新在前、受 limit 封頂、標識可解析。
-func TestListByRoleOrdersNewestFirstAndCaps(t *testing.T) {
-	s, db, _ := newTestStore(t)
+// TestGrantedAtReadsGrantTime 授予時刻讀得回、取自注入時鐘；查無該授予是 ErrNotFound 而不是零值靜默成功。
+func TestGrantedAtReadsGrantTime(t *testing.T) {
+	s, db, at := newTestStore(t)
 	ctx := context.Background()
+	granted := insertAccount(t, db, "standard", "granted-at")
+	plain := insertAccount(t, db, "standard", "granted-none")
 
-	// 三個帳戶、三次授予，授予時刻刻意拉开（用直寫 SQL 覆蓋倉儲的固定時鐘）。
-	ids := make([]string, 0, 3)
-	for i, login := range []string{"admin-a", "admin-b", "admin-c"} {
-		id := insertAccount(t, db, "standard", login)
-		if _, err := db.SQL().ExecContext(ctx,
-			"INSERT INTO account_server_roles (account_id, role, granted_at) VALUES (?, 'server_admin', ?)",
-			id.String(), timeutil.ToMillis(time.Now().UTC())+int64(i)); err != nil {
-			t.Fatalf("寫入授予失敗：%v", err)
-		}
-		ids = append(ids, id.String())
+	if err := s.Grant(ctx, db.SQL(), granted, identity.RoleServerAdmin); err != nil {
+		t.Fatalf("写下授予失敗：%v", err)
 	}
-	entries, err := s.ListByRole(ctx, db.SQL(), identity.RoleServerAdmin, 2)
+	got, err := s.GrantedAt(ctx, db.SQL(), granted, identity.RoleServerAdmin)
 	if err != nil {
-		t.Fatalf("反查授予失敗：%v", err)
+		t.Fatalf("讀取授予時刻失敗：%v", err)
 	}
-	if len(entries) != 2 {
-		t.Fatalf("limit 未被尊重，實際 %d 筆", len(entries))
+	if !got.Equal(at) {
+		t.Errorf("授予時刻應取自注入時鐘 %v，實際 %v", at, got)
 	}
-	if entries[0].AccountID.String() != ids[2] {
-		t.Errorf("最新一筆應排在最前，實際 %s（期望 %s）", entries[0].AccountID.String(), ids[2])
+	if _, err := s.GrantedAt(ctx, db.SQL(), plain, identity.RoleServerAdmin); !errors.Is(err, ErrNotFound) {
+		t.Errorf("無授予的帳戶應被判為 ErrNotFound，實際 %v", err)
 	}
-	if _, err := s.ListByRole(ctx, db.SQL(), identity.RoleServerAdmin, 0); err == nil {
-		t.Error("limit 非正值應被拒：它等於允許一次拉出全表")
+	// 角色不匹配同樣查無：探測的是「這個角色」的授予，不是「任何授予」。
+	if _, err := s.GrantedAt(ctx, db.SQL(), granted, identity.Role("ghost_role")); err == nil {
+		t.Error("表外角色應在進入 SQL 之前就被 requireRole 拒掉")
 	}
 }
 
@@ -282,7 +277,7 @@ func TestNilQuerierRejected(t *testing.T) {
 	if _, err := s.Roles(ctx, nil, id); err == nil {
 		t.Error("Roles 應拒 nil 連線")
 	}
-	if _, err := s.ListByRole(ctx, nil, identity.RoleServerAdmin, 10); err == nil {
-		t.Error("ListByRole 應拒 nil 連線")
+	if _, err := s.GrantedAt(ctx, nil, idgen.Nil, identity.RoleServerAdmin); err == nil {
+		t.Error("GrantedAt 應拒 nil 連線")
 	}
 }

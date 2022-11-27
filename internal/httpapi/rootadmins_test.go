@@ -9,13 +9,16 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -538,4 +541,472 @@ func envelopeOfBody(t *testing.T, body []byte) ErrorEnvelope {
 		t.Fatalf("回應應為錯誤信封，實際 %q", body)
 	}
 	return env
+}
+
+// putJSON 送一個 PUT（本體原樣交出，供畸形與攻擊用例使用）。
+func putJSON(t *testing.T, ts *httptest.Server, path, body, origin string, extra map[string]string) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPut, ts.URL+path, bytes.NewReader([]byte(body)))
+	if err != nil {
+		t.Fatalf("建立請求失敗：%v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if origin != "" {
+		req.Header.Set("Origin", origin)
+	}
+	for name, value := range extra {
+		req.Header.Set(name, value)
+	}
+	resp, err := ts.Client().Do(req)
+	if err != nil {
+		t.Fatalf("PUT %s 失敗：%v", path, err)
+	}
+	t.Cleanup(func() { resp.Body.Close() })
+	return resp
+}
+
+// sendRaw 以任意方法打任意路徑（405 分流用）。
+func sendRaw(t *testing.T, ts *httptest.Server, method, path string, cookie *http.Cookie) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest(method, ts.URL+path, nil)
+	if err != nil {
+		t.Fatalf("建立請求失敗：%v", err)
+	}
+	if cookie != nil {
+		req.Header.Set("Cookie", cookieHeader(cookie))
+	}
+	resp, err := ts.Client().Do(req)
+	if err != nil {
+		t.Fatalf("%s %s 失敗：%v", method, path, err)
+	}
+	t.Cleanup(func() { resp.Body.Close() })
+	return resp
+}
+
+// adminRowSnapshot 直讀一列帳戶的「編輯不該觸碰」欄位拼接（傳輸層攻擊探針的對照組）。
+func adminRowSnapshot(t *testing.T, db *database.DB, accountID string) string {
+	t.Helper()
+	var (
+		loginName, loginKey, passwordHash, accountType, status string
+		mustChange, createdAt, lastLoginAt, disabledAt         int64
+	)
+	err := db.SQL().QueryRowContext(context.Background(), `SELECT COALESCE(login_name,''), COALESCE(login_name_key,''),
+		COALESCE(password_hash,''), COALESCE(account_type,''), COALESCE(status,''),
+		COALESCE(must_change_password,-1), COALESCE(created_at,-1),
+		COALESCE(last_login_at,-1), COALESCE(disabled_at,-1) FROM accounts WHERE id = ?`, accountID).
+		Scan(&loginName, &loginKey, &passwordHash, &accountType, &status,
+			&mustChange, &createdAt, &lastLoginAt, &disabledAt)
+	if err != nil {
+		t.Fatalf("直讀帳戶行失敗：%v", err)
+	}
+	return loginName + "\x00" + loginKey + "\x00" + passwordHash + "\x00" + accountType + "\x00" + status +
+		"\x00" + strconv.FormatInt(mustChange, 10) + "\x00" + strconv.FormatInt(createdAt, 10) +
+		"\x00" + strconv.FormatInt(lastLoginAt, 10) + "\x00" + strconv.FormatInt(disabledAt, 10)
+}
+
+// createAdminViaAPI 用 Root 會話開一個管理員並回傳其 account_id（目錄/編輯探針的前置）。
+func createAdminViaAPI(t *testing.T, env *adminEnv, cookie *http.Cookie, login string) string {
+	t.Helper()
+	resp := createAdminRaw(t, env.ts, createAdminBody(login, "目錄測試管理員", adminTestInitialPasswd),
+		cookie, env.ts.URL, nil)
+	if resp.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("開設 %s 應成功：%d %s", login, resp.StatusCode, body)
+	}
+	created := decodeJSONBody(t, resp)
+	id, _ := created["account_id"].(string)
+	if id == "" {
+		t.Fatalf("開設回應應帶 account_id，實際 %v", created)
+	}
+	return id
+}
+
+// TestAdminDirectoryOverHTTP 目錄端點的分頁、篩選與回顯：
+// 默認值、翻頁、狀態過濾、非法參數各自的結論，以及回應不帶任何憑據材料。
+func TestAdminDirectoryOverHTTP(t *testing.T) {
+	env := newAdminEnv(t, adminTestRootPassword)
+	cookie := env.rootCookie(t)
+	ids := make([]string, 0, 3)
+	for _, login := range []string{"dir.one", "dir.two", "dir.three"} {
+		ids = append(ids, createAdminViaAPI(t, env, cookie, login))
+	}
+	// 把最早那位禁用（直寫 SQL；停用能力本身屬後續步驟，這裡只是造一個狀態不同的行）。
+	if _, err := env.db.SQL().ExecContext(context.Background(),
+		"UPDATE accounts SET status = 'disabled', disabled_at = ? WHERE id = ?",
+		time.Now().UnixMilli(), ids[0]); err != nil {
+		t.Fatalf("禁用測試帳戶失敗：%v", err)
+	}
+
+	resp := getAuth(t, env.ts, "/root/admins", cookieHeader(cookie), "", "")
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("目錄默認查詢應成功：%d %s", resp.StatusCode, body)
+	}
+	var page adminListResponse
+	if err := json.NewDecoder(resp.Body).Decode(&page); err != nil {
+		t.Fatalf("解析目錄失敗：%v", err)
+	}
+	if page.Page != 1 || page.PageSize != adminacct.DirectoryDefaultPageSize || page.Total != 3 {
+		t.Errorf("默認分頁回顯應為 1／%d／3，實際 %d／%d／%d",
+			adminacct.DirectoryDefaultPageSize, page.Page, page.PageSize, page.Total)
+	}
+	if len(page.Admins) != 3 {
+		t.Fatalf("三筆應在第一頁，實際 %d 筆", len(page.Admins))
+	}
+	// 授予倒序：最後開的在最前；每行都帶 granted_at，且沒有一行帶任何憑據欄位。
+	if page.Admins[0].AccountID != ids[2] {
+		t.Errorf("首行應是最新授予，實際 %s", page.Admins[0].AccountID)
+	}
+	for _, item := range page.Admins {
+		if item.GrantedAt == "" {
+			t.Errorf("目錄行必須帶授予時刻：%+v", item)
+		}
+	}
+
+	// 翻頁：page_size=1 的第二頁是次新的一位。
+	paged := getAuth(t, env.ts, "/root/admins?page=2&page_size=1", cookieHeader(cookie), "", "")
+	var page2 adminListResponse
+	if err := json.NewDecoder(paged.Body).Decode(&page2); err != nil {
+		t.Fatalf("解析第二頁失敗：%v", err)
+	}
+	if paged.StatusCode != http.StatusOK || page2.Total != 3 || len(page2.Admins) != 1 ||
+		page2.Admins[0].AccountID != ids[1] {
+		t.Fatalf("第二頁應恰好是次新授予者，實際 %d／%+v", page2.Total, page2.Admins)
+	}
+
+	// 狀態篩選：disabled 命中一筆，且其 total 是篩選後的筆數。
+	filtered := getAuth(t, env.ts, "/root/admins?status=disabled", cookieHeader(cookie), "", "")
+	var pageD adminListResponse
+	if err := json.NewDecoder(filtered.Body).Decode(&pageD); err != nil {
+		t.Fatalf("解析篩選頁失敗：%v", err)
+	}
+	if filtered.StatusCode != http.StatusOK || pageD.Total != 1 ||
+		len(pageD.Admins) != 1 || pageD.Admins[0].Status != "disabled" {
+		t.Fatalf("disabled 篩選應命中被禁用的那筆，實際 %d／%+v", pageD.Total, pageD.Admins)
+	}
+
+	// 超出總數的合法頁碼：空頁而非錯誤。
+	beyond := getAuth(t, env.ts, "/root/admins?page=99", cookieHeader(cookie), "", "")
+	var pageBeyond adminListResponse
+	if err := json.NewDecoder(beyond.Body).Decode(&pageBeyond); err != nil {
+		t.Fatalf("解析空頁失敗：%v", err)
+	}
+	if beyond.StatusCode != http.StatusOK || pageBeyond.Total != 3 || len(pageBeyond.Admins) != 0 {
+		t.Errorf("超出總數應回空頁與真實總數，實際 %d／%d", pageBeyond.Total, len(pageBeyond.Admins))
+	}
+
+	// 非法參數逐個點名：page 的「壞」分兩種（非數字在協定層、非法值在域層），處置同一句。
+	for _, tc := range []struct{ query, want string }{
+		{"/root/admins?page=abc", "page"},
+		{"/root/admins?page=0", "page"},
+		{"/root/admins?page_size=0", "page_size"},
+		{"/root/admins?page_size=101", "page_size"},
+		{"/root/admins?status=ghost", "status"},
+	} {
+		resp := getAuth(t, env.ts, tc.query, cookieHeader(cookie), "", "")
+		env := envelopeOf(t, resp)
+		if env.Code != CodeInvalidBody || env.Details["invalid_field"] != tc.want {
+			t.Errorf("%s 應回 1004 並點出 %q，實際 %d／%v", tc.query, tc.want, env.Code, env.Details)
+		}
+	}
+
+	// 脱敏把關：整份回應原文裡不該出現憑據欄位名、Argon2id 或任何測試口令的值
+	// （must_change_password 是合同內的可展示旗標，不在禁列；禁的是雜湊欄與明文）。
+	raw := getAuth(t, env.ts, "/root/admins", cookieHeader(cookie), "", "")
+	bodyText := readAllText(t, raw)
+	for _, forbidden := range []string{"password_hash", "argon2id", "login_name_key",
+		"disabled_at", adminTestInitialPasswd, adminTestRootPassword} {
+		if strings.Contains(bodyText, forbidden) {
+			t.Errorf("目錄回應含不该出現的材料 %q", forbidden)
+		}
+	}
+
+	// 非 Root 與未登入：與開設同一道閘、同一句處置。
+	env.livePlainAccount(t, "dir.plain", adminTestPlainPasswd)
+	plainCookie := loginCookie(t, env.loginAs(t, "dir.plain", adminTestPlainPasswd))
+	assertEnvelopeCode(t, getAuth(t, env.ts, "/root/admins", cookieHeader(plainCookie), "", ""), CodePermissionDenied)
+	assertEnvelopeCode(t, getAuth(t, env.ts, "/root/admins", "", "", ""), CodeNotAuthenticated)
+}
+
+// TestAdminProfileDetailOverHTTP 單筆詳情：成員讀得到、格式壞與非成員同形、閘外一律拒。
+func TestAdminProfileDetailOverHTTP(t *testing.T) {
+	env := newAdminEnv(t, adminTestRootPassword)
+	cookie := env.rootCookie(t)
+	id := createAdminViaAPI(t, env, cookie, "detail.http")
+	env.livePlainAccount(t, "detail.plain", adminTestPlainPasswd)
+	var plainID string
+	if err := env.db.SQL().QueryRowContext(context.Background(),
+		"SELECT id FROM accounts WHERE login_name = 'detail.plain'").Scan(&plainID); err != nil {
+		t.Fatalf("讀普通帳戶標識失敗：%v", err)
+	}
+
+	resp := getAuth(t, env.ts, "/root/admins/"+id, cookieHeader(cookie), "", "")
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("詳情應成功：%d %s", resp.StatusCode, body)
+	}
+	var detail adminProfileResponse
+	if err := json.NewDecoder(resp.Body).Decode(&detail); err != nil {
+		t.Fatalf("解析詳情失敗：%v", err)
+	}
+	if detail.Admin.AccountID != id || detail.Admin.LoginName != "detail.http" ||
+		detail.Admin.GrantedAt == "" || len(detail.Admin.Roles) != 1 ||
+		detail.Admin.Roles[0] != identity.RoleServerAdmin.String() {
+		t.Errorf("詳情欄位不正確：%+v", detail.Admin)
+	}
+	if detail.RequestID == "" {
+		t.Error("詳情應帶關聯 ID")
+	}
+
+	// 「格式壞」「不存在」「存在但非成員」三種輸入收斂成同一個 1001：探不到差異。
+	for name, path := range map[string]string{
+		"格式壞": "/root/admins/not-a-uuid",
+		"不存在": "/root/admins/00000000-0000-7000-8000-000000000000",
+		"非成員": "/root/admins/" + plainID,
+	} {
+		got := getAuth(t, env.ts, path, cookieHeader(cookie), "", "")
+		assertEnvelopeCode(t, got, CodeNotFound)
+		if got.StatusCode != http.StatusNotFound {
+			t.Errorf("%s 應為 404，實際 %d", name, got.StatusCode)
+		}
+	}
+
+	// 方法分流：單筆路徑不接受 POST（開設只在集合路徑上）。
+	notAllowed := sendRaw(t, env.ts, http.MethodPost, "/root/admins/"+id, cookie)
+	if notAllowed.StatusCode != http.StatusMethodNotAllowed {
+		t.Errorf("單筆路徑上的 POST 應為 405，實際 %d", notAllowed.StatusCode)
+	}
+	if allow := notAllowed.Header.Get("Allow"); !strings.Contains(allow, http.MethodPut) {
+		t.Errorf("405 的 Allow 應列出編輯方法，實際 %q", allow)
+	}
+
+	// 非 Root 讀詳情：2011；未登入：2002。
+	plainCookie := loginCookie(t, env.loginAs(t, "detail.plain", adminTestPlainPasswd))
+	assertEnvelopeCode(t, getAuth(t, env.ts, "/root/admins/"+id, cookieHeader(plainCookie), "", ""), CodePermissionDenied)
+	assertEnvelopeCode(t, getAuth(t, env.ts, "/root/admins/"+id, "", "", ""), CodeNotAuthenticated)
+}
+
+// TestAdminProfileEditOverHTTP 白名單編輯的傳輸層證據：成功回現值、隱藏欄位攻擊零寫入、
+// 併發回 2013、非 Root 與非成員各收各的碼。
+func TestAdminProfileEditOverHTTP(t *testing.T) {
+	env := newAdminEnv(t, adminTestRootPassword)
+	cookie := env.rootCookie(t)
+	id := createAdminViaAPI(t, env, cookie, "edit.http")
+	snapshot := adminRowSnapshot(t, env.db, id)
+
+	// 成功編輯：回應是保存後的資料庫現值（去空白形態），不是請求本體的迴音。
+	resp := putJSON(t, env.ts, "/root/admins/"+id,
+		`{"display_name":"  編輯後的顯示名  ","expected_display_name":"目錄測試管理員"}`,
+		env.ts.URL, map[string]string{"Cookie": cookieHeader(cookie)})
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("合法編輯應成功：%d %s", resp.StatusCode, body)
+	}
+	var updated adminProfileResponse
+	if err := json.NewDecoder(resp.Body).Decode(&updated); err != nil {
+		t.Fatalf("解析編輯回應失敗：%v", err)
+	}
+	if updated.Admin.DisplayName != "編輯後的顯示名" || updated.Admin.AccountID != id {
+		t.Errorf("編輯回應應回保存後的現值，實際 %+v", updated.Admin)
+	}
+	// 隱藏欄位逐字不動：憑據、狀態、旗標、類型、登入名鍵、時刻全在對照組裡。
+	if got := adminRowSnapshot(t, env.db, id); got != snapshot {
+		t.Error("編輯顯示名不得觸碰任何隱藏欄位")
+	}
+
+	// 陳舊現值：2013 且一個字都不覆蓋；回應不回顯任何一方的值。
+	stale := putJSON(t, env.ts, "/root/admins/"+id,
+		`{"display_name":"對著舊畫面保存","expected_display_name":"目錄測試管理員"}`,
+		env.ts.URL, map[string]string{"Cookie": cookieHeader(cookie)})
+	if stale.StatusCode != http.StatusConflict {
+		body, _ := io.ReadAll(stale.Body)
+		t.Fatalf("陳舊現值應為 409，實際 %d %s", stale.StatusCode, body)
+	}
+	conflictBody, err := io.ReadAll(stale.Body)
+	if err != nil {
+		t.Fatalf("讀衝突回應失敗：%v", err)
+	}
+	conflict := envelopeOfBody(t, conflictBody)
+	if conflict.Code != CodeProfileConflict {
+		t.Errorf("併發衝突應為 2013，實際 %d", conflict.Code)
+	}
+	if strings.Contains(string(conflictBody), "對著舊畫面保存") ||
+		strings.Contains(string(conflictBody), "編輯後的顯示名") {
+		t.Errorf("衝突回應不得回顯任何一方的值：%s", conflictBody)
+	}
+	if got := adminRowSnapshot(t, env.db, id); got != snapshot {
+		t.Error("衝突的編輯不得留下欄位位移")
+	}
+
+	// 隱藏欄位批量賦值攻擊：本體裡多出任何身分/安全欄位都先被未知欄位規則殺掉。
+	attacks := []string{
+		`{"display_name":"企圖清旗標","expected_display_name":"編輯後的顯示名","must_change_password":false}`,
+		`{"display_name":"企圖停用","expected_display_name":"編輯後的顯示名","status":"disabled"}`,
+		`{"display_name":"企圖改類型","expected_display_name":"編輯後的顯示名","account_type":"guest"}`,
+		`{"display_name":"企圖改登入名","expected_display_name":"編輯後的顯示名","login_name":"hijacked"}`,
+		`{"display_name":"企圖發憑據","expected_display_name":"編輯後的顯示名","password":"P@ssw0rd!"}`,
+		`{"display_name":"企圖指定人","account_id":"` + id + `","display_name":"重複鍵"}`,
+		`{"display_name":"企圖清憑據","expected_display_name":"編輯後的顯示名","password_hash":"$argon2id$x"}`,
+	}
+	for _, body := range attacks {
+		got := putJSON(t, env.ts, "/root/admins/"+id, body, env.ts.URL,
+			map[string]string{"Cookie": cookieHeader(cookie)})
+		if env := envelopeOf(t, got); env.Code != CodeInvalidBody {
+			t.Errorf("%s 應被未知欄位規則拒為 1004，實際 %d", body, env.Code)
+		}
+	}
+	if got := adminRowSnapshot(t, env.db, id); got != snapshot {
+		t.Error("被拒的賦值攻擊不得留下任何寫入")
+	}
+
+	// 空依據值：協定層當場點名（顯示名恆非空，空依據永遠比不中，報 1004 比報衝突誠實）。
+	emptyBase := putJSON(t, env.ts, "/root/admins/"+id,
+		`{"display_name":"任何新名","expected_display_name":""}`,
+		env.ts.URL, map[string]string{"Cookie": cookieHeader(cookie)})
+	if env := envelopeOf(t, emptyBase); env.Code != CodeInvalidBody ||
+		env.Details["invalid_field"] != "expected_display_name" {
+		t.Errorf("空依據值應回 1004 並點出欄位，實際 %+v", env)
+	}
+
+	// 不合規顯示名：1004 display_name。
+	badName := putJSON(t, env.ts, "/root/admins/"+id,
+		`{"display_name":"  ","expected_display_name":"編輯後的顯示名"}`,
+		env.ts.URL, map[string]string{"Cookie": cookieHeader(cookie)})
+	if env := envelopeOf(t, badName); env.Code != CodeInvalidBody ||
+		env.Details["invalid_field"] != "display_name" {
+		t.Errorf("空顯示名應回 1004 display_name，實際 %+v", env)
+	}
+
+	// 跨站來源的 PUT：與 POST 同規矩，來源策略先拒（編輯是有副作用的方法）。
+	crossSite := putJSON(t, env.ts, "/root/admins/"+id,
+		`{"display_name":"跨站企圖","expected_display_name":"編輯後的顯示名"}`,
+		"http://evil.invalid", map[string]string{"Cookie": cookieHeader(cookie)})
+	assertEnvelopeCode(t, crossSite, CodeOriginForbidden)
+
+	// 非 Root 編輯：2011；編輯非成員：1001（且與查無同形）。
+	env.livePlainAccount(t, "edit.plain", adminTestPlainPasswd)
+	plainCookie := loginCookie(t, env.loginAs(t, "edit.plain", adminTestPlainPasswd))
+	forbidden := putJSON(t, env.ts, "/root/admins/"+id,
+		`{"display_name":"普通人改目錄","expected_display_name":"編輯後的顯示名"}`,
+		env.ts.URL, map[string]string{"Cookie": cookieHeader(plainCookie)})
+	assertEnvelopeCode(t, forbidden, CodePermissionDenied)
+	var plainID string
+	if err := env.db.SQL().QueryRowContext(context.Background(),
+		"SELECT id FROM accounts WHERE login_name = 'edit.plain'").Scan(&plainID); err != nil {
+		t.Fatalf("讀普通帳戶標識失敗：%v", err)
+	}
+	plainSnapshot := adminRowSnapshot(t, env.db, plainID)
+	outside := putJSON(t, env.ts, "/root/admins/"+plainID,
+		`{"display_name":"改到目錄外","expected_display_name":"普通帳戶"}`,
+		env.ts.URL, map[string]string{"Cookie": cookieHeader(cookie)})
+	assertEnvelopeCode(t, outside, CodeNotFound)
+	if got := adminRowSnapshot(t, env.db, plainID); got != plainSnapshot {
+		t.Error("對目錄外帳戶的編輯不得留下寫入")
+	}
+
+	// 審計只多贏家們該有的筆數：成功 1 筆 admin.profile_update，其餘全數零追加。
+	var updates int
+	if err := env.db.SQL().QueryRowContext(context.Background(),
+		"SELECT COUNT(*) FROM root_audit WHERE action = 'admin.profile_update'").Scan(&updates); err != nil {
+		t.Fatalf("計數編輯審計失敗：%v", err)
+	}
+	if updates != 1 {
+		t.Errorf("只該有成功那筆編輯留下審計，實際 %d 筆", updates)
+	}
+	var changes string
+	if err := env.db.SQL().QueryRowContext(context.Background(),
+		"SELECT changes_json FROM root_audit WHERE action = 'admin.profile_update'").Scan(&changes); err != nil {
+		t.Fatalf("讀編輯審計失敗：%v", err)
+	}
+	if !strings.Contains(changes, "目錄測試管理員") || !strings.Contains(changes, "編輯後的顯示名") {
+		t.Errorf("編輯審計應帶顯示名前後值，實際 %s", changes)
+	}
+	if strings.Contains(changes, "P@ssw0rd") || strings.Contains(changes, "$argon2id$") ||
+		strings.Contains(changes, "must_change_password") {
+		t.Errorf("編輯審計不得含憑據材料或隱藏欄位的影子：%s", changes)
+	}
+}
+
+// TestAdminProfileConcurrentEditOverHTTP 同一份畫面兩路並發：恰好一個 200、另一個 2013。
+//
+// 這是傳輸層端到端的併發尾巴（域層另有 6 路版本）：證據鏈要覆蓋「從 HTTP 打進去」
+// 的那條路，否則 CAS 只在單元裡成立、中介層接錯線就查不出來。
+func TestAdminProfileConcurrentEditOverHTTP(t *testing.T) {
+	env := newAdminEnv(t, adminTestRootPassword)
+	cookie := env.rootCookie(t)
+	id := createAdminViaAPI(t, env, cookie, "race.http")
+
+	const attempts = 4
+	var (
+		wg       sync.WaitGroup
+		mu       sync.Mutex
+		okCount  int
+		conflict int
+		other    []int
+	)
+	wg.Add(attempts)
+	for i := 0; i < attempts; i++ {
+		go func(i int) {
+			defer wg.Done()
+			req, err := http.NewRequest(http.MethodPut, env.ts.URL+"/root/admins/"+id,
+				bytes.NewReader([]byte(`{"display_name":"並發改名-`+strconv.Itoa(i)+
+					`","expected_display_name":"目錄測試管理員"}`)))
+			if err != nil {
+				t.Errorf("建立併發請求失敗：%v", err)
+				return
+			}
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Cookie", cookieHeader(cookie))
+			req.Header.Set("Origin", env.ts.URL)
+			resp, err := env.ts.Client().Do(req)
+			if err != nil {
+				t.Errorf("併發 PUT 失敗：%v", err)
+				return
+			}
+			defer resp.Body.Close()
+			mu.Lock()
+			defer mu.Unlock()
+			switch resp.StatusCode {
+			case http.StatusOK:
+				okCount++
+			case http.StatusConflict:
+				conflict++
+			default:
+				other = append(other, resp.StatusCode)
+			}
+		}(i)
+	}
+	wg.Wait()
+	if len(other) > 0 {
+		t.Fatalf("併發編輯只該出現 200 或 409，實際 %v", other)
+	}
+	if okCount != 1 || conflict != attempts-1 {
+		t.Errorf("併發編輯應恰好一個生效、其餘衝突，實際 成功 %d／衝突 %d", okCount, conflict)
+	}
+	var display string
+	if err := env.db.SQL().QueryRowContext(context.Background(),
+		"SELECT display_name FROM accounts WHERE id = ?", id).Scan(&display); err != nil {
+		t.Fatalf("讀回顯示名失敗：%v", err)
+	}
+	if !strings.HasPrefix(display, "並發改名-") {
+		t.Errorf("落庫值應是贏家的提交，實際 %q", display)
+	}
+	var updates int
+	if err := env.db.SQL().QueryRowContext(context.Background(),
+		"SELECT COUNT(*) FROM root_audit WHERE action = 'admin.profile_update'").Scan(&updates); err != nil {
+		t.Fatalf("計數失敗：%v", err)
+	}
+	if updates != 1 {
+		t.Errorf("落敗者不得留下審計，實際 %d 筆", updates)
+	}
+}
+
+// readAllText 讀盡回應原文（脱敏斷言用；Body 已由 getAuth 的 Cleanup 負責關閉）。
+func readAllText(t *testing.T, resp *http.Response) string {
+	t.Helper()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("讀取回應失敗：%v", err)
+	}
+	return string(body)
 }

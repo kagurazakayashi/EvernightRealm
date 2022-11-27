@@ -150,6 +150,12 @@ var errorMessages = map[ErrorCode]map[string]string{
 		LocaleEnUS: "This login name is already taken (matching absorbs case and width variants such as full-width letters). Choose another name and submit again.",
 		LocaleJaJP: "このログイン名はすでに使用されています（比較では大小文字や全角・半角などの表記の差異が吸収されます）。別の名前を選んで再度送信してください。",
 	},
+	CodeProfileConflict: {
+		LocaleZhCN: "你要修改的资料在你打开页面之后已被他人改动，本次修改没有保存。请刷新查看最新内容，再决定要不要重新提交。",
+		LocaleZhTW: "你要修改的資料在你打開頁面之後已被他人改動，本次修改沒有保存。請重新整理查看最新內容，再決定要不要重新提交。",
+		LocaleEnUS: "The record you are editing has changed since you opened it, so this edit was not saved. Refresh to see the latest values before deciding whether to submit again.",
+		LocaleJaJP: "編集しようとした内容は、ページを開いた後で他者によって変更されていました。今回の変更は保存されていません。最新の内容を確認してから、再送信するかどうか決めてください。",
+	},
 }
 
 // messageFor 取得錯誤碼在指定語言的使用者訊息；語言未支援或訊息為空時回退 defaultLocale。

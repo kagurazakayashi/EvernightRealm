@@ -19,6 +19,7 @@ package grant
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"time"
@@ -34,17 +35,6 @@ import (
 // 它與資料庫故障刻意分開：呼叫端拿账户標識來查，查不到多半是競態的尾巴
 // （帳戶在另一筆交易裡被物理刪除），屬可解釋的業務結論；查不了才是需要報錯的缺陷。
 var ErrNotFound = errors.New("grant: 找不到對應的授予")
-
-// Entry 是一筆授予的讀取結果：誰被授予、何時写下。
-//
-// 不含角色欄位：呼叫它的方式是「按某個角色反查」，清單裡每一行的角色就是那個查詢條件，
-// 再存一份只会多出一個可以與查詢不一致的事實。
-type Entry struct {
-	// AccountID 為被授予角色的帳戶標識。
-	AccountID idgen.ID
-	// GrantedAt 為授予写下的時刻（UTC；落庫為 Unix 毫秒）。
-	GrantedAt time.Time
-}
 
 // Store 是授予的持久倉儲。
 type Store struct {
@@ -131,55 +121,34 @@ func (s *Store) Roles(ctx context.Context, q database.Querier, accountID idgen.I
 	return identity.NewServerGrantsFromStrings(values...)
 }
 
-// ListByRole 按角色反查被授予的帳戶，依授予時刻倒序、至多 limit 筆。
+// GrantedAt 讀回「某帳戶的某角色是何時授予的」；查無該授予回 ErrNotFound。
 //
-// 存在的理由只有一個：「伺服器級管理員有哪些」這句話需要一個由資料庫說出口的來源。
-// limit 必為正值——本方法服務的是確認用的最小列表，不是一個可以一次拉出全表的口子；
-// 「沒有上限」在一個會長期增長的表上等於把回應體大小交給資料量決定。
-//
-// 只回傳授予事實（帳戶標識、時刻），不回傳帳戶資料：登入名與狀態屬 internal/account，
-// 由呼叫端按標識讀回（見 internal/adminacct 的列表用例）。兩張表各自只由自己的倉儲解釋，
-// 才不会出現「同一個欄位有兩份讀法、其中一份繞過了實體校驗」。
-func (s *Store) ListByRole(ctx context.Context, q database.Querier,
-	role identity.Role, limit int) ([]Entry, error) {
+// 存在的理由只有一件：單筆管理員資料要如實講出「他是什麼時候變成管理員的」，
+// 而這句話的權威只在授予表裡。倉儲不猜：查無就是查無，呼叫端不得拿
+// 「帳戶建立時刻」冒充「授予時刻」——那兩者本来就可能不同生。
+func (s *Store) GrantedAt(ctx context.Context, q database.Querier,
+	accountID idgen.ID, role identity.Role) (time.Time, error) {
 	if q == nil {
-		return nil, errors.New("grant: 需要可用的資料庫連線或交易")
+		return time.Time{}, errors.New("grant: 需要可用的資料庫連線或交易")
+	}
+	if accountID.IsNil() {
+		return time.Time{}, fmt.Errorf("%w：查詢授予時刻必須帶帳戶標識", ErrNotFound)
 	}
 	if err := requireRole(role); err != nil {
-		return nil, err
+		return time.Time{}, err
 	}
-	if limit <= 0 {
-		return nil, fmt.Errorf("grant: ListByRole 的 limit 必須為正值，實際 %d", limit)
+	var grantedAt int64
+	err := q.QueryRowContext(ctx,
+		"SELECT granted_at FROM account_server_roles WHERE account_id = ? AND role = ?",
+		accountID.String(), string(role)).Scan(&grantedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return time.Time{}, fmt.Errorf("%w：帳戶 %s 未持有角色 %s",
+			ErrNotFound, accountID, role)
 	}
-	rows, err := q.QueryContext(ctx, `SELECT account_id, granted_at FROM account_server_roles
-		WHERE role = ? ORDER BY granted_at DESC, account_id DESC LIMIT ?`,
-		string(role), limit)
 	if err != nil {
-		return nil, fmt.Errorf("grant: 讀取授予清單失敗: %w", err)
+		return time.Time{}, fmt.Errorf("grant: 讀取授予時刻失敗: %w", err)
 	}
-	defer rows.Close()
-
-	var entries []Entry
-	for rows.Next() {
-		var (
-			idText    string
-			grantedAt int64
-		)
-		if err := rows.Scan(&idText, &grantedAt); err != nil {
-			return nil, fmt.Errorf("grant: 讀取授予清單列失敗: %w", err)
-		}
-		id, err := idgen.Parse(idText)
-		if err != nil {
-			// 標識讀不回來代表資料庫被繞過校驗寫入了東西，或執行檔比資料庫舊：
-			// 靜默跳過會讓那一筆授予在介面上徹底消失。
-			return nil, fmt.Errorf("grant: 授予的帳戶標識無法解析（%s）: %w", redactID(idText), err)
-		}
-		entries = append(entries, Entry{AccountID: id, GrantedAt: timeutil.FromMillis(grantedAt)})
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("grant: 讀取授予清單失敗: %w", err)
-	}
-	return entries, nil
+	return timeutil.FromMillis(grantedAt), nil
 }
 
 // requireRole 用 identity 唯一的角色入口复核一次角色：這裡不另寫一份「合法角色清單」。
@@ -192,14 +161,4 @@ func requireRole(role identity.Role) error {
 		return err
 	}
 	return nil
-}
-
-// redactID 把無法解析的標識縮成前綴：它不是秘密，但把一整段任意文字原樣帶進錯誤訊息，
-// 等於讓資料庫內容直接決定日誌的長度與形狀。
-func redactID(value string) string {
-	r := []rune(value)
-	if len(r) > 8 {
-		return string(r[:8]) + "…"
-	}
-	return value
 }
