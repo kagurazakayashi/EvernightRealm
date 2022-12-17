@@ -513,8 +513,45 @@ func TestRevokeSubjectScopesCorrectly(t *testing.T) {
 	}
 }
 
-// TestRevokeAllRootSessionsIsMaintenanceOnly 釘住本機維護用的撤銷入口（口令遺失後
-// 拿不出 RootProof，因此換不到 Subject）：它只動 Root 名下未撤銷的行，
+// TestRevokeAccountTargetsOnlyItself 釘住停用用例依賴的帳戶定向撤銷入口：
+// 只動目標帳戶名下的行，Root 與其他帳戶的會話一条都不碰；零值標識在 Exec 前就被拒——
+// 「忘了帶條件」在這裡不可能退化成「撤光全服」。
+func TestRevokeAccountTargetsOnlyItself(t *testing.T) {
+	db, clock, store := newTestEnv(t, time.Hour)
+	ctx := context.Background()
+	root := identitytest.Root(t, identity.OriginHTTPRequest)
+	_, rootSecret := mustCreate(t, store, db, root)
+
+	_, aliceP := createAccountDirect(t, db, clock, "alice")
+	_, aliceSecret1 := mustCreate(t, store, db, aliceP)
+	_, aliceSecret2 := mustCreate(t, store, db, aliceP)
+	_, bobP := createAccountDirect(t, db, clock, "bob")
+	_, bobSecret := mustCreate(t, store, db, bobP)
+
+	if n, err := store.RevokeAccount(ctx, db.SQL(), aliceP.AccountID()); err != nil || n != 2 {
+		t.Fatalf("alice 撤銷應為 2 筆，實際 %d（%v）", n, err)
+	}
+	if n, err := store.RevokeAccount(ctx, db.SQL(), aliceP.AccountID()); err != nil || n != 0 {
+		t.Fatalf("重複撤銷應為 0 筆，實際 %d（%v）", n, err)
+	}
+	for _, s := range []string{aliceSecret1, aliceSecret2} {
+		if _, err := store.Verify(ctx, db.SQL(), s); !errors.Is(err, ErrRevoked) {
+			t.Errorf("alice 會話應已被撤銷，實際 %v", err)
+		}
+	}
+	if _, err := store.Verify(ctx, db.SQL(), bobSecret); err != nil {
+		t.Errorf("bob 會話不應被波及：%v", err)
+	}
+	if _, err := store.Verify(ctx, db.SQL(), rootSecret); err != nil {
+		t.Errorf("Root 會話不應被帳戶撤銷波及：%v", err)
+	}
+	// 零值標識拒絕而不是「撤掉 account_id 為 NULL 的行」（Root 行正是 NULL）。
+	if _, err := store.RevokeAccount(ctx, db.SQL(), idgen.ID{}); !errors.Is(err, ErrInvalidSubject) {
+		t.Errorf("零值標識應回 ErrInvalidSubject，實際 %v", err)
+	}
+}
+
+// TestRevokeAllRootSessionsIsMaintenanceOnly 釘住本機維護用的撤銷入口（口令遺失後// 拿不出 RootProof，因此換不到 Subject）：它只動 Root 名下未撤銷的行，
 // 且與 RevokeSubject 共用同一套最終態語意（已到期但尚未清理的行照樣寫 revoked_at）。
 func TestRevokeAllRootSessionsIsMaintenanceOnly(t *testing.T) {
 	db, clock, store := newTestEnv(t, time.Hour)

@@ -41,10 +41,11 @@ var testBase = time.Date(2026, 10, 2, 9, 0, 0, 0, time.UTC)
 
 // env 是一次測試的完整現場：本次專屬的暫存庫與注入時鐘，加上組好的開設用例。
 type env struct {
-	db      *database.DB
-	clock   *timeutil.Test
-	logs    *bytes.Buffer
-	service *Service
+	db       *database.DB
+	clock    *timeutil.Test
+	logs     *bytes.Buffer
+	sessions *session.Store
+	service  *Service
 }
 
 // newEnv 建立現場。口令雜湊用 credential.TestParams（低成本檔）：
@@ -70,18 +71,23 @@ func newEnv(t *testing.T) *env {
 		t.Fatalf("套用遷移失敗：%v", err)
 	}
 	var logs bytes.Buffer
+	sessions, err := session.NewStoreWithPolicy(clock, time.Hour, session.Policy{})
+	if err != nil {
+		t.Fatalf("建立會話倉儲失敗：%v", err)
+	}
 	service, err := New(Deps{
 		DB:       db,
 		Accounts: account.NewStore(clock),
 		Grants:   grant.NewStore(clock),
 		Audits:   audit.NewStore(clock),
+		Sessions: sessions,
 		Hashing:  credential.TestParams,
 		Log:      slog.New(slog.NewTextHandler(&logs, nil)),
 	})
 	if err != nil {
 		t.Fatalf("建立開設用例失敗：%v", err)
 	}
-	return &env{db: db, clock: clock, logs: &logs, service: service}
+	return &env{db: db, clock: clock, logs: &logs, sessions: sessions, service: service}
 }
 
 // newAuthService 在同一現場組出登入用例，供「開出來的帳戶真能登入」這條閉環使用。
@@ -747,13 +753,15 @@ func TestNewRejectsMissingDeps(t *testing.T) {
 	e := newEnv(t)
 	valid := Deps{
 		DB: e.db, Accounts: e.service.accounts, Grants: e.service.grants,
-		Audits: audit.NewStore(e.clock), Hashing: credential.TestParams,
+		Audits: audit.NewStore(e.clock), Sessions: e.sessions,
+		Hashing: credential.TestParams,
 	}
 	for _, mutate := range []func(*Deps){
 		func(d *Deps) { d.DB = nil },
 		func(d *Deps) { d.Accounts = nil },
 		func(d *Deps) { d.Grants = nil },
 		func(d *Deps) { d.Audits = nil },
+		func(d *Deps) { d.Sessions = nil },
 	} {
 		deps := valid
 		mutate(&deps)
@@ -762,7 +770,8 @@ func TestNewRejectsMissingDeps(t *testing.T) {
 		}
 	}
 	if _, err := New(Deps{DB: e.db, Accounts: e.service.accounts, Grants: e.service.grants,
-		Audits: audit.NewStore(e.clock), Hashing: credential.Params{}}); err == nil {
+		Audits: audit.NewStore(e.clock), Sessions: e.sessions,
+		Hashing: credential.Params{}}); err == nil {
 		t.Error("全零參數檔應被拒：它無法產生可用的憑據")
 	}
 }

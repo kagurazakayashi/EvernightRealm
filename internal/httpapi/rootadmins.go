@@ -1,6 +1,7 @@
 // rootadmins.go 是「Root 對伺服器級管理員的目錄性操作」的傳輸層落點：
 // /root/admins 一個路徑做兩件事（GET／HEAD 分頁目錄、POST 開設），
-// /root/admins/{account_id} 一個路徑做兩件事（GET／HEAD 單筆詳情、PUT 編輯非安全資料）。
+// /root/admins/{account_id} 一個路徑做兩件事（GET／HEAD 單筆詳情、PUT 編輯非安全資料），
+// /root/admins/{account_id}/status 一條路徑做一件事（PUT 停用或恢復登入，唯一白名單欄位是狀態）。
 //
 // 這個檔案刻意只做協定層該做的四件事，一條領域規則都不寫在這裡：
 //  1. 來源（CSRF）判定與憑據解析——逐字複用 allowRequestOrigin＋resolveCredentials，
@@ -59,6 +60,10 @@ type RootAdminUseCase interface {
 	// 提交所依據的現值，兩者不符時整個編輯不發生並回衝突結論。
 	UpdateAdminProfile(ctx context.Context, principal identity.Principal,
 		accountID idgen.ID, displayName, expectedDisplayName, requestID string) (adminacct.Profile, error)
+	// UpdateAdminStatus 停用或恢復一名目錄內管理員的登入狀態；expectedStatus 是呼叫端
+	// 提交所依據的現狀，不符時狀態、會話撤銷、審計一件都不發生並回衝突結論。
+	UpdateAdminStatus(ctx context.Context, principal identity.Principal,
+		accountID idgen.ID, in adminacct.StatusChangeInput, requestID string) (adminacct.StatusChange, error)
 }
 
 // createAdminRequest 是開設請求的本體。只有這三個欄位可用：
@@ -76,6 +81,14 @@ type createAdminRequest struct {
 type updateAdminProfileRequest struct {
 	DisplayName         string `json:"display_name"`
 	ExpectedDisplayName string `json:"expected_display_name"`
+}
+
+// updateAdminStatusRequest 是停用／恢復請求的本體。白名單只有狀態一欄，外加它所依據的現狀：
+// 這裡沒有顯示名、憑據、旗標或原因文本的格子（未知欄位 1004）——「停用在協定層不順手改資料、
+// 恢復在協定層不清首次改密義務」成立在同一條理由上：動哪一欄由端點與白名單決定。
+type updateAdminStatusRequest struct {
+	Status         string `json:"status"`
+	ExpectedStatus string `json:"expected_status"`
 }
 
 // createdAdminResponse 是開設成功的回應本體。
@@ -106,6 +119,8 @@ type adminItem struct {
 	LastLoginAt string `json:"last_login_at,omitempty"`
 	// GrantedAt 為 server_admin 授予寫下的時刻；目錄行與詳情都恆有（成員資格本身就是授予）。
 	GrantedAt string `json:"granted_at"`
+	// DisabledAt 為進入禁用狀態的時刻；active 時欄位缺席（不拿零值冒充「停過又沒停」）。
+	DisabledAt string `json:"disabled_at,omitempty"`
 	// Roles 為該帳戶經服務端核實持有的角色；僅單筆回應帶出——
 	// 目錄的每一行本來就是按授予查出來的，逐行重複一份同一個字串不回答任何新問題。
 	Roles []string `json:"roles,omitempty"`
@@ -132,6 +147,18 @@ type adminProfileResponse struct {
 	RequestID string    `json:"request_id"`
 }
 
+// adminStatusResponse 是 PUT /root/admins/{account_id}/status 的回應本體。
+//
+// admin 同則是「變更之後的資料庫現值」；revoked_sessions 是這次落庫的撤銷數量，
+// 存在的理由只有一件：界面要能如實說出「這次讓 N 臺裝置重新登入」，
+// 而不是讓 Root 對著一句「已停用」猜影響範圍。恢復時這個數恆為 0——
+// 「不復活停用前會話」不需要一句安慰話，它需要一個永遠不增撤的計數。
+type adminStatusResponse struct {
+	Admin           adminItem `json:"admin"`
+	RevokedSessions int       `json:"revoked_sessions"`
+	RequestID       string    `json:"request_id"`
+}
+
 // rootAdminEndpoints 回傳管理員目錄端點登記清單；未注入用例時為空。
 //
 // 與 auth 端點同一個來源、同一個有無判定：登記與否只這一處，
@@ -143,11 +170,15 @@ func (s *Server) rootAdminEndpoints() []apiRoute {
 	// 同一路徑上方法決定做哪件事：分流都發生在各自 handle 的第一層，
 	// 拆成多條路徑樣式反而會多出「幾個端點共用一份授權語意」的維護點。
 	// {account_id} 匹配恰好一個路徑段；多出的段落到 catch-all，回 JSON 的 1001。
+	// /status 是單欄（status）的子資源：狀態這種安全欄位與顯示名那種普通資料
+	// 各有自己的白名單與確認語意，不共寫同一次 PUT。
 	return []apiRoute{
 		{"/root/admins", s.allowMethods(s.handleRootAdmins,
 			http.MethodGet, http.MethodHead, http.MethodPost)},
 		{"/root/admins/{account_id}", s.allowMethods(s.handleRootAdmin,
 			http.MethodGet, http.MethodHead, http.MethodPut)},
+		{"/root/admins/{account_id}/status", s.allowMethods(s.handleRootAdminStatus,
+			http.MethodPut)},
 	}
 }
 
@@ -415,6 +446,97 @@ func (s *Server) writeUpdateAdminFailure(w http.ResponseWriter, r *http.Request,
 	}
 }
 
+// handleRootAdminStatus 處理 PUT /root/admins/{account_id}/status：停用或恢復登入。
+//
+// 這條子路徑只有 PUT 一個方法（allowMethods 已登記，其餘方法回 1002 帶 Allow）：
+// 「動狀態」在協定層就只有一個入口，GET 詳情本來就在父路徑上，不在這裡開第二份讀法。
+func (s *Server) handleRootAdminStatus(w http.ResponseWriter, r *http.Request) {
+	principal, ok := s.rootAdminPrincipal(w, r)
+	if !ok {
+		return
+	}
+	id, err := idgen.Parse(r.PathValue("account_id"))
+	if err != nil {
+		writeError(w, r, CodeNotFound, http.StatusNotFound)
+		return
+	}
+	var in updateAdminStatusRequest
+	if !decodeJSON(w, r, &in) {
+		return
+	}
+	// 兩個欄位都必須落在封閉集合內：值取自 internal/account 的常數（字面值只有一份）。
+	// 非法值当场 1004 點名欄位，不帶進用例——那是拼寫問題，不是併發問題。
+	newStatus, expectedStatus, badField := parseAdminStatusPair(in)
+	if badField != "" {
+		writeErrorDetails(w, r, CodeInvalidBody, http.StatusBadRequest,
+			map[string]any{"invalid_field": badField})
+		return
+	}
+	// 新舊同值是一次必然寫不出新事實的請求（見 account.Store.SetStatus 的域不变量），
+	// 在這裡點名比回 2014 誠實：資料庫根本還不需要被問到。
+	if newStatus == expectedStatus {
+		writeErrorDetails(w, r, CodeInvalidBody, http.StatusBadRequest,
+			map[string]any{"invalid_field": "status"})
+		return
+	}
+	changed, err := s.admins.UpdateAdminStatus(r.Context(), principal, id,
+		adminacct.StatusChangeInput{NewStatus: newStatus, ExpectedStatus: expectedStatus},
+		requestIDFromRequest(r))
+	if err != nil {
+		s.writeUpdateAdminStatusFailure(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, adminStatusResponse{
+		Admin:           profileItem(changed.Profile),
+		RevokedSessions: changed.RevokedSessions,
+		RequestID:       requestIDFromRequest(r),
+	})
+}
+
+// parseAdminStatusPair 把請求的字串欄位換成帳戶狀態枚舉；任何一侧不合格時
+// 回傳要點名的欄位名（「status」或「expected_status」），兩侧都缺就點新目標那一側。
+func parseAdminStatusPair(in updateAdminStatusRequest) (newStatus, expectedStatus account.Status, badField string) {
+	newStatus = account.Status(in.Status)
+	expectedStatus = account.Status(in.ExpectedStatus)
+	switch {
+	case in.ExpectedStatus == "":
+		return "", "", "expected_status"
+	case !isKnownAccountStatus(newStatus):
+		return "", "", "status"
+	case !isKnownAccountStatus(expectedStatus):
+		return "", "", "expected_status"
+	}
+	return newStatus, expectedStatus, ""
+}
+
+// isKnownAccountStatus 回報狀態值是否落在帳戶域的封閉集合內。
+// 比較对象取自 internal/account 的常數而不是就地抄字面值：枚舉的真相只有一份。
+func isKnownAccountStatus(s account.Status) bool {
+	return s == account.StatusActive || s == account.StatusDisabled
+}
+
+// writeUpdateAdminStatusFailure 把停用／恢復用例的錯誤對映為對外回應。
+//
+// 每一句的處置都不同，所以各是各的碼：1004 要人改寫法、2014 要人重讀目標現狀
+// 再重新確認、1001 是目標根本不在目錄、2011 是主體不對——混成一句，
+// 客戶端就只剩「再點一次按鈕」這把錘子，而對 2014 來說再點一次恰恰是最壞的處置。
+func (s *Server) writeUpdateAdminStatusFailure(w http.ResponseWriter, r *http.Request, err error) {
+	switch {
+	case errors.Is(err, adminacct.ErrInvalidStatusChange):
+		writeErrorDetails(w, r, CodeInvalidBody, http.StatusBadRequest,
+			map[string]any{"invalid_field": "status"})
+	case errors.Is(err, adminacct.ErrStatusConflict):
+		writeError(w, r, CodeAdminStatusConflict, http.StatusConflict)
+	case errors.Is(err, adminacct.ErrAdminNotFound):
+		writeError(w, r, CodeNotFound, http.StatusNotFound)
+	case errors.Is(err, identity.ErrPermissionDenied):
+		writeError(w, r, CodePermissionDenied, http.StatusForbidden)
+	default:
+		s.logger.Error("變更管理員狀態失敗", "request_id", requestIDFromRequest(r), "err", err)
+		writeError(w, r, CodeUnknown, http.StatusInternalServerError)
+	}
+}
+
 // directoryItem 把目錄的一行投影成回應本體（欄位白名單見 internal/adminacct/directory.go）。
 func directoryItem(row adminacct.DirectoryRow) adminItem {
 	item := adminItem{
@@ -446,6 +568,9 @@ func profileItem(p adminacct.Profile) adminItem {
 	}
 	if !p.LastLoginAt.IsZero() {
 		item.LastLoginAt = timeutil.FormatUTC(p.LastLoginAt)
+	}
+	if !p.DisabledAt.IsZero() {
+		item.DisabledAt = timeutil.FormatUTC(p.DisabledAt)
 	}
 	return item
 }

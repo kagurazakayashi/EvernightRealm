@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -570,5 +571,113 @@ func TestUpdateDisplayNameCAS(t *testing.T) {
 	}
 	if got, err := store.ByID(ctx, db.SQL(), a.ID); err != nil || got.DisplayName != "更名後的顯示" {
 		t.Errorf("拒絕路徑動到了顯示名：%+v err=%v", got, err)
+	}
+}
+
+// TestSetStatusCAS 狀態變更的比較-and-set：只碰 status 與 disabled_at 兩欄。
+//
+// 與 RotatePasswordCAS 同形，但斷言對象是「安全欄位的同生同滅」：
+// disabled 必然帶注入時鐘的時刻、active 必然把時刻清回 NULL，憑據與旗標
+// 整行其餘欄位逐字不動——「停用在 SQL 形狀上不順手清別旗標」的直接證據。
+func TestSetStatusCAS(t *testing.T) {
+	store, db, at := newTestStore(t)
+	ctx := context.Background()
+	a, err := store.Create(ctx, db.SQL(), standardInput("cas_status"))
+	if err != nil {
+		t.Fatalf("建立測試帳戶失敗：%v", err)
+	}
+	// 除 status/disabled_at 外的整行直讀拼接：任何一次狀態寫入都不該動到它。
+	otherCols := func() string {
+		t.Helper()
+		var (
+			id, loginName, loginKey, displayName, accountType string
+			passwordHash                                      string
+			mustChange, createdAt, lastLoginAt                int64
+		)
+		err := db.SQL().QueryRowContext(ctx, `SELECT
+				id, login_name, login_name_key, display_name,
+				COALESCE(password_hash,''), account_type,
+				must_change_password, created_at, COALESCE(last_login_at,0)
+			FROM accounts WHERE id = ?`, a.ID.String()).
+			Scan(&id, &loginName, &loginKey, &displayName, &passwordHash,
+				&accountType, &mustChange, &createdAt, &lastLoginAt)
+		if err != nil {
+			t.Fatalf("直讀帳戶行失敗：%v", err)
+		}
+		return strings.Join([]string{
+			id, loginName, loginKey, displayName, passwordHash, accountType,
+			strconv.FormatInt(mustChange, 10), strconv.FormatInt(createdAt, 10),
+			strconv.FormatInt(lastLoginAt, 10),
+		}, "\x00")
+	}
+	frozen := otherCols()
+
+	// 輸入不合格在 Exec 之前擋下：表外值、同值變更、零值標識、nil 連線。
+	for name, call := range map[string]func() (bool, error){
+		"表外新狀態":  func() (bool, error) { return store.SetStatus(ctx, db.SQL(), a.ID, Status("ghost"), StatusActive) },
+		"表外預期狀態": func() (bool, error) { return store.SetStatus(ctx, db.SQL(), a.ID, StatusDisabled, Status("ghost")) },
+		"同值變更":   func() (bool, error) { return store.SetStatus(ctx, db.SQL(), a.ID, StatusActive, StatusActive) },
+		"零值標識":   func() (bool, error) { return store.SetStatus(ctx, db.SQL(), idgen.ID{}, StatusDisabled, StatusActive) },
+		"nil 連線": func() (bool, error) { return store.SetStatus(ctx, nil, a.ID, StatusDisabled, StatusActive) },
+	} {
+		if changed, err := call(); err == nil || changed {
+			t.Errorf("%s：應回報錯誤且未寫入（changed=%v err=%v）", name, changed, err)
+		}
+	}
+	if got := otherCols(); got != frozen {
+		t.Error("被擋的輸入不得留下任何欄位位移")
+	}
+
+	// 預期現值不符：changed=false、行逐字不動（呼叫端手上的舊畫面不是現值）。
+	if changed, err := store.SetStatus(ctx, db.SQL(), a.ID, StatusActive, StatusDisabled); err != nil || changed {
+		t.Errorf("現值不符應回 changed=false 且無錯誤：%v %v", changed, err)
+	}
+	if got := otherCols(); got != frozen {
+		t.Error("落空的 CAS 不得留下任何欄位位移")
+	}
+
+	// 命中：disabled 帶注入時鐘的時刻；其餘欄位原封不動。
+	if changed, err := store.SetStatus(ctx, db.SQL(), a.ID, StatusDisabled, StatusActive); err != nil || !changed {
+		t.Fatalf("CAS 命中時應回 changed=true：%v %v", changed, err)
+	}
+	got, err := store.ByID(ctx, db.SQL(), a.ID)
+	if err != nil {
+		t.Fatalf("讀回失敗：%v", err)
+	}
+	if got.Status != StatusDisabled || !got.DisabledAt.Equal(at) {
+		t.Errorf("落庫形態應為 disabled 帶時鐘時刻，實際 %s/%v", got.Status, got.DisabledAt)
+	}
+	if got.PasswordHash != testHash || !got.MustChangePassword || got.Type != TypeStandard ||
+		got.LoginName != "cas_status" {
+		t.Errorf("狀態通路不得觸碰憑據、旗標與類型：%+v", got)
+	}
+	if snap := otherCols(); snap != frozen {
+		t.Error("除 status/disabled_at 外的欄位必須逐字不動")
+	}
+
+	// 重複打同一個陳舊依據：第二次什麼都不發生。
+	if changed, err := store.SetStatus(ctx, db.SQL(), a.ID, StatusDisabled, StatusActive); err != nil || changed {
+		t.Errorf("陳舊依據應回 changed=false：%v %v", changed, err)
+	}
+
+	// 回到 active：disabled_at 清回 NULL（同生同滅由資料庫 CHECK 兜底，形態在這裡釘死）。
+	if changed, err := store.SetStatus(ctx, db.SQL(), a.ID, StatusActive, StatusDisabled); err != nil || !changed {
+		t.Fatalf("恢復的 CAS 命中應回 changed=true：%v %v", changed, err)
+	}
+	got, err = store.ByID(ctx, db.SQL(), a.ID)
+	if err != nil {
+		t.Fatalf("讀回失敗：%v", err)
+	}
+	if got.Status != StatusActive || !got.DisabledAt.IsZero() {
+		t.Errorf("恢復後應是 active 且不帶停用時刻，實際 %s/%v", got.Status, got.DisabledAt)
+	}
+
+	// 查無此人收斂為 changed=false（與 RotatePasswordCAS 同一句話）。
+	ghostID, err := idgen.New()
+	if err != nil {
+		t.Fatalf("產生測試標識失敗：%v", err)
+	}
+	if changed, err := store.SetStatus(ctx, db.SQL(), ghostID, StatusDisabled, StatusActive); err != nil || changed {
+		t.Errorf("幽靈帳戶應回 changed=false：%v %v", changed, err)
 	}
 }

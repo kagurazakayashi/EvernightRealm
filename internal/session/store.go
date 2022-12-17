@@ -457,6 +457,27 @@ func (s *Store) RevokeSubject(ctx context.Context, q database.Querier, subject S
 	return int(n), nil
 }
 
+// RevokeAccount 撤销某个帳戶名下全部未撤销的會話，回傳撤销數量。
+//
+// 它是 RevokeSubject 的帳戶定向變體，存在的理由與 RevokeAllRootSessions 同構：
+// 呼叫端（Root 的管理員停用用例）手裡拿到的是「要停用哪個帳戶」這個標識，
+// 而那個帳戶此刻還不是它的受信主體——Subject 的欄位不匯出，透過「先給目標造一個
+// Principal 再換 Subject」湊路子上線，等於在撤銷通路上多養一條身分構造鏈。
+// 這裡直接把主體凍結為「這個帳戶」：kind 恆為 account、標識必須非零值，
+// 呼叫端沒有可以填錯成 Root 或別人的東西。
+//
+// 語意邊界：撤销是「讓停用生效後沒有任何會話还能換出身份」的執行手段，
+// 不等於帳戶狀態的變更（那是 accounts 表的事實，屬 internal/account）。
+// 因此本方法必須與狀態寫入落在同一個交易裡才完整——單獨呼叫它是「把人還啟用著
+// 卻踢光他的裝置」，那條流程不屬於任何已批准的用例。第二次呼叫回 0 而不是錯誤：
+// 沒有未撤销的行就沒有要撤销的東西，與 RevokeAllRootSessions 同口徑。
+func (s *Store) RevokeAccount(ctx context.Context, q database.Querier, accountID idgen.ID) (int, error) {
+	if accountID.IsNil() {
+		return 0, fmt.Errorf("%w：撤銷帳戶會話必須帶帳戶標識", ErrInvalidSubject)
+	}
+	return s.RevokeSubject(ctx, q, Subject{kind: SubjectAccount, accountID: accountID})
+}
+
 // RevokeAllRootSessions 撤銷 Root 主體名下全部未撤銷的會話，回傳撤銷數量。
 //
 // 這是 RevokeSubject 的本機維護變體，存在的理由只有一件事：口令遺失後的憑據恢復

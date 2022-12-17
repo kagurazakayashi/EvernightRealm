@@ -105,6 +105,7 @@ func newAdminEnv(t *testing.T, rootPassword string) *adminEnv {
 		Accounts: accountsStore,
 		Grants:   grantsStore,
 		Audits:   auditStore,
+		Sessions: sessions,
 		Hashing:  credential.TestParams,
 	})
 	if err != nil {
@@ -1009,4 +1010,330 @@ func readAllText(t *testing.T, resp *http.Response) string {
 		t.Fatalf("讀取回應失敗：%v", err)
 	}
 	return string(body)
+}
+
+// TestRootDisableAndRestoreAdminOverHTTP 停用→失效→恢復的完整時間線，全程走真 HTTP 鏈。
+//
+// 这一段證據釘四件事，每一件都對應本步對外承諾的一句：
+//   - 停用的實際效果不是列表上的一個標籤：舊會話的下一條請求就收到 2003，
+//     新登入收到與其他拒絕同形的 2001；
+//   - 恢復只恢復新登入能力：停用前簽發的兩份會話永遠打不開（revoked_at 已落庫），
+//     而首次改密義務原封不動地等著這個人（2010 門閂仍在）；
+//   - 重複操作回的是可判別的 2014，不是第二次「成功」；
+//   - 回應原文裡沒有一個格子可能含憑據材料。
+func TestRootDisableAndRestoreAdminOverHTTP(t *testing.T) {
+	env := newAdminEnv(t, adminTestRootPassword)
+	rootCookie := env.rootCookie(t)
+	id := createAdminViaAPI(t, env, rootCookie, "stop.e2e")
+	cookieA := loginCookie(t, env.loginAs(t, "stop.e2e", adminTestInitialPasswd))
+	cookieB := loginCookie(t, env.loginAs(t, "stop.e2e", adminTestInitialPasswd))
+
+	statusPath := "/root/admins/" + id + "/status"
+	putStatus := func(body string) *http.Response {
+		return putJSON(t, env.ts, statusPath, body, env.ts.URL,
+			map[string]string{"Cookie": cookieHeader(rootCookie)})
+	}
+
+	resp := putStatus(`{"status":"disabled","expected_status":"active"}`)
+	if resp.StatusCode != http.StatusOK {
+		text := readAllText(t, resp)
+		t.Fatalf("停用應成功：%d %s", resp.StatusCode, text)
+	}
+	var change adminStatusResponse
+	if err := json.NewDecoder(resp.Body).Decode(&change); err != nil {
+		t.Fatalf("解析停用回應失敗：%v", err)
+	}
+	if change.Admin.Status != "disabled" || change.Admin.DisabledAt == "" {
+		t.Errorf("回應應是變更後的現值（disabled 帶時刻），實際 %+v", change.Admin)
+	}
+	if change.RevokedSessions != 2 {
+		t.Errorf("停用應回報撤銷了兩份會話，實際 %d", change.RevokedSessions)
+	}
+
+	// 舊會話立即失效：兩份都換不出身分（解析在門閂與授權之前）。
+	for name, cookie := range map[string]*http.Cookie{"會話A": cookieA, "會話B": cookieB} {
+		got := getAuth(t, env.ts, "/root/admins", cookieHeader(cookie), "", "")
+		assertEnvelopeCode(t, got, CodeSessionInvalid)
+		if got.StatusCode != http.StatusUnauthorized {
+			t.Errorf("%s 停用後應收到 401，實際 %d", name, got.StatusCode)
+		}
+	}
+	// 新登入被拒，且與其他登入拒絕同形：不指出「這個帳戶被鎖了」。
+	denied := env.loginAs(t, "stop.e2e", adminTestInitialPasswd)
+	assertEnvelopeCode(t, denied, CodeInvalidCredentials)
+
+	// 重複停用：呼叫端那份「他還活著」的依據已不是現值。
+	dup := putStatus(`{"status":"disabled","expected_status":"active"}`)
+	assertEnvelopeCode(t, dup, CodeAdminStatusConflict)
+	if dup.StatusCode != http.StatusConflict {
+		t.Errorf("重複停用應為 409，實際 %d", dup.StatusCode)
+	}
+
+	// 恢復：只回復新登入能力。
+	reEnabled := putStatus(`{"status":"active","expected_status":"disabled"}`)
+	if reEnabled.StatusCode != http.StatusOK {
+		text := readAllText(t, reEnabled)
+		t.Fatalf("恢復應成功：%d %s", reEnabled.StatusCode, text)
+	}
+	var restored adminStatusResponse
+	if err := json.NewDecoder(reEnabled.Body).Decode(&restored); err != nil {
+		t.Fatalf("解析恢復回應失敗：%v", err)
+	}
+	if restored.Admin.Status != "active" || restored.Admin.DisabledAt != "" {
+		t.Errorf("恢復後應是 active 且不帶停用時刻，實際 %+v", restored.Admin)
+	}
+	if restored.RevokedSessions != 0 {
+		t.Errorf("恢復不該撤銷任何會話，實際 %d", restored.RevokedSessions)
+	}
+	// 停用前的兩份會話不復活。
+	for name, cookie := range map[string]*http.Cookie{"會話A": cookieA, "會話B": cookieB} {
+		got := getAuth(t, env.ts, "/root/admins", cookieHeader(cookie), "", "")
+		assertEnvelopeCode(t, got, CodeSessionInvalid)
+		if got.StatusCode != http.StatusUnauthorized {
+			t.Errorf("恢復後 %s 仍應是 401（不復活），實際 %d", name, got.StatusCode)
+		}
+	}
+	// 必須重新登入；首次改密義務還在（2010，而不是放行）。
+	relogin := env.loginAs(t, "stop.e2e", adminTestInitialPasswd)
+	if relogin.StatusCode != http.StatusOK {
+		text := readAllText(t, relogin)
+		t.Fatalf("恢復後新登入應成功：%d %s", relogin.StatusCode, text)
+	}
+	gated := getAuth(t, env.ts, "/root/admins", cookieHeader(loginCookie(t, relogin)), "", "")
+	assertEnvelopeCode(t, gated, CodePasswordChangeRequired)
+	// 恢復後的目錄現值：status=disabled 篩選不再有他，all 有他。
+	all := getAuth(t, env.ts, "/root/admins?status=disabled", cookieHeader(rootCookie), "", "")
+	if text := readAllText(t, all); strings.Contains(text, id) {
+		t.Error("恢復後該帳戶不應仍出現在 disabled 篩選裡")
+	}
+}
+
+// TestAdminStatusInputAndAttackSurface 狀態子資源的輸入閘與攻擊面。
+//
+// 每一段擋的是不同來路的壞輸入：同值與表外值是拼寫問題（1004 點名欄位）、
+// 未知欄位是本體企圖（1004 且零寫入）、格式不對的標識與目錄外的標識同回 1001
+// （端點不是列舉探針）、方法不對回 405。全部路徑都不得動目標帳戶一行。
+func TestAdminStatusInputAndAttackSurface(t *testing.T) {
+	env := newAdminEnv(t, adminTestRootPassword)
+	rootCookie := env.rootCookie(t)
+	id := createAdminViaAPI(t, env, rootCookie, "stop.input")
+	snapshot := adminRowSnapshot(t, env.db, id)
+	statusPath := "/root/admins/" + id + "/status"
+
+	for name, body := range map[string]string{
+		"同值停用":  `{"status":"disabled","expected_status":"disabled"}`,
+		"同值恢復":  `{"status":"active","expected_status":"active"}`,
+		"表外新狀態": `{"status":"ghost","expected_status":"active"}`,
+		"表外依據":  `{"status":"disabled","expected_status":"ghost"}`,
+		"缺依據":   `{"status":"disabled"}`,
+		"空依據":   `{"status":"disabled","expected_status":""}`,
+	} {
+		resp := putJSON(t, env.ts, statusPath, body, env.ts.URL,
+			map[string]string{"Cookie": cookieHeader(rootCookie)})
+		env2 := envelopeOf(t, resp)
+		if env2.Code != CodeInvalidBody {
+			t.Errorf("%s 應回 1004，實際 %d", name, env2.Code)
+		}
+	}
+
+	// 隱藏欄位批量賦值：狀態請求企圖順手改憑據／改名／清旗標，全部當場拒殺。
+	for name, body := range map[string]string{
+		"順帶口令":   `{"status":"disabled","expected_status":"active","password":"x"}`,
+		"順帶改名":   `{"status":"disabled","expected_status":"active","display_name":"被順手改了"}`,
+		"順帶旗標":   `{"status":"disabled","expected_status":"active","must_change_password":false}`,
+		"順帶類型":   `{"status":"disabled","expected_status":"active","account_type":"guest"}`,
+		"自報原因文本": `{"status":"disabled","expected_status":"active","reason":"隨意的文字"}`,
+	} {
+		resp := putJSON(t, env.ts, statusPath, body, env.ts.URL,
+			map[string]string{"Cookie": cookieHeader(rootCookie)})
+		if code := envelopeOf(t, resp).Code; code != CodeInvalidBody {
+			t.Errorf("%s：未知欄位企圖應被 1004 拒殺，實際 %d", name, code)
+		}
+	}
+	if got := adminRowSnapshot(t, env.db, id); got != snapshot {
+		t.Error("被拒的狀態請求不得動目標帳戶任何一欄")
+	}
+
+	// 標識形態與目錄外標識同回 1001：格式錯、幽靈、未授予者，外界分不出差別。
+	for name, path := range map[string]string{
+		"格式不對": "/root/admins/not-a-uuid/status",
+		"幽靈標識": "/root/admins/0192f0c4-1c9a-7c3e-9a1b-2f4d6e8a0b1c/status",
+	} {
+		resp := putJSON(t, env.ts, path, `{"status":"disabled","expected_status":"active"}`,
+			env.ts.URL, map[string]string{"Cookie": cookieHeader(rootCookie)})
+		assertEnvelopeCode(t, resp, CodeNotFound)
+		if resp.StatusCode != http.StatusNotFound {
+			t.Errorf("%s 應為 404，實際 %d", name, resp.StatusCode)
+		}
+	}
+	// 存在的普通帳戶（未授予）：同形 1001，狀態通路不回答「這是不是人」。
+	env.livePlainAccount(t, "plain.ungranted", adminTestPlainPasswd)
+	var plainID string
+	if err := env.db.SQL().QueryRowContext(context.Background(),
+		"SELECT id FROM accounts WHERE login_name = ?", "plain.ungranted").Scan(&plainID); err != nil {
+		t.Fatalf("讀普通帳戶標識失敗：%v", err)
+	}
+	resp := putJSON(t, env.ts, "/root/admins/"+plainID+"/status",
+		`{"status":"disabled","expected_status":"active"}`, env.ts.URL,
+		map[string]string{"Cookie": cookieHeader(rootCookie)})
+	assertEnvelopeCode(t, resp, CodeNotFound)
+
+	// 方法分流：子資源只認 PUT；GET 落 405 且 Allow 如實。
+	notAllowed := sendRaw(t, env.ts, http.MethodGet, statusPath, rootCookie)
+	assertEnvelopeCode(t, notAllowed, CodeMethodNotAllowed)
+	if allow := notAllowed.Header.Get("Allow"); !strings.Contains(allow, http.MethodPut) {
+		t.Errorf("405 的 Allow 應列出 PUT，實際 %q", allow)
+	}
+
+	// 成功回應原文脱敏：沒有憑據、內部鍵或口令的影子。
+	ok := putJSON(t, env.ts, statusPath, `{"status":"disabled","expected_status":"active"}`,
+		env.ts.URL, map[string]string{"Cookie": cookieHeader(rootCookie)})
+	text := readAllText(t, ok)
+	for _, forbidden := range []string{"password_hash", "argon2id", "login_name_key", adminTestInitialPasswd} {
+		if strings.Contains(text, forbidden) {
+			t.Errorf("狀態回應不得含 %q", forbidden)
+		}
+	}
+}
+
+// TestAdminStatusAuthorizationMatrix 停用/恢復只屬 Root：其他主體各自收到哪一句。
+//
+// 「管理員停用其他管理員」在本步被明確關在門外——普通管理員帶著完成改密的
+// 有效會話拿到的是 2011（處置是「別再試」），而不是可以被重新登入繞過的 2002/2003。
+func TestAdminStatusAuthorizationMatrix(t *testing.T) {
+	env := newAdminEnv(t, adminTestRootPassword)
+	rootCookie := env.rootCookie(t)
+	victimID := createAdminViaAPI(t, env, rootCookie, "stop.victim")
+	statusPath := "/root/admins/" + victimID + "/status"
+
+	env.livePlainAccount(t, "plain.matrix", adminTestPlainPasswd)
+	plainCookie := loginCookie(t, env.loginAs(t, "plain.matrix", adminTestPlainPasswd))
+
+	peerID := createAdminViaAPI(t, env, rootCookie, "stop.peer")
+	peerCookie := loginCookie(t, env.loginAs(t, "stop.peer", adminTestInitialPasswd))
+	if resp := postJSON(t, env.ts, "/auth/password/change",
+		`{"current_password":"`+adminTestInitialPasswd+`","new_password":"`+adminTestChangedPasswd+`"}`,
+		"", map[string]string{"Cookie": cookieHeader(peerCookie)}); resp.StatusCode != http.StatusOK {
+		t.Fatalf("同級管理員改密失敗：%d", resp.StatusCode)
+	}
+	peerCookie = loginCookie(t, env.loginAs(t, "stop.peer", adminTestChangedPasswd))
+	// 先確認這位同級確實「是目錄裡的人」：他能讀自己的詳情路徑（非 Root 得到 2011，
+	// 說明請求已活著走到授權判定），而不是被憑據問題擋在門外。
+	if got := getAuth(t, env.ts, "/root/admins/"+peerID, cookieHeader(peerCookie), "", ""); envelopeOf(t, got).Code != CodePermissionDenied {
+		t.Fatal("同級管理員的會話應有效（判定落在權限而不是憑據）")
+	}
+
+	for name, cookie := range map[string]*http.Cookie{
+		"普通帳戶":  plainCookie,
+		"普通管理員": peerCookie,
+	} {
+		resp := putJSON(t, env.ts, statusPath, `{"status":"disabled","expected_status":"active"}`,
+			env.ts.URL, map[string]string{"Cookie": cookieHeader(cookie)})
+		assertEnvelopeCode(t, resp, CodePermissionDenied)
+		if resp.StatusCode != http.StatusForbidden {
+			t.Errorf("%s 停用同級應為 403，實際 %d", name, resp.StatusCode)
+		}
+	}
+	// 匿名來源：先問憑據，不是先談權限。
+	resp := putJSON(t, env.ts, statusPath, `{"status":"disabled","expected_status":"active"}`, "", nil)
+	assertEnvelopeCode(t, resp, CodeNotAuthenticated)
+
+	// 越權嘗試不得留下一行變更或一筆審計。
+	var status string
+	if err := env.db.SQL().QueryRowContext(context.Background(),
+		"SELECT status FROM accounts WHERE id = ?", victimID).Scan(&status); err != nil {
+		t.Fatalf("讀回狀態失敗：%v", err)
+	}
+	if status != "active" {
+		t.Errorf("被拒的越權停用不得改變狀態，實際 %s", status)
+	}
+	var audits int
+	if err := env.db.SQL().QueryRowContext(context.Background(),
+		"SELECT COUNT(*) FROM root_audit WHERE action IN ('admin.disable','admin.enable')").Scan(&audits); err != nil {
+		t.Fatalf("計數審計失敗：%v", err)
+	}
+	if audits != 0 {
+		t.Errorf("被拒的狀態變更不得寫入 Root 審計，實際 %d 筆", audits)
+	}
+}
+
+// TestAdminStatusConcurrentHTTPEditsExactlyOneWin 並發停用的最終裁定在資料庫：
+// 四路同依據的 HTTP 併發恰好一次 200，其餘 409，審計只有一筆「admin.disable」。
+// 贏家之前已經完成的寫入（例如開設本身）不許倒退——狀態行與審計計數一起作證。
+func TestAdminStatusConcurrentHTTPEditsExactlyOneWin(t *testing.T) {
+	env := newAdminEnv(t, adminTestRootPassword)
+	rootCookie := env.rootCookie(t)
+	id := createAdminViaAPI(t, env, rootCookie, "stop.http-race")
+	// 停用前先完成一次「明確發生的操作」（本人改密）：停用不得讓它倒退。
+	cookie := loginCookie(t, env.loginAs(t, "stop.http-race", adminTestInitialPasswd))
+	if resp := postJSON(t, env.ts, "/auth/password/change",
+		`{"current_password":"`+adminTestInitialPasswd+`","new_password":"`+adminTestChangedPasswd+`"}`,
+		"", map[string]string{"Cookie": cookieHeader(cookie)}); resp.StatusCode != http.StatusOK {
+		t.Fatalf("目標改密失敗：%d", resp.StatusCode)
+	}
+
+	statusPath := "/root/admins/" + id + "/status"
+	const attempts = 4
+	var (
+		wg       sync.WaitGroup
+		mu       sync.Mutex
+		okCount  int
+		conflict int
+		other    []int
+	)
+	wg.Add(attempts)
+	for i := 0; i < attempts; i++ {
+		go func() {
+			defer wg.Done()
+			req, err := http.NewRequest(http.MethodPut, env.ts.URL+statusPath,
+				bytes.NewReader([]byte(`{"status":"disabled","expected_status":"active"}`)))
+			if err != nil {
+				t.Errorf("建立併發請求失敗：%v", err)
+				return
+			}
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Cookie", cookieHeader(rootCookie))
+			req.Header.Set("Origin", env.ts.URL)
+			resp, err := env.ts.Client().Do(req)
+			if err != nil {
+				t.Errorf("併發 PUT 失敗：%v", err)
+				return
+			}
+			defer resp.Body.Close()
+			mu.Lock()
+			defer mu.Unlock()
+			switch resp.StatusCode {
+			case http.StatusOK:
+				okCount++
+			case http.StatusConflict:
+				conflict++
+			default:
+				other = append(other, resp.StatusCode)
+			}
+		}()
+	}
+	wg.Wait()
+	if okCount != 1 || conflict != attempts-1 {
+		t.Errorf("併發停用應恰好一次生效、其餘衝突，實際 成功 %d／衝突 %d／其餘 %v", okCount, conflict, other)
+	}
+	var audits int
+	if err := env.db.SQL().QueryRowContext(context.Background(),
+		"SELECT COUNT(*) FROM root_audit WHERE action = 'admin.disable'").Scan(&audits); err != nil {
+		t.Fatalf("計數失敗：%v", err)
+	}
+	if audits != 1 {
+		t.Errorf("落敗者不得留下審計，實際 %d 筆", audits)
+	}
+
+	// 「已完成的操作不倒退」的正面證據：停用前本人已改密的結果，
+	// 在停用發生後仍然有效——恢復之後用新口令能登入、一次性舊口令被拒。
+	// 若停用把那次改密「倒退」了，這兩句會立刻反轉。
+	if resp := putJSON(t, env.ts, statusPath, `{"status":"active","expected_status":"disabled"}`,
+		env.ts.URL, map[string]string{"Cookie": cookieHeader(rootCookie)}); resp.StatusCode != http.StatusOK {
+		t.Fatalf("併發後的恢復應成功：%d", resp.StatusCode)
+	}
+	if resp := env.loginAs(t, "stop.http-race", adminTestChangedPasswd); resp.StatusCode != http.StatusOK {
+		t.Errorf("停用不該讓本人先前完成的改密倒退，新口令登入應成功，實際 %d", resp.StatusCode)
+	}
+	assertEnvelopeCode(t, env.loginAs(t, "stop.http-race", adminTestInitialPasswd), CodeInvalidCredentials)
 }

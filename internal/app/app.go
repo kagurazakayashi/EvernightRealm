@@ -548,6 +548,9 @@ func run(ctx context.Context, releaseSignals func(), args []string, out io.Write
 		Accounts: accountsStore,
 		Grants:   grantsStore,
 		Audits:   auditStore,
+		// 停用用例在同一交易裡撤銷目標會話：與登入用例必須是同一個會話倉儲實例，
+		// 否則「撤銷落庫的形態」與「驗證讀到的形態」會各長一套。
+		Sessions: sessionStore,
 		Hashing:  hashingParams,
 		Log:      lg.Logger,
 	})

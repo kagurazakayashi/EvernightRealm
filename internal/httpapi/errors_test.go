@@ -373,6 +373,7 @@ func TestErrorMessagesCoverAllLocales(t *testing.T) {
 		CodeAuthMethodConflict, CodeOriginForbidden, CodeLoginThrottled, CodeSessionStale,
 		CodeDeviceLimitReached, CodeDeviceNotFound, CodePasswordChangeRequired,
 		CodePermissionDenied, CodeLoginNameTaken, CodeProfileConflict,
+		CodeAdminStatusConflict,
 	}
 	for _, code := range published {
 		if _, ok := errorMessages[code]; !ok {

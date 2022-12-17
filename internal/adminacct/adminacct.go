@@ -1,6 +1,7 @@
 // Package adminacct 是「Root 對伺服器級管理員帳戶的目錄性操作」的應用服務層：
 // 開設（憑據派生 → 帳戶建立 → 角色授予 → 審計落地的原子用例）、
-// 目錄分頁與單筆詳情、非安全資料（顯示名）的白名單編輯。
+// 目錄分頁與單筆詳情、非安全資料（顯示名）的白名單編輯、
+// 登入能力的停用與恢復（狀態 CAS ＋同交易撤銷目標會話＋審計）。
 //
 // 為什麼獨立成一個套件而不是放進 internal/auth：auth 回答的是「憑據換身份、身份換會話」，
 // 本套件回答的是「一個可登入主體如何被創造、被查到、被改名字」。兩者共用的只有
@@ -41,6 +42,7 @@ import (
 	"github.com/kagurazakayashi/EvernightRealm/internal/grant"
 	"github.com/kagurazakayashi/EvernightRealm/internal/identity"
 	"github.com/kagurazakayashi/EvernightRealm/internal/idgen"
+	"github.com/kagurazakayashi/EvernightRealm/internal/session"
 )
 
 // 對外可判別的結論錯誤：傳輸層據此分流回應，內部故障一律不進這些型別。
@@ -102,6 +104,9 @@ type Deps struct {
 	Grants *grant.Store
 	// Audits 是 Root 域審計倉儲。
 	Audits *audit.Store
+	// Sessions 是會話倉儲：停用用例在同一交易裡撤銷目標的全部會話，
+	// 這是「恢復登入不復活停用前會話」這句話的執行手段（見 status.go）。
+	Sessions *session.Store
 	// Hashing 是當前參數檔（與登入、Root 初始化同一來源）。
 	Hashing credential.Params
 	// Log 為伺服器端記錄出口；nil 時丟棄。
@@ -114,6 +119,7 @@ type Service struct {
 	accounts *account.Store
 	grants   *grant.Store
 	audits   *audit.Store
+	sessions *session.Store
 	hashing  credential.Params
 	log      *slog.Logger
 }
@@ -121,10 +127,13 @@ type Service struct {
 // New 校驗依賴並建立服務。
 //
 // 缺任何一個依賴都是組裝缺陷，在啟動階段當場報出：少授予倉儲就開不出「有角色的人」，
-// 少審計倉儲就開出一個不留痕的特權變更——後者正是審計要防的那件事。
+// 少審計倉儲就開出一個不留痕的特權變更——後者正是審計要防的那件事；
+// 少會話倉儲則停用會落一個「狀態改了、舊會話卻還活著」的半套結果，
+// 那比不停用更危險。
 func New(deps Deps) (*Service, error) {
-	if deps.DB == nil || deps.Accounts == nil || deps.Grants == nil || deps.Audits == nil {
-		return nil, errors.New("adminacct: 開設用例缺少必要依賴（db/accounts/grants/audits）")
+	if deps.DB == nil || deps.Accounts == nil || deps.Grants == nil ||
+		deps.Audits == nil || deps.Sessions == nil {
+		return nil, errors.New("adminacct: 用例缺少必要依賴（db/accounts/grants/audits/sessions）")
 	}
 	if err := deps.Hashing.Validate(); err != nil {
 		return nil, fmt.Errorf("adminacct: 憑據雜湊參數檔不合格: %w", err)
@@ -138,6 +147,7 @@ func New(deps Deps) (*Service, error) {
 		accounts: deps.Accounts,
 		grants:   deps.Grants,
 		audits:   deps.Audits,
+		sessions: deps.Sessions,
 		hashing:  deps.Hashing,
 		log:      logger,
 	}, nil

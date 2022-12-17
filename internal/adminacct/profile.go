@@ -56,8 +56,10 @@ type Profile struct {
 	LoginName string
 	// DisplayName 為顯示名稱。
 	DisplayName string
-	// Status 為帳戶狀態（只讀展示；停用屬後續步驟）。
+	// Status 為帳戶狀態（只讀展示；停用與恢復經 UpdateAdminStatus 白名單通路）。
 	Status account.Status
+	// DisabledAt 為進入禁用狀態的時刻；active 時恆為零值（資料庫 NULL）。
+	DisabledAt time.Time
 	// MustChangePassword 為是否仍欠首次改密（只讀展示）。
 	MustChangePassword bool
 	// Roles 為該帳戶在目錄語境下被核實持有的角色。
@@ -185,6 +187,7 @@ func (s *Service) readProfile(ctx context.Context, q database.Querier, accountID
 		LoginName:          a.LoginName,
 		DisplayName:        a.DisplayName,
 		Status:             a.Status,
+		DisabledAt:         a.DisabledAt,
 		MustChangePassword: a.MustChangePassword,
 		Roles:              []identity.Role{identity.RoleServerAdmin},
 		CreatedAt:          a.CreatedAt,

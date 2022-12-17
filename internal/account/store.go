@@ -208,6 +208,59 @@ func (s *Store) UpdateDisplayName(ctx context.Context, q database.Querier, id id
 	return n > 0, nil
 }
 
+// SetStatus 以比較-and-set 變更帳戶的啟用狀態：只有 status 仍逐字等於
+// expectedStatus 時，才寫入新狀態；進入 disabled 時由注入時鐘補上 disabled_at，
+// 回到 active 時一併清回 NULL。
+//
+// 與 RotatePassword、UpdateDisplayName 同一形的併發控制，但擋的物件不同：
+// 那兩條挡的是「對著舊畫面保存資料」，這條挡的是「對著名義上還活著的人下停用令，
+// 實際上他已被別人停用（或根本已被改過）」。狀態是安全欄位，變更的正當性
+// 只能錨在「你看见的那一刻它是什麼」上——先查後寫假裝窗口不存在，
+// 就會出現兩個 Root 各發一次停用、第二次被說成又撤销了一輪會話的假成功。
+//
+// 三條域不变量在落庫前當場校驗，不接受呼叫端把資料庫推入 CHECK 才會擋的形態：
+//   - 兩個狀態值都必須落在封閉集合內（active|disabled）；
+//   - 新舊狀態必須不同：同值的「變更」沒有新事實可寫，且會把 disabled_at
+//     與 status 的同生同滅关系推向自相矛盾的寫法（例如 active 帶時刻）；
+//   - disabled 與 disabled_at 同生同滅（與遷移 0003 的跨欄 CHECK 同口徑），
+//     時刻的唯一來源是注入時鐘，呼叫端無法代填「何時停的」。
+//
+// 目標不存在與現值不符收斂為同一個 changed=false：呼叫端帶來的標識與現值
+// 都來自它自己剛讀到的帳戶，兩者對它意味著同一句話——「前提已失效，重讀再說」。
+// 只碰 status 與 disabled_at 兩欄：憑據、首次改密旗標與帳戶類型不在此通路之內，
+// 「停用不順手清別旗標」因此成立在 SQL 語句的形狀上，不靠呼叫端自律。
+func (s *Store) SetStatus(ctx context.Context, q database.Querier, id idgen.ID,
+	newStatus, expectedStatus Status) (bool, error) {
+	if q == nil {
+		return false, errors.New("account: 需要可用的資料庫連線或交易")
+	}
+	if id.IsNil() {
+		return false, errors.New("account: 變更狀態必須帶帳戶標識")
+	}
+	if !newStatus.valid() || !expectedStatus.valid() {
+		return false, fmt.Errorf("account: 不認識的帳戶狀態 %q/%q（可用 active|disabled）",
+			string(newStatus), string(expectedStatus))
+	}
+	if newStatus == expectedStatus {
+		return false, fmt.Errorf("account: 新舊狀態同為 %q，沒有可變更為的事實", string(newStatus))
+	}
+	disabledAt := any(nil)
+	if newStatus == StatusDisabled {
+		disabledAt = timeutil.ToMillis(s.clock.Now())
+	}
+	res, err := q.ExecContext(ctx,
+		"UPDATE accounts SET status = ?, disabled_at = ? WHERE id = ? AND status = ?",
+		string(newStatus), disabledAt, id.String(), string(expectedStatus))
+	if err != nil {
+		return false, fmt.Errorf("account: 變更帳戶狀態失敗: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("account: 讀取變更結果失敗: %w", err)
+	}
+	return n > 0, nil
+}
+
 // selectAccountSQL 是欄位清單的唯一定義點（查詢用的欄序與 scanRow 的取值順序同源）。
 const selectAccountSQL = `SELECT id, login_name, login_name_key, display_name, password_hash,
 		account_type, status, must_change_password, created_at, last_login_at, disabled_at

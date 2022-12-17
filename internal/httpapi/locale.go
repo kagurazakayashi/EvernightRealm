@@ -156,6 +156,12 @@ var errorMessages = map[ErrorCode]map[string]string{
 		LocaleEnUS: "The record you are editing has changed since you opened it, so this edit was not saved. Refresh to see the latest values before deciding whether to submit again.",
 		LocaleJaJP: "編集しようとした内容は、ページを開いた後で他者によって変更されていました。今回の変更は保存されていません。最新の内容を確認してから、再送信するかどうか決めてください。",
 	},
+	CodeAdminStatusConflict: {
+		LocaleZhCN: "这名管理员的登录状态在你打开页面之后已经改变，本次停用或恢复没有执行。请刷新目录查看最新状态，再决定要不要重新确认。",
+		LocaleZhTW: "這名管理員的登入狀態在你打開頁面之後已經改變，本次停用或恢復沒有執行。請重新整理目錄查看最新狀態，再決定要不要重新確認。",
+		LocaleEnUS: "This administrator's sign-in status changed after you opened the page, so this disable or restore was not carried out. Refresh the directory to see the latest status before confirming again.",
+		LocaleJaJP: "この管理者のログイン状態は、ページを開いた後で変更されていました。今回の停止または再開は実行されていません。一覧を更新して最新の状態を確認したうえで、もう一度実行するかどうか決めてください。",
+	},
 }
 
 // messageFor 取得錯誤碼在指定語言的使用者訊息；語言未支援或訊息為空時回退 defaultLocale。
