@@ -170,6 +170,55 @@ func (s *Store) RotatePassword(ctx context.Context, q database.Querier, id idgen
 	return n > 0, nil
 }
 
+// SetPassword 以强制替换更換帳戶憑據：把 password_hash 換成新雜湊，並在兩欄
+// 唯一被觸碰的 UPDATE 裡同步把 must_change_password 設回 1（重置後的口令是
+// 一次性的，下次登入必須改掉）。
+//
+// 它與 RotatePassword 是同一張表上的兩條不同授權通路，而不是彼此的重用：
+// RotatePassword 的 CAS 錨點是「現行雜湊」，那驗證的是「本人交得出現行口令」；
+// 強制替換的發起人（Root 重置他人口令）拿不出也不該拿出該雜湊——「拿不出舊口令」
+// 恰恰是这次操作存在的理由。因此本方法不做任何「舊值是什麼」的比對，
+// 只把形状閘（validatePasswordHash，與入庫同一道）留在倉儲層；
+// 「誰有資格對誰強制換口令」是使用例（internal/adminacct）經 NeedRoot 與
+// 目錄成員資格判定的事，倉儲不假裝認識主體。
+//
+// 沒有 CAS 不等於沒有併發語意：SQLite 單寫入者把每次重置串行化，每次提交都是
+// 「換哈希＋清旗標＋撤會話（由使用例同交易完成）」的整筆事實；後到的重置覆蓋
+// 先前的哈希是既定順序的事實，不是半套狀態。
+//
+// UPDATE 只碰 password_hash 與 must_change_password 兩欄：status、disabled_at、
+// 顯示名與各類時刻都不在語句裡——「重置不是解除停用、不是改名、不是復活」
+// 成立在 SQL 形狀上，不靠呼叫端自律。
+//
+// 零行命中（changed=false 且無錯誤）代表目標行不存在：呼叫端通常已在同一交易
+// 核實過成員資格，走到 false 只剩併發刪除或程式缺陷，兩者都該讓交易回滾而不是
+// 把「一個字沒寫」報成重置成功。訪客帳戶被遷移 0003 的 CHECK 凍結為
+// 「無哈希、無旗標」：本方法對它必然落庫失敗，目錄裡也不存在訪客（授予觸發器
+// 擋過），這條失敗是雙重閘的後一道。
+func (s *Store) SetPassword(ctx context.Context, q database.Querier, id idgen.ID,
+	newHash string) (bool, error) {
+	if q == nil {
+		return false, errors.New("account: 需要可用的資料庫連線或交易")
+	}
+	if id.IsNil() {
+		return false, errors.New("account: 強制更換憑據必須帶目標標識")
+	}
+	if err := validatePasswordHash(newHash); err != nil {
+		return false, err
+	}
+	res, err := q.ExecContext(ctx,
+		"UPDATE accounts SET password_hash = ?, must_change_password = 1 WHERE id = ?",
+		newHash, id.String())
+	if err != nil {
+		return false, fmt.Errorf("account: 強制更換帳戶憑據失敗: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("account: 讀取更換結果失敗: %w", err)
+	}
+	return n > 0, nil
+}
+
 // UpdateDisplayName 以比較-and-set 更換帳戶顯示名：只有 display_name 仍逐字等於
 // expectedDisplayName 時，才把它換成新值。
 //

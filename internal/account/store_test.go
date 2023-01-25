@@ -681,3 +681,113 @@ func TestSetStatusCAS(t *testing.T) {
 		t.Errorf("幽靈帳戶應回 changed=false：%v %v", changed, err)
 	}
 }
+
+// TestSetPasswordForcedReplacement 強制換哈希的通路形態：沒有 CAS 錨點、
+// 同一條 UPDATE 把旗標設回 1、只碰 password_hash 與 must_change_password 兩欄。
+//
+// 斷言對象與 RotatePasswordCAS 刻意相反的那一半：這裡要釘死「重複打也是整筆」——
+// 沒有依據值可陳舊，第二次調用仍是一次完整的置換（後到的哈希是既定事實），
+// 而「重置不是解除停用」由 status/disabled_at 逐字不動作證。
+func TestSetPasswordForcedReplacement(t *testing.T) {
+	store, db, _ := newTestStore(t)
+	ctx := context.Background()
+	a, err := store.Create(ctx, db.SQL(), standardInput("force_hash"))
+	if err != nil {
+		t.Fatalf("建立測試帳戶失敗：%v", err)
+	}
+	const replacementHash = "$argon2id$v=19$m=65536,t=3,p=4$c2FsdA$Zm9yY2VkcmVwbGFjZW1lbnQ"
+	const anotherHash = "$argon2id$v=19$m=65536,t=3,p=4$c2FsdA$Zm9yY2VkZm9yYmVjMG5k"
+
+	// 先把「欠改密」清償掉（借本人改密那條 UPDATE 的同语句清旗标能力）：
+	// 旗標落 0，重置通路才有東西把它設回 1。同值換同值是合法置換，重點在旗標。
+	if changed, err := store.RotatePassword(ctx, db.SQL(), a.ID, testHash, testHash); err != nil || !changed {
+		t.Fatalf("清償旗標失敗：%v", err)
+	}
+	// 除 password_hash/must_change_password 外的整行直讀拼接：置換通路不該動到它。
+	otherCols := func() string {
+		t.Helper()
+		var (
+			id, loginName, loginKey, displayName, accountType, status string
+			disabledAt                                                int64
+			createdAt, lastLoginAt                                    int64
+		)
+		err := db.SQL().QueryRowContext(ctx, `SELECT
+				id, login_name, login_name_key, display_name,
+				account_type, status, created_at,
+				COALESCE(last_login_at,0), COALESCE(disabled_at,0)
+			FROM accounts WHERE id = ?`, a.ID.String()).
+			Scan(&id, &loginName, &loginKey, &displayName,
+				&accountType, &status, &createdAt, &lastLoginAt, &disabledAt)
+		if err != nil {
+			t.Fatalf("直讀帳戶行失敗：%v", err)
+		}
+		return strings.Join([]string{
+			id, loginName, loginKey, displayName, accountType, status,
+			strconv.FormatInt(createdAt, 10), strconv.FormatInt(lastLoginAt, 10),
+			strconv.FormatInt(disabledAt, 10),
+		}, "\x00")
+	}
+	frozen := otherCols()
+
+	// 不合格輸入在 Exec 之前擋下：新雜湊形狀（非 Argon2id 前綴、空、超長）、零值標識、nil 連線。
+	longHash := "$argon2id$" + strings.Repeat("x", maxPasswordHashLen)
+	for name, call := range map[string]func() (bool, error){
+		"雜湊無前綴":  func() (bool, error) { return store.SetPassword(ctx, db.SQL(), a.ID, "hunter2") },
+		"雜湊為空":   func() (bool, error) { return store.SetPassword(ctx, db.SQL(), a.ID, "") },
+		"雜湊超長":   func() (bool, error) { return store.SetPassword(ctx, db.SQL(), a.ID, longHash) },
+		"零值標識":   func() (bool, error) { return store.SetPassword(ctx, db.SQL(), idgen.ID{}, replacementHash) },
+		"nil 連線": func() (bool, error) { return store.SetPassword(ctx, nil, a.ID, replacementHash) },
+	} {
+		if changed, err := call(); err == nil || changed {
+			t.Errorf("%s：應回報錯誤且未寫入（changed=%v err=%v）", name, changed, err)
+		}
+	}
+	if got := otherCols(); got != frozen {
+		t.Error("被擋的輸入不得留下任何欄位位移")
+	}
+
+	// 命中：哈希換掉、旗標設回 1、其餘欄逐字不動。
+	if changed, err := store.SetPassword(ctx, db.SQL(), a.ID, replacementHash); err != nil || !changed {
+		t.Fatalf("置換應回 changed=true：%v %v", changed, err)
+	}
+	got, err := store.ByID(ctx, db.SQL(), a.ID)
+	if err != nil {
+		t.Fatalf("讀回失敗：%v", err)
+	}
+	if got.PasswordHash != replacementHash || !got.MustChangePassword {
+		t.Errorf("置換後的欄位不正確：%+v", got)
+	}
+	if snap := otherCols(); snap != frozen {
+		t.Error("除 password_hash/must_change_password 外的欄位必須逐字不動")
+	}
+
+	// 重複置換：第二次仍是整筆（後到的哈希是既定順序的事實），不是「什麼都不發生」的假失敗。
+	if changed, err := store.SetPassword(ctx, db.SQL(), a.ID, anotherHash); err != nil || !changed {
+		t.Fatalf("重複置換應再次成功：%v %v", changed, err)
+	}
+	if got, err := store.ByID(ctx, db.SQL(), a.ID); err != nil ||
+		got.PasswordHash != anotherHash || !got.MustChangePassword {
+		t.Errorf("第二次置換必須完整落地：%+v err=%v", got, err)
+	}
+
+	// 停用中的目標：置換不碰 status 與 disabled_at（「重置不是解除停用」在 SQL 形狀上）。
+	if changed, err := store.SetStatus(ctx, db.SQL(), a.ID, StatusDisabled, StatusActive); err != nil || !changed {
+		t.Fatalf("停用失敗：%v %v", changed, err)
+	}
+	disabled := otherCols()
+	if changed, err := store.SetPassword(ctx, db.SQL(), a.ID, replacementHash); err != nil || !changed {
+		t.Fatalf("對停用目標的置換應成功：%v %v", changed, err)
+	}
+	if got := otherCols(); got != disabled {
+		t.Error("置換不得把停用狀態或停用時刻改回來（重置不是解除停用）")
+	}
+
+	// 查無此人：changed=false、無錯誤——與 RotatePassword/SetStatus 同一句話。
+	ghostID, err := idgen.New()
+	if err != nil {
+		t.Fatalf("產生測試標識失敗：%v", err)
+	}
+	if changed, err := store.SetPassword(ctx, db.SQL(), ghostID, replacementHash); err != nil || changed {
+		t.Errorf("幽靈帳戶應回 changed=false：%v %v", changed, err)
+	}
+}

@@ -1,14 +1,16 @@
 // rootadmins.go 是「Root 對伺服器級管理員的目錄性操作」的傳輸層落點：
 // /root/admins 一個路徑做兩件事（GET／HEAD 分頁目錄、POST 開設），
 // /root/admins/{account_id} 一個路徑做兩件事（GET／HEAD 單筆詳情、PUT 編輯非安全資料），
-// /root/admins/{account_id}/status 一條路徑做一件事（PUT 停用或恢復登入，唯一白名單欄位是狀態）。
+// /root/admins/{account_id}/status 一條路徑做一件事（PUT 停用或恢復登入，唯一白名單欄位是狀態），
+// /root/admins/{account_id}/password 一條路徑做一件事（PUT 重置登入憑據，唯一白名單欄位是新口令）。
 //
 // 這個檔案刻意只做協定層該做的四件事，一條領域規則都不寫在這裡：
 //  1. 來源（CSRF）判定與憑據解析——逐字複用 allowRequestOrigin＋resolveCredentials，
 //     不在這裡重寫一份「先看 Cookie 再看標頭」的順序（兩套判定的結果必然是其中一套被繞過）；
 //  2. 首次改密門閂——複用 requirePasswordChangeDone，與其餘受保護端點同一把閘；
 //  3. 請求本體與查詢參數的形態——開設只有 login_name／display_name／password，
-//     編輯只有 display_name 與它所依據的 expected_display_name；
+//     編輯只有 display_name 與它所依據的 expected_display_name，
+//     停用／恢復只有 status 與 expected_status，重置憑據只有 password 一欄；
 //     未知欄位（含 role、type、status、account_id、must_change_password 這類「自報身分
 //     或企圖覆蓋隱藏欄位」的嘗試）由 decodeJSON 的 DisallowUnknownFields 當場拒殺：
 //     「動的是哪一類資料」由「打的哪個端點、用的哪個方法」決定，不是由請求內容決定；
@@ -64,6 +66,11 @@ type RootAdminUseCase interface {
 	// 提交所依據的現狀，不符時狀態、會話撤銷、審計一件都不發生並回衝突結論。
 	UpdateAdminStatus(ctx context.Context, principal identity.Principal,
 		accountID idgen.ID, in adminacct.StatusChangeInput, requestID string) (adminacct.StatusChange, error)
+	// ResetAdminPassword 以 Root 主體重置一名目錄內管理員的登入憑據：舊口令與
+	// 既有會話即刻失效、首次改密義務重設、停用狀態不動。本用例刻意沒有依據值——
+	// 重置的發起人拿不出「現行口令」那類錨點（見 internal/adminacct/resetpassword.go）。
+	ResetAdminPassword(ctx context.Context, principal identity.Principal,
+		accountID idgen.ID, newPassword, requestID string) (adminacct.PasswordReset, error)
 }
 
 // createAdminRequest 是開設請求的本體。只有這三個欄位可用：
@@ -89,6 +96,14 @@ type updateAdminProfileRequest struct {
 type updateAdminStatusRequest struct {
 	Status         string `json:"status"`
 	ExpectedStatus string `json:"expected_status"`
+}
+
+// resetAdminPasswordRequest 是重置憑據請求的本體。白名單只有新口令一欄：
+// 沒有 expected_*、沒有 status、沒有 must_change_password——前兩者是別的白名單通路
+// 的欄位（未知欄位 1004），第三者是本次重置要「強制寫成 1」的義務旗標，
+// 絕無可能被請求反向清掉（「重置不順手免義務」成立在本體連格子都沒有的形狀上）。
+type resetAdminPasswordRequest struct {
+	Password string `json:"password"`
 }
 
 // createdAdminResponse 是開設成功的回應本體。
@@ -159,6 +174,19 @@ type adminStatusResponse struct {
 	RequestID       string    `json:"request_id"`
 }
 
+// adminPasswordResetResponse 是 PUT /root/admins/{account_id}/password 的回應本體。
+//
+// admin 是「重置之後的資料庫現值」：must_change_password 恆為 true（這正是界面要把
+// 「這個口令只用一次」講給 Root 聽的依據），status 與 disabled_at 保持原樣。
+// revoked_sessions 與停用-response 同一理由：界面要能如實說出「這次讓 N 臺裝置重新登入」。
+// 回應裡絕對不會有的東西：新口令的任何回顯（連同前綴或長度）、任一側的雜湊、
+// 會話材料——口令只在請求本體裡出現一次，回應與交付都不碰它；線下的交付管道在協議之外。
+type adminPasswordResetResponse struct {
+	Admin           adminItem `json:"admin"`
+	RevokedSessions int       `json:"revoked_sessions"`
+	RequestID       string    `json:"request_id"`
+}
+
 // rootAdminEndpoints 回傳管理員目錄端點登記清單；未注入用例時為空。
 //
 // 與 auth 端點同一個來源、同一個有無判定：登記與否只這一處，
@@ -172,17 +200,21 @@ func (s *Server) rootAdminEndpoints() []apiRoute {
 	// {account_id} 匹配恰好一個路徑段；多出的段落到 catch-all，回 JSON 的 1001。
 	// /status 是單欄（status）的子資源：狀態這種安全欄位與顯示名那種普通資料
 	// 各有自己的白名單與確認語意，不共寫同一次 PUT。
+	// /password 是單欄（password）的子資源：憑據與狀態同屬安全欄位，但兩條白名單、
+	// 兩套確認語意、兩個審計動作各是各的——「重置不是解除停用」在路由形狀上就分開。
 	return []apiRoute{
 		{"/root/admins", s.allowMethods(s.handleRootAdmins,
 			http.MethodGet, http.MethodHead, http.MethodPost)},
-		{"/root/admins/{account_id}", s.allowMethods(s.handleRootAdmin,
+		{"/root/admins/{account_id}", s.allowMethods(s.handleRootAdminProfile,
 			http.MethodGet, http.MethodHead, http.MethodPut)},
 		{"/root/admins/{account_id}/status", s.allowMethods(s.handleRootAdminStatus,
+			http.MethodPut)},
+		{"/root/admins/{account_id}/password", s.allowMethods(s.handleRootAdminPassword,
 			http.MethodPut)},
 	}
 }
 
-// rootAdminPrincipal 走三個入口共用的前置鏈：來源判定 → 憑據解析 → 首次改密門閂。
+// rootAdminPrincipal 走四個入口共用的前置鏈：來源判定 → 憑據解析 → 首次改密門閂。
 //
 // 回 false 時回應已經寫好，呼叫端直接返回即可；授權不在這裡判（由用例判），
 // 否則同一件事有兩套真相。
@@ -233,8 +265,8 @@ func (s *Server) handleRootAdmins(w http.ResponseWriter, r *http.Request) {
 	s.directoryRootAdmins(w, r, principal)
 }
 
-// handleRootAdmin 處理 /root/admins/{account_id}：GET／HEAD 詳情、PUT 編輯。
-func (s *Server) handleRootAdmin(w http.ResponseWriter, r *http.Request) {
+// handleRootAdminProfile 處理 /root/admins/{account_id}：GET／HEAD 詳情、PUT 編輯。
+func (s *Server) handleRootAdminProfile(w http.ResponseWriter, r *http.Request) {
 	principal, ok := s.rootAdminPrincipal(w, r)
 	if !ok {
 		return
@@ -533,6 +565,60 @@ func (s *Server) writeUpdateAdminStatusFailure(w http.ResponseWriter, r *http.Re
 		writeError(w, r, CodePermissionDenied, http.StatusForbidden)
 	default:
 		s.logger.Error("變更管理員狀態失敗", "request_id", requestIDFromRequest(r), "err", err)
+		writeError(w, r, CodeUnknown, http.StatusInternalServerError)
+	}
+}
+
+// handleRootAdminPassword 處理 PUT /root/admins/{account_id}/password：重置登入憑據。
+//
+// 這條子路徑只有 PUT 一個方法（allowMethods 已登記，其餘方法回 1002 帶 Allow）：
+// 「動憑據」在協定層就只有一個入口。標識解析失敗與查無同一句話（1001），
+// 口令本身的形狀不合格不在此處判（那是 credential 模組那一道閘，經用例映射為
+// 1004＋點名 password 欄位）——傳輸層不抄寫第二份口令規則。
+func (s *Server) handleRootAdminPassword(w http.ResponseWriter, r *http.Request) {
+	principal, ok := s.rootAdminPrincipal(w, r)
+	if !ok {
+		return
+	}
+	id, err := idgen.Parse(r.PathValue("account_id"))
+	if err != nil {
+		writeError(w, r, CodeNotFound, http.StatusNotFound)
+		return
+	}
+	var in resetAdminPasswordRequest
+	if !decodeJSON(w, r, &in) {
+		return
+	}
+	reset, err := s.admins.ResetAdminPassword(r.Context(), principal, id,
+		in.Password, requestIDFromRequest(r))
+	if err != nil {
+		s.writeResetAdminPasswordFailure(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, adminPasswordResetResponse{
+		Admin:           profileItem(reset.Profile),
+		RevokedSessions: reset.RevokedSessions,
+		RequestID:       requestIDFromRequest(r),
+	})
+}
+
+// writeResetAdminPasswordFailure 把重置用例的錯誤對映為對外回應。
+//
+// 刻意沒有「衝突」這一句：本用例不設依據值（Root 拿不出「現行口令」那類誠實的
+// 錨點），所以不存在 2013/2014 那樣的併發結論——重複提交是又做了一次完整重置，
+// 每次都留一筆審計。處置各歸各：1004 要人改口令、1001 是目標不在目錄、
+// 2011 是主體不對，其餘細節只進日誌。
+func (s *Server) writeResetAdminPasswordFailure(w http.ResponseWriter, r *http.Request, err error) {
+	switch {
+	case errors.Is(err, adminacct.ErrInvalidResetPassword):
+		writeErrorDetails(w, r, CodeInvalidBody, http.StatusBadRequest,
+			map[string]any{"invalid_field": "password"})
+	case errors.Is(err, adminacct.ErrAdminNotFound):
+		writeError(w, r, CodeNotFound, http.StatusNotFound)
+	case errors.Is(err, identity.ErrPermissionDenied):
+		writeError(w, r, CodePermissionDenied, http.StatusForbidden)
+	default:
+		s.logger.Error("重置管理員憑據失敗", "request_id", requestIDFromRequest(r), "err", err)
 		writeError(w, r, CodeUnknown, http.StatusInternalServerError)
 	}
 }
