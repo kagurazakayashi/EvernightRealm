@@ -286,8 +286,8 @@ func (s *Store) SetStatus(ctx context.Context, q database.Querier, id idgen.ID,
 	if id.IsNil() {
 		return false, errors.New("account: 變更狀態必須帶帳戶標識")
 	}
-	if !newStatus.valid() || !expectedStatus.valid() {
-		return false, fmt.Errorf("account: 不認識的帳戶狀態 %q/%q（可用 active|disabled）",
+	if !newStatus.settable() || !expectedStatus.settable() {
+		return false, fmt.Errorf("account: 停用/恢復只認 active|disabled，實際 %q/%q",
 			string(newStatus), string(expectedStatus))
 	}
 	if newStatus == expectedStatus {
@@ -310,9 +310,62 @@ func (s *Store) SetStatus(ctx context.Context, q database.Querier, id idgen.ID,
 	return n > 0, nil
 }
 
+// MarkDeleted 以一條 UPDATE 讓帳戶進入刪除終態：status 落為 deleted、deleted_at 取注入時鐘、
+// display_name 換成匿名化佔位值。
+//
+// 三個設計點各自擋的是不一樣的東西：
+//   - 守衛是「他還沒被刪」（WHERE deleted_at IS NULL），不是呼叫端交來的依據值。
+//     Root 對「現行刪除時刻」拿不出任何誠實的錨點（未被刪時那一欄本來就是 NULL），
+//     湊一個出來驗證的也不是它宣稱的東西；而 status 是唯一的可觀測事實，
+//     把它寫進 WHERE 就足以讓「第二次刪除」一個字都不落。
+//   - 時刻的唯一來源是注入時鐘：呼叫端無法代填「何時刪的」，也出不了未來或零值的刪除時刻
+//     （與 Create 的 created_at、SetStatus 的 disabled_at 同一取向）。
+//   - 一句 UPDATE 同時改三欄：「停止登入」「留下刪除時刻」「活的投影不再顯示本人自取的名字」
+//     是同一次刪除的三面，拆開寫就會出現「已 deleted 但還掛著原名」的半成品。
+//
+// 這隻語句不碰的欄位同樣是要害：login_name、login_name_key、password_hash、
+// account_type、must_change_password、created_at、last_login_at、disabled_at 都不在 SET 裡——
+// 「刪除不等於把帳戶改頭換面成另一個人」「刪除不清憑據（清憑據屬後續的物理清庫步驟）」
+// 「刪除不偽造停用時刻也不抹掉既有停用時刻」因此成立在 SQL 形狀上。
+// 已停用者被刪除時保留原 disabled_at：那仍是「他何時被停的」的歷史事實。
+//
+// 現行顯示名由呼叫端在同一個交易裡讀出後交給這裡派生：派生規則（AnonymizedDisplayName）
+// 只有域層一份，呼叫端不自己拼字串，這裡也不回頭多查一次——多一次查詢就多一個
+// 「兩次讀到不同值」的窗口，而呼叫端正握著那次讀的結果。
+//
+// 目標不存在與已被刪除收斂為同一個 changed=false：兩者對呼叫端意味著同一句話——
+// 「這一次刪除沒有可發生的對象」。呼叫端通常已在同一交易核實過目錄成員資格與狀態，
+// 走到 false 只剩併發刪除或程式缺陷，兩者都該讓交易回滾而不是報刪除成功。
+func (s *Store) MarkDeleted(ctx context.Context, q database.Querier, id idgen.ID,
+	currentDisplayName string) (bool, error) {
+	if q == nil {
+		return false, errors.New("account: 需要可用的資料庫連線或交易")
+	}
+	if id.IsNil() {
+		return false, errors.New("account: 刪除帳戶必須帶目標標識")
+	}
+	anonymized := AnonymizedDisplayName(s.clock.Now(), currentDisplayName)
+	if err := validateDisplayName(anonymized); err != nil {
+		// 派生結果不合域規則屬程式缺陷（前綴為純 ASCII、截斷只依碼位邊界），
+		// 它在任何一行資料上都該永不成真；就地報錯而不是把非法值送進資料庫讓 CHECK 去擋。
+		return false, fmt.Errorf("account: 匿名化顯示名不合格: %w", err)
+	}
+	res, err := q.ExecContext(ctx,
+		"UPDATE accounts SET status = ?, display_name = ?, deleted_at = ? WHERE id = ? AND deleted_at IS NULL",
+		string(StatusDeleted), anonymized, timeutil.ToMillis(s.clock.Now()), id.String())
+	if err != nil {
+		return false, fmt.Errorf("account: 讓帳戶進入刪除終態失敗: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("account: 讀取刪除結果失敗: %w", err)
+	}
+	return n > 0, nil
+}
+
 // selectAccountSQL 是欄位清單的唯一定義點（查詢用的欄序與 scanRow 的取值順序同源）。
 const selectAccountSQL = `SELECT id, login_name, login_name_key, display_name, password_hash,
-		account_type, status, must_change_password, created_at, last_login_at, disabled_at
+		account_type, status, must_change_password, created_at, last_login_at, disabled_at, deleted_at
 	FROM accounts`
 
 // scanOne 收攏 QueryRow 的取行與錯誤映射。
@@ -322,10 +375,10 @@ func scanOne(row *sql.Row) (Account, error) {
 		passwordHash                             sql.NullString
 		typeText, statusText                     string
 		mustChange, createdAt                    int64
-		lastLoginAt, disabledAt                  sql.NullInt64
+		lastLoginAt, disabledAt, deletedAt       sql.NullInt64
 	)
 	err := row.Scan(&idText, &loginName, &loginKey, &displayName, &passwordHash,
-		&typeText, &statusText, &mustChange, &createdAt, &lastLoginAt, &disabledAt)
+		&typeText, &statusText, &mustChange, &createdAt, &lastLoginAt, &disabledAt, &deletedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Account{}, ErrNotFound
 	}
@@ -333,19 +386,22 @@ func scanOne(row *sql.Row) (Account, error) {
 		return Account{}, fmt.Errorf("account: 讀取帳戶失敗: %w", err)
 	}
 	return accountFromRow(idText, loginName, loginKey, displayName, passwordHash,
-		typeText, statusText, mustChange, createdAt, lastLoginAt, disabledAt)
+		typeText, statusText, mustChange, createdAt, lastLoginAt, disabledAt, deletedAt)
 }
 
 // accountFromRow 把一列欄位讀回實體並做入庫後校驗。
 //
 // 標識讀不回來、或帶著表外枚舉值時一律報錯：那代表資料庫被繞過校驗寫入了東西
 // （或執行檔比資料庫舊），靜默跳過會讓那筆帳戶在介面上徹底消失。
+// 狀態與三個時刻的配對也在這裡複核（遷移 0007 的三條方向規則）：
+// 讀path是「帳戶實體」唯一的成形點，放行一個形態矛盾的行，
+// 等於讓下游每個用例各自決定「deleted 但沒有 deleted_at」算什麼。
 func accountFromRow(
 	idText, loginName, loginKey, displayName string,
 	passwordHash sql.NullString,
 	typeText, statusText string,
 	mustChange, createdAt int64,
-	lastLoginAt, disabledAt sql.NullInt64,
+	lastLoginAt, disabledAt, deletedAt sql.NullInt64,
 ) (Account, error) {
 	id, err := idgen.Parse(idText)
 	if err != nil {
@@ -370,6 +426,24 @@ func accountFromRow(
 	}
 	if disabledAt.Valid {
 		a.DisabledAt = timeutil.FromMillis(disabledAt.Int64)
+	}
+	if deletedAt.Valid {
+		a.DeletedAt = timeutil.FromMillis(deletedAt.Int64)
+	}
+	// 形態複核：三條方向規則與遷移 0007 的 CHECK 逐字同口徑。
+	//   - disabled 必帶停用時刻；
+	//   - active 必不帶停用時刻（重新啟用時清回 NULL）；
+	//   - deleted 與刪除時刻同生同滅；deleted 可保留停用時刻（被刪前本就是停用者，
+	//     「何時停的」仍是歷史），所以這裡不要求「非 disabled 就必須沒有它」。
+	if (a.Status == StatusDeleted) != !a.DeletedAt.IsZero() {
+		return Account{}, fmt.Errorf("account: 帳戶 %s 的 status 與 deleted_at 不成對（%s/%v）",
+			idText, statusText, a.DeletedAt)
+	}
+	if a.Status == StatusDisabled && a.DisabledAt.IsZero() {
+		return Account{}, fmt.Errorf("account: 帳戶 %s 是停用狀態卻沒有停用時刻", idText)
+	}
+	if a.Status == StatusActive && !a.DisabledAt.IsZero() {
+		return Account{}, fmt.Errorf("account: 帳戶 %s 是可用狀態卻帶著停用時刻", idText)
 	}
 	return a, nil
 }

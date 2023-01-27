@@ -115,6 +115,12 @@ func (s *Service) ResetAdminPassword(ctx context.Context, principal identity.Pri
 		if err != nil {
 			return err
 		}
+		// 已刪除的帳戶不進這條通路：重置憑據的意義是「讓一個還能上任的人換一把一次性口令」，
+		// 對一個不再可登入且不再可恢復的帳戶交出口令，交出去的那一句話沒有接受者。
+		// 判定在派生之後、寫入之前：被拒的重置一個字都不落，也不留審計。
+		if err := requireNotDeleted(before); err != nil {
+			return err
+		}
 		changed, err := s.accounts.SetPassword(tctx, tx, accountID, passwordHash)
 		if err != nil {
 			return err
@@ -147,7 +153,8 @@ func (s *Service) ResetAdminPassword(ctx context.Context, principal identity.Pri
 		switch {
 		case errors.Is(err, account.ErrNotFound), errors.Is(err, grant.ErrNotFound):
 			return PasswordReset{}, ErrAdminNotFound
-		case errors.Is(err, ErrAdminNotFound), errors.Is(err, ErrInvalidResetPassword):
+		case errors.Is(err, ErrAdminNotFound), errors.Is(err, ErrInvalidResetPassword),
+			errors.Is(err, ErrAdminDeleted):
 			return PasswordReset{}, err
 		}
 		s.log.Error("重置管理員憑據失敗", "request_id", requestID, "err", err)

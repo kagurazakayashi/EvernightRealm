@@ -278,7 +278,7 @@ func TestDatabaseCheckConstraints(t *testing.T) {
 		name string
 		args []any
 	}{
-		{"status 枚舉外值", []any{mustID(t), "l1", "l1", testHash, "standard", "deleted", 0, nil, nil}},
+		{"status 枚舉外值", []any{mustID(t), "l1", "l1", testHash, "standard", "archived", 0, nil, nil}},
 		{"account_type 枚舉外值", []any{mustID(t), "l2", "l2", testHash, "npc_operator", "active", 0, nil, nil}},
 		{"disabled 缺時刻", []any{mustID(t), "l3", "l3", testHash, "standard", "disabled", 0, nil, nil}},
 		{"active 帶時刻", []any{mustID(t), "l4", "l4", testHash, "standard", "active", 0, nil, int64(1730000000001)}},

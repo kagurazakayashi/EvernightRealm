@@ -1,8 +1,15 @@
 // rootadmins.go 是「Root 對伺服器級管理員的目錄性操作」的傳輸層落點：
 // /root/admins 一個路徑做兩件事（GET／HEAD 分頁目錄、POST 開設），
-// /root/admins/{account_id} 一個路徑做兩件事（GET／HEAD 單筆詳情、PUT 編輯非安全資料），
+// /root/admins/{account_id} 一個路徑做三件事（GET／HEAD 單筆詳情、PUT 編輯非安全資料、
+// DELETE 軟刪除），
 // /root/admins/{account_id}/status 一條路徑做一件事（PUT 停用或恢復登入，唯一白名單欄位是狀態），
 // /root/admins/{account_id}/password 一條路徑做一件事（PUT 重置登入憑據，唯一白名單欄位是新口令）。
+//
+// 詳情與刪除共用父路徑、狀態與憑據各有各的子路徑，這個分工不是排版偏好：
+// 後兩者是「某一個安全欄位的白名單」，所以各自需要一條只能動那一欄的 PUT；
+// 而刪除動的是整個帳戶的去向，它既不是一個欄位，也不是一種可設定狀態，
+// 因此它是父資源上的一個方法——把它塞進 /status 會讓「恢復登入」這條路
+// 間接成為刪除與被刪復活的入口，而那正是停用與刪除必須分開的理由。
 //
 // 這個檔案刻意只做協定層該做的四件事，一條領域規則都不寫在這裡：
 //  1. 來源（CSRF）判定與憑據解析——逐字複用 allowRequestOrigin＋resolveCredentials，
@@ -10,11 +17,14 @@
 //  2. 首次改密門閂——複用 requirePasswordChangeDone，與其餘受保護端點同一把閘；
 //  3. 請求本體與查詢參數的形態——開設只有 login_name／display_name／password，
 //     編輯只有 display_name 與它所依據的 expected_display_name，
-//     停用／恢復只有 status 與 expected_status，重置憑據只有 password 一欄；
+//     停用／恢復只有 status 與 expected_status，重置憑據只有 password 一欄，
+//     刪除什麼都不帶（它不選欄位，也沒有可交的依據值）；
 //     未知欄位（含 role、type、status、account_id、must_change_password 這類「自報身分
 //     或企圖覆蓋隱藏欄位」的嘗試）由 decodeJSON 的 DisallowUnknownFields 當場拒殺：
 //     「動的是哪一類資料」由「打的哪個端點、用的哪個方法」決定，不是由請求內容決定；
-//  4. 結論對映——把用例回傳的可判別錯誤一一映射到既有機器碼，其餘一律 500 且細節只進日誌。
+//  4. 結論對映——把用例回傳的可判別錯誤一一映射到機器碼，其餘一律 500 且細節只進日誌。
+//     「目標已被刪除」有自己的碼 2015，且四個寫入口徑（編輯／停用恢復／重置／刪除）
+//     都走同一句話：判定點在用例裡只有一個（requireNotDeleted），傳輸層不另判一次。
 //
 // 回應本體絕不含口令明文、憑據雜湊、會話材料或任何內部正規化鍵：能公開的只有帳戶的
 // 可展示事實。目錄與詳情的欄位是白名單投影（見 internal/adminacct/directory.go 的邊界約定的
@@ -22,7 +32,8 @@
 //
 // 路徑裡的 {account_id} 是本倉庫第一條帶路徑參數的端點：解析失敗（不是一枚 UUID）
 // 與查無此人都回同一個 1001——對外的句子不區分「格式不對」與「沒有這個人」，
-// 免得端點變成一台標識格式探測器。
+// 免得端點變成一台標識格式探測器。「在目錄裡但已被刪除」不是這同一句話（2015），
+// 因為 Root 對著一份列著他的目錄能做的事只有「別再寫他」，而不是「換個標識」。
 package httpapi
 
 import (
@@ -71,6 +82,12 @@ type RootAdminUseCase interface {
 	// 重置的發起人拿不出「現行口令」那類錨點（見 internal/adminacct/resetpassword.go）。
 	ResetAdminPassword(ctx context.Context, principal identity.Principal,
 		accountID idgen.ID, newPassword, requestID string) (adminacct.PasswordReset, error)
+	// DeleteAdmin 以 Root 主體軟刪除一名目錄內管理員：停止新登入、撤銷其有效會話、
+	// 顯示名匿名化，而行與登入名鍵保留以承載歷史身份。本用例與重置憑據同一取向，
+	// 刻意沒有依據值——正當性錨在「他還沒被刪」這條狀態機守衛上，第二次刪除寫不中
+	// 任何一行並回 ErrAdminDeleted（見 internal/adminacct/deleted.go）。
+	DeleteAdmin(ctx context.Context, principal identity.Principal,
+		accountID idgen.ID, requestID string) (adminacct.Deletion, error)
 }
 
 // createAdminRequest 是開設請求的本體。只有這三個欄位可用：
@@ -106,6 +123,14 @@ type resetAdminPasswordRequest struct {
 	Password string `json:"password"`
 }
 
+// deleteAdminRequest 是刪除請求的本體：一個欄位都沒有。
+//
+// 它存在只為了讓 decodeJSON 那道閘照常規生效——不帶本體的 DELETE 是最常見的形態，
+// 而帶本體的 DELETE 必須是一個不含任何欄位的 JSON 物件。少了這個型別，
+// 「順手塞 expected_status／purge／display_name」的請求會被默默當做沒看見，
+// 而「看不見」在協定層就等於承認那些欄位本來可以有意義。
+type deleteAdminRequest struct{}
+
 // createdAdminResponse 是開設成功的回應本體。
 //
 // 全部為可展示事實；刻意缺席的：初始口令（連同它的任何前綴或長度）、Argon2id 雜湊、
@@ -135,7 +160,11 @@ type adminItem struct {
 	// GrantedAt 為 server_admin 授予寫下的時刻；目錄行與詳情都恆有（成員資格本身就是授予）。
 	GrantedAt string `json:"granted_at"`
 	// DisabledAt 為進入禁用狀態的時刻；active 時欄位缺席（不拿零值冒充「停過又沒停」）。
+	// 被刪除前本是停用者時，它在刪除之後仍帶出——那仍是「何時停的」的歷史事實。
 	DisabledAt string `json:"disabled_at,omitempty"`
+	// DeletedAt 為進入刪除終態的時刻；未被刪除時欄位缺席（不拿零值冒充「刪過」）。
+	// status 為 deleted 時它恆存在（遷移 0007 的成對 CHECK 保證兩件事實不會各說各話）。
+	DeletedAt string `json:"deleted_at,omitempty"`
 	// Roles 為該帳戶經服務端核實持有的角色；僅單筆回應帶出——
 	// 目錄的每一行本來就是按授予查出來的，逐行重複一份同一個字串不回答任何新問題。
 	Roles []string `json:"roles,omitempty"`
@@ -187,6 +216,21 @@ type adminPasswordResetResponse struct {
 	RequestID       string    `json:"request_id"`
 }
 
+// adminDeleteResponse 是 DELETE /root/admins/{account_id} 的回應本體。
+//
+// admin 是「刪除之後的資料庫現值」：status 恆為 deleted、display_name 已是佔位值、
+// deleted_at 恆有——界面要把「他已被刪除、刪於何時、現在顯示什麼」講成服務端的事實，
+// 而不是把 Root 剛才按下鈕這回事回顯一遍。
+// revoked_sessions 與停用／重置同一理由：界面要能如實說出「這次讓 N 臺裝置失去登入狀態」。
+// 對一個本就停用的目標這個數通常是 0（其會話早在停用時已撤）——0 是事實，不是失敗。
+// 回應裡絕對不會有的東西：憑據雜湊、會話材料，也不會有「如何恢復」的暗示——
+// 刪除是終態，本協議沒有一條把它改回來的路。
+type adminDeleteResponse struct {
+	Admin           adminItem `json:"admin"`
+	RevokedSessions int       `json:"revoked_sessions"`
+	RequestID       string    `json:"request_id"`
+}
+
 // rootAdminEndpoints 回傳管理員目錄端點登記清單；未注入用例時為空。
 //
 // 與 auth 端點同一個來源、同一個有無判定：登記與否只這一處，
@@ -202,11 +246,14 @@ func (s *Server) rootAdminEndpoints() []apiRoute {
 	// 各有自己的白名單與確認語意，不共寫同一次 PUT。
 	// /password 是單欄（password）的子資源：憑據與狀態同屬安全欄位，但兩條白名單、
 	// 兩套確認語意、兩個審計動作各是各的——「重置不是解除停用」在路由形狀上就分開。
+	// 刪除則掛在父路徑的 DELETE 方法上：它不是一個欄位的白名單，也不是一種可設定狀態，
+	// 而是整個帳戶的去向，所以既不該混進 /status 那條「active|disabled」的通路，
+	// 也不需要一個自己的子路徑去宣稱「這裡動的是刪除欄」。
 	return []apiRoute{
 		{"/root/admins", s.allowMethods(s.handleRootAdmins,
 			http.MethodGet, http.MethodHead, http.MethodPost)},
 		{"/root/admins/{account_id}", s.allowMethods(s.handleRootAdminProfile,
-			http.MethodGet, http.MethodHead, http.MethodPut)},
+			http.MethodGet, http.MethodHead, http.MethodPut, http.MethodDelete)},
 		{"/root/admins/{account_id}/status", s.allowMethods(s.handleRootAdminStatus,
 			http.MethodPut)},
 		{"/root/admins/{account_id}/password", s.allowMethods(s.handleRootAdminPassword,
@@ -265,7 +312,10 @@ func (s *Server) handleRootAdmins(w http.ResponseWriter, r *http.Request) {
 	s.directoryRootAdmins(w, r, principal)
 }
 
-// handleRootAdminProfile 處理 /root/admins/{account_id}：GET／HEAD 詳情、PUT 編輯。
+// handleRootAdminProfile 處理 /root/admins/{account_id}：GET／HEAD 詳情、PUT 編輯、DELETE 軟刪除。
+//
+// 刪除沒有請求本體：它不選欄位、也不交依據值，交任何本體都會多出一個
+// 「這個端點似乎可以設定點什麼」的誤讀（decodeJSON 的未知欄位規則因此無事可做）。
 func (s *Server) handleRootAdminProfile(w http.ResponseWriter, r *http.Request) {
 	principal, ok := s.rootAdminPrincipal(w, r)
 	if !ok {
@@ -277,8 +327,12 @@ func (s *Server) handleRootAdminProfile(w http.ResponseWriter, r *http.Request) 
 		writeError(w, r, CodeNotFound, http.StatusNotFound)
 		return
 	}
-	if r.Method == http.MethodPut {
+	switch r.Method {
+	case http.MethodPut:
 		s.updateRootAdmin(w, r, principal, id)
+		return
+	case http.MethodDelete:
+		s.deleteRootAdmin(w, r, principal, id)
 		return
 	}
 	profile, err := s.admins.AdminProfile(r.Context(), principal, id)
@@ -289,6 +343,41 @@ func (s *Server) handleRootAdminProfile(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, adminProfileResponse{
 		Admin:     profileItem(profile),
 		RequestID: requestIDFromRequest(r),
+	})
+}
+
+// deleteRootAdmin 處理 DELETE /root/admins/{account_id}：軟刪除一名目錄內管理員。
+//
+// 與其餘寫入入口同一條前置鏈（來源判定 → 憑據解析 → 首次改密門閂 → 用例內的 NeedRoot），
+// 這裡不再判一次權限，否則同一件事有兩套真相。
+//
+// 失敗映射逐條對應不同的處置：
+//   - 1001：標識不合法、目標不在目錄（含幽靈標識、未授予帳戶、Root 保留標識、
+//     以及本步之前就存在的物理刪除目標）——四種企圖同一句話，端點不是標識探測器；
+//   - 2015：目標已是刪除態。重試不會讓它變成成功，所以要與 1001 分開一句話；
+//   - 2011：這個主體不是 Root；
+//   - 500：其餘，細節只進日誌。
+//
+// 成功回 200 而不是 204：回應本體帶著「刪除之後的現值」與這次撤銷的會話數量，
+// 界面要拿服務端的事實去改掉那份詳情，而不是拿一個空回應猜結果。
+func (s *Server) deleteRootAdmin(w http.ResponseWriter, r *http.Request,
+	principal identity.Principal, accountID idgen.ID) {
+	// 本體不許帶任何欄位：不帶本體就是「我要刪他」，帶了就必須是個空物件。
+	// 這條判定不是講究——默默忽略一份帶著 expected_status 或 purge 的本體，
+	// 等於承認那些欄位本來可以有意義。
+	var in deleteAdminRequest
+	if r.ContentLength != 0 && !decodeJSON(w, r, &in) {
+		return
+	}
+	deletion, err := s.admins.DeleteAdmin(r.Context(), principal, accountID, requestIDFromRequest(r))
+	if err != nil {
+		s.writeDeleteAdminFailure(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, adminDeleteResponse{
+		Admin:           profileItem(deletion.Profile),
+		RevokedSessions: deletion.RevokedSessions,
+		RequestID:       requestIDFromRequest(r),
 	})
 }
 
@@ -468,6 +557,9 @@ func (s *Server) writeUpdateAdminFailure(w http.ResponseWriter, r *http.Request,
 			map[string]any{"invalid_field": "display_name"})
 	case errors.Is(err, adminacct.ErrProfileConflict):
 		writeError(w, r, CodeProfileConflict, http.StatusConflict)
+	case errors.Is(err, adminacct.ErrAdminDeleted):
+		// 對已刪除的目標改名：處置不是「重讀現值再改」，而是「這個目標不再接受任何寫入」。
+		writeError(w, r, CodeAdminDeleted, http.StatusConflict)
 	case errors.Is(err, adminacct.ErrAdminNotFound):
 		writeError(w, r, CodeNotFound, http.StatusNotFound)
 	case errors.Is(err, identity.ErrPermissionDenied):
@@ -559,6 +651,10 @@ func (s *Server) writeUpdateAdminStatusFailure(w http.ResponseWriter, r *http.Re
 			map[string]any{"invalid_field": "status"})
 	case errors.Is(err, adminacct.ErrStatusConflict):
 		writeError(w, r, CodeAdminStatusConflict, http.StatusConflict)
+	case errors.Is(err, adminacct.ErrAdminDeleted):
+		// 已刪除的目標不是「一個還能被恢復的停用」：這句話必須有自己的碼，
+		// 否則介面會把 2014 的出口（重讀再確認一次）遞給一個永遠確認不成的目標。
+		writeError(w, r, CodeAdminDeleted, http.StatusConflict)
 	case errors.Is(err, adminacct.ErrAdminNotFound):
 		writeError(w, r, CodeNotFound, http.StatusNotFound)
 	case errors.Is(err, identity.ErrPermissionDenied):
@@ -613,12 +709,37 @@ func (s *Server) writeResetAdminPasswordFailure(w http.ResponseWriter, r *http.R
 	case errors.Is(err, adminacct.ErrInvalidResetPassword):
 		writeErrorDetails(w, r, CodeInvalidBody, http.StatusBadRequest,
 			map[string]any{"invalid_field": "password"})
+	case errors.Is(err, adminacct.ErrAdminDeleted):
+		// 對已刪除的目標重置憑據：口令交出去也沒有接受者，這句話與「改改口令寫法」
+		// （1004）和「這個人不在目錄裡」（1001）都不是同一處置。
+		writeError(w, r, CodeAdminDeleted, http.StatusConflict)
 	case errors.Is(err, adminacct.ErrAdminNotFound):
 		writeError(w, r, CodeNotFound, http.StatusNotFound)
 	case errors.Is(err, identity.ErrPermissionDenied):
 		writeError(w, r, CodePermissionDenied, http.StatusForbidden)
 	default:
 		s.logger.Error("重置管理員憑據失敗", "request_id", requestIDFromRequest(r), "err", err)
+		writeError(w, r, CodeUnknown, http.StatusInternalServerError)
+	}
+}
+
+// writeDeleteAdminFailure 把刪除用例的錯誤對映為對外回應。
+//
+// 1001 與 2015 分開只為處置不同：一個是「這個人不在這本目錄裡」，
+// 另一個是「目錄裡那個你正看著的人已經被刪掉了」。把後者報成 1001，
+// Root 會對著一份明明列著他的目錄反覆懷疑標識抄錯；把後者報成成功，
+// 則是在審計與真相之間造出一件沒發生過的事（重複刪除在資料庫裡一個字都沒寫）。
+// 本用例刻意沒有衝突那一句：它不設依據值，所以不存在 2013/2014 式的落敗。
+func (s *Server) writeDeleteAdminFailure(w http.ResponseWriter, r *http.Request, err error) {
+	switch {
+	case errors.Is(err, adminacct.ErrAdminDeleted):
+		writeError(w, r, CodeAdminDeleted, http.StatusConflict)
+	case errors.Is(err, adminacct.ErrAdminNotFound):
+		writeError(w, r, CodeNotFound, http.StatusNotFound)
+	case errors.Is(err, identity.ErrPermissionDenied):
+		writeError(w, r, CodePermissionDenied, http.StatusForbidden)
+	default:
+		s.logger.Error("刪除管理員失敗", "request_id", requestIDFromRequest(r), "err", err)
 		writeError(w, r, CodeUnknown, http.StatusInternalServerError)
 	}
 }
@@ -636,6 +757,9 @@ func directoryItem(row adminacct.DirectoryRow) adminItem {
 	}
 	if !row.LastLoginAt.IsZero() {
 		item.LastLoginAt = timeutil.FormatUTC(row.LastLoginAt)
+	}
+	if !row.DeletedAt.IsZero() {
+		item.DeletedAt = timeutil.FormatUTC(row.DeletedAt)
 	}
 	return item
 }
@@ -657,6 +781,9 @@ func profileItem(p adminacct.Profile) adminItem {
 	}
 	if !p.DisabledAt.IsZero() {
 		item.DisabledAt = timeutil.FormatUTC(p.DisabledAt)
+	}
+	if !p.DeletedAt.IsZero() {
+		item.DeletedAt = timeutil.FormatUTC(p.DeletedAt)
 	}
 	return item
 }

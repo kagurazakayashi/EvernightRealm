@@ -117,6 +117,13 @@ func (s *Service) UpdateAdminStatus(ctx context.Context, principal identity.Prin
 		if err != nil {
 			return err
 		}
+		// 已刪除的帳戶不進這條通路：「恢復登入」承認的是停用過的帳戶，
+		// 把刪除態當成「一個還能被恢復的停用」是這條通路最壞的誤讀（用戶批準：
+		// 停用與刪除是不同狀態，既有恢復登入介面不得恢復刪除帳戶）。
+		// 判定在 CAS 之前，因此這次拒絕既不改狀態、也不撤會話、也不留審計。
+		if err := requireNotDeleted(before); err != nil {
+			return err
+		}
 		changed, err := s.accounts.SetStatus(tctx, tx, accountID, in.NewStatus, in.ExpectedStatus)
 		if err != nil {
 			return err
@@ -150,7 +157,8 @@ func (s *Service) UpdateAdminStatus(ctx context.Context, principal identity.Prin
 		switch {
 		case errors.Is(err, account.ErrNotFound), errors.Is(err, grant.ErrNotFound):
 			return StatusChange{}, ErrAdminNotFound
-		case errors.Is(err, ErrStatusConflict), errors.Is(err, ErrAdminNotFound):
+		case errors.Is(err, ErrStatusConflict), errors.Is(err, ErrAdminNotFound),
+			errors.Is(err, ErrAdminDeleted):
 			return StatusChange{}, err
 		}
 		s.log.Error("變更管理員狀態失敗", "request_id", requestID, "err", err)

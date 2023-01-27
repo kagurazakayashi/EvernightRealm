@@ -56,10 +56,15 @@ type Profile struct {
 	LoginName string
 	// DisplayName 為顯示名稱。
 	DisplayName string
-	// Status 為帳戶狀態（只讀展示；停用與恢復經 UpdateAdminStatus 白名單通路）。
+	// Status 為帳戶狀態（只讀展示；停用與恢復經 UpdateAdminStatus 白名單通路，
+	// 刪除終態經 DeleteAdmin 通路；兩個入口都只認 active|disabled 這一側的變更，
+	// 已刪除的目標在三條寫入通路上一律被 requireNotDeleted 擋下）。
 	Status account.Status
 	// DisabledAt 為進入禁用狀態的時刻；active 時恆為零值（資料庫 NULL）。
+	// 被刪除前本是停用者時，這個時刻在刪除之後仍保留——它是「何時停的」的歷史事實。
 	DisabledAt time.Time
+	// DeletedAt 為進入刪除終態的時刻；未被刪除時恆為零值（資料庫 NULL）。
+	DeletedAt time.Time
 	// MustChangePassword 為是否仍欠首次改密（只讀展示）。
 	MustChangePassword bool
 	// Roles 為該帳戶在目錄語境下被核實持有的角色。
@@ -123,6 +128,11 @@ func (s *Service) UpdateAdminProfile(ctx context.Context, principal identity.Pri
 		if err != nil {
 			return err
 		}
+		// 刪除態不接受改名：編輯資料、停用/恢復、重置憑據三條寫入通路問的是同一句話，
+		// 判定點也只有一個（見 deleted.go 的 requireNotDeleted）。
+		if err := requireNotDeleted(before); err != nil {
+			return err
+		}
 		changed, err := s.accounts.UpdateDisplayName(tctx, tx, accountID,
 			displayName, expectedDisplayName)
 		if err != nil {
@@ -152,7 +162,8 @@ func (s *Service) UpdateAdminProfile(ctx context.Context, principal identity.Pri
 		switch {
 		case errors.Is(err, account.ErrNotFound), errors.Is(err, grant.ErrNotFound):
 			return Profile{}, ErrAdminNotFound
-		case errors.Is(err, ErrProfileConflict), errors.Is(err, ErrAdminNotFound):
+		case errors.Is(err, ErrProfileConflict), errors.Is(err, ErrAdminNotFound),
+			errors.Is(err, ErrAdminDeleted):
 			return Profile{}, err
 		case errors.Is(err, account.ErrInvalidDisplayName):
 			// 可展示的域規則結論：傳輸層據此回 1004 並點出欄位，不進「內部故障」分支。
@@ -188,6 +199,7 @@ func (s *Service) readProfile(ctx context.Context, q database.Querier, accountID
 		DisplayName:        a.DisplayName,
 		Status:             a.Status,
 		DisabledAt:         a.DisabledAt,
+		DeletedAt:          a.DeletedAt,
 		MustChangePassword: a.MustChangePassword,
 		Roles:              []identity.Role{identity.RoleServerAdmin},
 		CreatedAt:          a.CreatedAt,

@@ -162,6 +162,12 @@ var errorMessages = map[ErrorCode]map[string]string{
 		LocaleEnUS: "This administrator's sign-in status changed after you opened the page, so this disable or restore was not carried out. Refresh the directory to see the latest status before confirming again.",
 		LocaleJaJP: "この管理者のログイン状態は、ページを開いた後で変更されていました。今回の停止または再開は実行されていません。一覧を更新して最新の状態を確認したうえで、もう一度実行するかどうか決めてください。",
 	},
+	CodeAdminDeleted: {
+		LocaleZhCN: "这名管理员已被删除，本次操作没有执行。已删除的账户不再接受任何修改，也不会被恢复登录；重复删除同样不会成功。他仍会留在目录里，是为了让过往的操作与记录指得回同一个身份。",
+		LocaleZhTW: "這名管理員已被刪除，本次操作沒有執行。已刪除的帳戶不再接受任何修改，也不會被恢復登入；重複刪除同樣不會成功。他仍會留在目錄裡，是為了讓過往的操作與記錄指得回同一個身分。",
+		LocaleEnUS: "This administrator has already been deleted, so this operation did not run. A deleted account accepts no further changes and cannot be restored to sign-in, and deleting it again will not succeed either. It stays in the directory so that past actions and records keep pointing to the same identity.",
+		LocaleJaJP: "この管理者はすでに削除されているため、今回の操作は実行されませんでした。削除済みのアカウントは以降どんな変更も受け付けず、サインインを復帰させることもできません。もう一度削除しても成功しません。過去の操作と記録を同じ身份に辿れるよう、この人は一覧に残ります。",
+	},
 }
 
 // messageFor 取得錯誤碼在指定語言的使用者訊息；語言未支援或訊息為空時回退 defaultLocale。

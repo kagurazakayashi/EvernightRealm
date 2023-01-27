@@ -5,8 +5,8 @@
 //   - 這是只讀的呈現投影（read model）：不寫任何表，也永不參與任何授權判定——
 //     誰能做什麼仍然只由 internal/identity 的主體與 internal/grant 的讀取路徑回答；
 //   - 欄位是白名單投影而非 SELECT *：登入名、顯示名、狀態、首次改密旗標、
-//     三個時刻與授予時刻。password_hash、login_name_key 等欄位在語句裡根本不出現，
-//     「目錄回應裡沒有一個格子可能含憑據」因此成立在 SQL 形狀上；
+//     四個時刻（建立、最近登入、刪除）與授予時刻。password_hash、login_name_key
+//     等欄位在語句裡根本不出現，「目錄回應裡沒有一個格子可能含憑據」因此成立在 SQL 形狀上；
 //   - 狀態值原字串帶出、不經實體校驗：投影解釋的是「怎麼展示」，不是「帳戶是否合法」，
 //     表外值（資料庫被繞過校驗寫入時）如實到介面再由前端原樣顯示，與角色欄同口徑。
 //     寫路徑與單筆詳情仍走 internal/account 的實體讀法，校驗鏈只有一份。
@@ -55,7 +55,9 @@ type DirectoryQuery struct {
 	Page int64
 	// PageSize 為每頁筆數；1..DirectoryMaxPageSize。
 	PageSize int64
-	// StatusFilter 為狀態篩選：DirectoryStatusAll、active 或 disabled。
+	// StatusFilter 為狀態篩選：DirectoryStatusAll、active、disabled 或 deleted。
+	// 「不篩選」列出全部三種狀態（含刪除終態）；篩 active|disabled 天然不含已刪除行，
+	// 因為 status 是一欄單一取值，不是需要額外排掉的疊加標記。
 	StatusFilter string
 }
 
@@ -77,6 +79,9 @@ type DirectoryRow struct {
 	LastLoginAt time.Time
 	// GrantedAt 為 server_admin 授予寫下的時刻。
 	GrantedAt time.Time
+	// DeletedAt 為進入刪除終態的時刻；未刪除為零值（資料庫 NULL）。
+	// Status 已是 deleted 時它恆非零值（遷移 0007 的成對 CHECK），兩個值不是各寫一次的約定。
+	DeletedAt time.Time
 }
 
 // DirectoryPage 是一頁目錄與其總數。
@@ -115,10 +120,11 @@ func (s *Service) Directory(ctx context.Context, principal identity.Principal,
 	switch q.StatusFilter {
 	case "", DirectoryStatusAll:
 		// 不篩選：不加 WHERE 條件，也不拿空字串去比對 accounts.status。
-	case account.StatusActive.String(), account.StatusDisabled.String():
+		// 「不篩選」包含已刪除的行（用戶批準：目錄仍列出刪除終態，供歷史身分回溯）。
+	case account.StatusActive.String(), account.StatusDisabled.String(), account.StatusDeleted.String():
 		statusParam = q.StatusFilter
 	default:
-		return DirectoryPage{}, fmt.Errorf("%w：%q（僅接受 all|active|disabled）",
+		return DirectoryPage{}, fmt.Errorf("%w：%q（僅接受 all|active|disabled|deleted）",
 			ErrInvalidStatusFilter, q.StatusFilter)
 	}
 
@@ -146,7 +152,7 @@ func (s *Service) Directory(ctx context.Context, principal identity.Principal,
 	// 而不是把 accounts 的形状一路帶進回應。
 	rows, err := s.db.SQL().QueryContext(ctx, `SELECT r.account_id, r.granted_at,
 			a.login_name, a.display_name, a.status, a.must_change_password,
-			a.created_at, a.last_login_at
+			a.created_at, a.last_login_at, a.deleted_at
 		FROM account_server_roles r JOIN accounts a ON a.id = r.account_id
 		WHERE `+where+`
 		ORDER BY r.granted_at DESC, r.account_id DESC
@@ -164,13 +170,13 @@ func (s *Service) Directory(ctx context.Context, principal identity.Principal,
 	items := make([]DirectoryRow, 0, capacity)
 	for rows.Next() {
 		var (
-			row                  DirectoryRow
-			grantedAt, createdAt int64
-			lastLoginAt          sql.NullInt64
-			mustChange           int64
+			row                    DirectoryRow
+			grantedAt, createdAt   int64
+			lastLoginAt, deletedAt sql.NullInt64
+			mustChange             int64
 		)
 		if err := rows.Scan(&row.AccountID, &grantedAt, &row.LoginName, &row.DisplayName,
-			&row.Status, &mustChange, &createdAt, &lastLoginAt); err != nil {
+			&row.Status, &mustChange, &createdAt, &lastLoginAt, &deletedAt); err != nil {
 			return DirectoryPage{}, fmt.Errorf("adminacct: 讀取管理員目錄列失敗: %w", err)
 		}
 		row.MustChangePassword = mustChange != 0
@@ -178,6 +184,9 @@ func (s *Service) Directory(ctx context.Context, principal identity.Principal,
 		row.GrantedAt = timeutil.FromMillis(grantedAt)
 		if lastLoginAt.Valid {
 			row.LastLoginAt = timeutil.FromMillis(lastLoginAt.Int64)
+		}
+		if deletedAt.Valid {
+			row.DeletedAt = timeutil.FromMillis(deletedAt.Int64)
 		}
 		items = append(items, row)
 	}
