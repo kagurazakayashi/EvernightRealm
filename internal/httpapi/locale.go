@@ -168,6 +168,12 @@ var errorMessages = map[ErrorCode]map[string]string{
 		LocaleEnUS: "This administrator has already been deleted, so this operation did not run. A deleted account accepts no further changes and cannot be restored to sign-in, and deleting it again will not succeed either. It stays in the directory so that past actions and records keep pointing to the same identity.",
 		LocaleJaJP: "この管理者はすでに削除されているため、今回の操作は実行されませんでした。削除済みのアカウントは以降どんな変更も受け付けず、サインインを復帰させることもできません。もう一度削除しても成功しません。過去の操作と記録を同じ身份に辿れるよう、この人は一覧に残ります。",
 	},
+	CodeAccountPolicyModeUnavailable: {
+		LocaleZhCN: "这个自注册模式在本服务器版本尚未开放：名字是认得的，但它需要的准入流程还没有上线，所以策略不会记成它。请改选现在支持的模式（closed 或 open），或等对应功能上线后再保存。",
+		LocaleZhTW: "這個自註冊模式在本伺服器版本尚未開放：名字是認得的，但它需要的准入流程還沒有上線，所以策略不會記成它。請改選現在支援的模式（closed 或 open），或等對應功能上線後再儲存。",
+		LocaleEnUS: "This self-registration mode is not enabled in this server version: the name is recognised, but the admission flow it needs has not shipped, so the policy will not record it. Choose a mode supported today (closed or open), or save again once that feature ships.",
+		LocaleJaJP: "この自己登録モードは現在のサーバー版では有効ではありません。名前は認識されますが、必要な申請受け入れ処理がまだ提供されていないため、ポリシーとして保存できません。現在対応しているモード（closed または open）を選び、該当機能が提供されてからもう一度保存してください。",
+	},
 }
 
 // messageFor 取得錯誤碼在指定語言的使用者訊息；語言未支援或訊息為空時回退 defaultLocale。

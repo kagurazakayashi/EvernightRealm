@@ -61,6 +61,10 @@ type Deps struct {
 	// 為 nil 表示不登記該端點：這個執行檔不對外回報初始化狀態。
 	// 注入的實作只准讀、不准寫——它會被一個匿名可讀的 GET 端點直接呼叫。
 	InitStatus func() (RootInitStatus, error)
+	// AccountPolicy 為「伺服器級帳戶建立策略」用例的入口（internal/app 注入 *acctpolicy.Service）。
+	// 為 nil 表示本執行檔不開放策略端點：Root 讀寫入口與對外的兩個布林都不掛，
+	// 協定層行為與本步之前逐字相同（與 Deps.Auth、Deps.Admins 同一取向）。
+	AccountPolicy AccountPolicyUseCase
 }
 
 // Server 為 HTTP 服務層。
@@ -91,6 +95,9 @@ type Server struct {
 	admins RootAdminUseCase
 	// initStatus 為 Root 初始化狀態的只讀來源（可為 nil）；nil 時同樣一個端點都不掛。
 	initStatus func() (RootInitStatus, error)
+	// accountPolicy 為帳戶建立策略用例入口（可為 nil）；nil 時 accountPolicyEndpoints
+	// 回空清單，Root 端與對外端一個都不掛。
+	accountPolicy AccountPolicyUseCase
 }
 
 // New 以組態、版本字串與外部依賴建立 HTTP 服務層。
@@ -121,6 +128,9 @@ func New(cfg *config.Config, version string, deps Deps) *Server {
 		auth:        deps.Auth,
 		admins:      deps.Admins,
 		initStatus:  deps.InitStatus,
+		// 策略用例為 nil 時一個端點都不掛（見 accountPolicyEndpoints）：
+		// 「裝配了什麼就服務什麼」在這一層沒有分支。
+		accountPolicy: deps.AccountPolicy,
 	}
 	s.httpSrv = &http.Server{
 		Addr:    cfg.Server.Listen,

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/kagurazakayashi/EvernightRealm/internal/account"
+	"github.com/kagurazakayashi/EvernightRealm/internal/acctpolicy"
 	"github.com/kagurazakayashi/EvernightRealm/internal/adminacct"
 	"github.com/kagurazakayashi/EvernightRealm/internal/audit"
 	"github.com/kagurazakayashi/EvernightRealm/internal/auth"
@@ -558,6 +559,19 @@ func run(ctx context.Context, releaseSignals func(), args []string, out io.Write
 		lg.Error("開設管理員用例組裝失敗", "err", err)
 		return err
 	}
+	// 帳戶建立策略用例：審計倉儲與其餘 Root 域用例同一實例（「Root 域留痕只有一個出口」
+	// 在裝配層也成立），倉儲自帶時鐘以確保 updated_at 與審計時刻同源。
+	// 少了它，三個建立入口的開關就沒有一個能被設定的地方，而策略只能被寫死在執行檔裡。
+	policyService, err := acctpolicy.New(acctpolicy.Deps{
+		DB:     db,
+		Store:  acctpolicy.NewStore(timeutil.System()),
+		Audits: auditStore,
+		Log:    lg.Logger,
+	})
+	if err != nil {
+		lg.Error("帳戶建立策略用例組裝失敗", "err", err)
+		return err
+	}
 	srv := httpapi.New(&cfg, Version, httpapi.Deps{
 		Ready:    readinessCheck(db, space),
 		Clock:    timeutil.System(),
@@ -566,6 +580,9 @@ func run(ctx context.Context, releaseSignals func(), args []string, out io.Write
 		ErrorLog: lg.ErrorLogWriter(slog.LevelError),
 		Auth:     authService,
 		Admins:   adminService,
+		// 帳戶建立策略：Root 讀寫入口與登入前的兩個對外布林都由這一份用例給出，
+		// 「策略值不等於能力」的合成只在 internal/acctpolicy 算一次。
+		AccountPolicy: policyService,
 		// Root 初始化狀態的只讀來源：只查組態檔本身，不開任何寫入通路
 		// （初始化仍然只有 evernight-server init-root 這一條路）。
 		InitStatus: initStatusSource(cfg),
