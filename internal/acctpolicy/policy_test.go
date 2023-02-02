@@ -91,6 +91,8 @@ func TestSwitchesAreIndependent(t *testing.T) {
 //
 // 反過來的缺陷（把開關當能力）會是：Root 打開自註冊，登入前的畫面就出現一個
 // 按下去必然失敗的註冊入口——那是讓未開發的模組冒充可用。
+// 管理員建號那一條通路已落地，因此它不再受「恆為假」約束： Allows 合成結果
+// 恰等於策略開關本身，而對外兩個布林與它無關（那個開關從不對門外揭露）。
 func TestEntryOfNeverOpensWithoutCapability(t *testing.T) {
 	combos := []Policy{
 		{AdminCreateStandard: true, SelfRegisterMode: ModeOpen, GuestEnabled: true},
@@ -101,10 +103,11 @@ func TestEntryOfNeverOpensWithoutCapability(t *testing.T) {
 	for i, p := range combos {
 		entry := p.EntryOf()
 		if entry.SignUpOpen || entry.GuestOpen {
-			t.Errorf("第 %d 組：本版本三條通路都不存在，對外答案應全為關，實際 %+v", i+1, entry)
+			t.Errorf("第 %d 組：自註冊與訪客通路都不存在，對外答案應全為關，實際 %+v", i+1, entry)
 		}
-		if p.AllowsAdminCreateStandard() {
-			t.Errorf("第 %d 組：管理員建號通路未實作，Allows 應為假", i+1)
+		if p.AllowsAdminCreateStandard() != p.AdminCreateStandard {
+			t.Errorf("第 %d 組：建號通路已落地，Allows 應恰等於策略開關 %v，實際 %v",
+				i+1, p.AdminCreateStandard, p.AllowsAdminCreateStandard())
 		}
 		if ok, _ := p.AllowsSelfRegister(); ok {
 			t.Errorf("第 %d 組：自註冊通路未實作，Allows 應為假", i+1)
@@ -132,13 +135,17 @@ func TestAllowsSelfRegisterKeepsMode(t *testing.T) {
 	}
 }
 
-// TestCapabilitiesReflectThisBuild 把「本版本三條通路都不存在」這件事釘成一條可失敗的斷言。
+// TestCapabilitiesReflectThisBuild 把「本版本哪幾條建立通路存在」釘成一條可失敗的斷言。
 //
 // 它不是湊數：日後某人實作了自註冊卻忘了在 capabilities 裡改一位，對外入口就不會開放，
 // 而那正是「做了功能但沒上線」最難查的形態；這條斷言會把他導向那個唯一的登記點。
+// 管理員建號已隨 internal/stdacct 落地而翻真，其餘兩條仍必須是假。
 func TestCapabilitiesReflectThisBuild(t *testing.T) {
 	caps := capabilities()
-	if caps.AdminCreateStandard || caps.SelfRegister || caps.Guest {
-		t.Errorf("本步未實作任何建立通路，能力登記應全為假，實際 %+v", caps)
+	if !caps.AdminCreateStandard {
+		t.Error("管理員建立普通帳戶的通路已落地，能力登記該位必須為真")
+	}
+	if caps.SelfRegister || caps.Guest {
+		t.Errorf("自註冊與訪客通路仍未實作，能力登記該兩位應為假，實際 %+v", caps)
 	}
 }

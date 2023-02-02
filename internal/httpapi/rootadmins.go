@@ -261,15 +261,16 @@ func (s *Server) rootAdminEndpoints() []apiRoute {
 	}
 }
 
-// rootConsolePrincipal 走 Root 控制台各入口共用的前置鏈：來源判定 → 憑據解析 → 首次改密門閂。
+// consolePrincipal 走各控制台入口共用的前置鏈：來源判定 → 憑據解析 → 首次改密門閂。
 //
 // 回 false 時回應已經寫好，呼叫端直接返回即可；授權不在這裡判（由用例判），
 // 否則同一件事有兩套真相。
 //
-// 名為「Root 控制台」而不是「rootAdmin」是因為管理員目錄之外還有別的 Root 入口
-// （帳戶建立策略，見 accountpolicy.go）共用這一條鏈：判定只有這一份實作，
-// 新增入口時不各寫一套「先看 Origin 再看 Cookie」的順序。
-func (s *Server) rootConsolePrincipal(w http.ResponseWriter, r *http.Request) (identity.Principal, bool) {
+// 名為「控制台」而不綁定任何一側，是因為 Root 控制台（管理員目錄、帳戶建立策略）與
+// 伺服器管理員控制台（建立普通帳戶，見 adminaccounts.go）共用這一條鏈：
+// 判定只有這一份實作，新增入口時不各寫一套「先看 Origin 再看 Cookie」的順序。
+// 「哪一類主體過得去」從來不是這條鏈的問題——它只換出受信主體，授權由各自的用例判。
+func (s *Server) consolePrincipal(w http.ResponseWriter, r *http.Request) (identity.Principal, bool) {
 	s.noStore(w)
 	if !s.allowRequestOrigin(r) {
 		writeError(w, r, CodeOriginForbidden, http.StatusForbidden)
@@ -305,7 +306,7 @@ func (s *Server) rootConsolePrincipal(w http.ResponseWriter, r *http.Request) (i
 
 // handleRootAdmins 依方法分流：POST 開設、GET／HEAD 分頁目錄。
 func (s *Server) handleRootAdmins(w http.ResponseWriter, r *http.Request) {
-	principal, ok := s.rootConsolePrincipal(w, r)
+	principal, ok := s.consolePrincipal(w, r)
 	if !ok {
 		return
 	}
@@ -321,7 +322,7 @@ func (s *Server) handleRootAdmins(w http.ResponseWriter, r *http.Request) {
 // 刪除沒有請求本體：它不選欄位、也不交依據值，交任何本體都會多出一個
 // 「這個端點似乎可以設定點什麼」的誤讀（decodeJSON 的未知欄位規則因此無事可做）。
 func (s *Server) handleRootAdminProfile(w http.ResponseWriter, r *http.Request) {
-	principal, ok := s.rootConsolePrincipal(w, r)
+	principal, ok := s.consolePrincipal(w, r)
 	if !ok {
 		return
 	}
@@ -579,7 +580,7 @@ func (s *Server) writeUpdateAdminFailure(w http.ResponseWriter, r *http.Request,
 // 這條子路徑只有 PUT 一個方法（allowMethods 已登記，其餘方法回 1002 帶 Allow）：
 // 「動狀態」在協定層就只有一個入口，GET 詳情本來就在父路徑上，不在這裡開第二份讀法。
 func (s *Server) handleRootAdminStatus(w http.ResponseWriter, r *http.Request) {
-	principal, ok := s.rootConsolePrincipal(w, r)
+	principal, ok := s.consolePrincipal(w, r)
 	if !ok {
 		return
 	}
@@ -676,7 +677,7 @@ func (s *Server) writeUpdateAdminStatusFailure(w http.ResponseWriter, r *http.Re
 // 口令本身的形狀不合格不在此處判（那是 credential 模組那一道閘，經用例映射為
 // 1004＋點名 password 欄位）——傳輸層不抄寫第二份口令規則。
 func (s *Server) handleRootAdminPassword(w http.ResponseWriter, r *http.Request) {
-	principal, ok := s.rootConsolePrincipal(w, r)
+	principal, ok := s.consolePrincipal(w, r)
 	if !ok {
 		return
 	}

@@ -65,6 +65,11 @@ type Deps struct {
 	// 為 nil 表示本執行檔不開放策略端點：Root 讀寫入口與對外的兩個布林都不掛，
 	// 協定層行為與本步之前逐字相同（與 Deps.Auth、Deps.Admins 同一取向）。
 	AccountPolicy AccountPolicyUseCase
+	// StandardAccounts 為「管理員建立普通帳戶」用例的入口（internal/app 注入 *stdacct.Service）。
+	// 為 nil 表示本執行檔不開放 /admin/accounts：路徑、回退清單與錯誤面都和未掛載時逐字相同。
+	// 注意它與 AccountPolicy 是兩個依賴而不是同一個：策略端點是 Root 讀寫准入配置，
+	// 本用例是管理員依該配置建行——裝配了誰就服務誰，傳輸層不拿一方猜另一方。
+	StandardAccounts StdAccountUseCase
 }
 
 // Server 為 HTTP 服務層。
@@ -98,6 +103,9 @@ type Server struct {
 	// accountPolicy 為帳戶建立策略用例入口（可為 nil）；nil 時 accountPolicyEndpoints
 	// 回空清單，Root 端與對外端一個都不掛。
 	accountPolicy AccountPolicyUseCase
+	// stdAccounts 為「管理員建立普通帳戶」用例入口（可為 nil）；nil 時
+	// standardAccountEndpoints 回空清單，/admin 首段根本不在登記清單裡。
+	stdAccounts StdAccountUseCase
 }
 
 // New 以組態、版本字串與外部依賴建立 HTTP 服務層。
@@ -131,6 +139,7 @@ func New(cfg *config.Config, version string, deps Deps) *Server {
 		// 策略用例為 nil 時一個端點都不掛（見 accountPolicyEndpoints）：
 		// 「裝配了什麼就服務什麼」在這一層沒有分支。
 		accountPolicy: deps.AccountPolicy,
+		stdAccounts:   deps.StandardAccounts,
 	}
 	s.httpSrv = &http.Server{
 		Addr:    cfg.Server.Listen,

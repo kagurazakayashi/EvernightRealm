@@ -180,17 +180,22 @@ type Capabilities struct {
 
 // capabilities 回傳本版本的通路落地狀況。
 //
-// 三個都是 false，而且這不是妥協：本步交付的是策略的持久化、Root 的操作界面與審計，
-// 三條建立通路任何一條都還沒實作。把某一位先寫成 true，界面就會出現一個按下去
-// 必然失敗的入口，或讓一個不存在的端點被當成可用——那正是「未開發的模組冒充可用」。
-// 反過來，策略值可以由 Root 先設定成放開：那份意圖是真的，只是還沒有執行它的東西，
-// 下面的合成方法會把兩者如實算成「仍不放行」。
-func capabilities() Capabilities { return Capabilities{} }
+// 這一處是「策略 ∧ 通路存在」裡的第二側：開關講的是部署者想要什麼，
+// 這裡講的是這個執行檔做不做得到。AdminCreateStandard 已翻真——管理員建立
+// 普通帳戶的用例與端點已落地（見 internal/stdacct），其餘兩條仍然為 false，
+// 而且這不是妥協：自註冊與訪客任何一條都還沒實作，把某一位先寫成 true，
+// 界面就會出現一個按下去必然失敗的入口，或讓一個不存在的端點被當成可用——
+// 那正是「未開發的模組冒充可用」。反過來，策略值可以由 Root 先設定成放開：
+// 那份意圖是真的，只是還沒有執行它的東西，下面的合成會把兩者如實算成「仍不放行」。
+func capabilities() Capabilities {
+	return Capabilities{AdminCreateStandard: true}
+}
 
 // AllowsAdminCreateStandard 回報「管理員此刻可否建立普通帳戶」：策略開關與通路存在與否。
 //
-// 日後那個用例落地時要問的就是這一句（並在它自己的交易裡現讀策略）。
-// 它刻意不是一個可以被呼叫端「順手當真」的旗標：少了實作，這裡恆為假。
+// 建立通路（internal/stdacct）在自己的交易裡現讀策略後問的就是這一句。
+// 通路已落地，因此本版本起這個答案等於策略開關本身——但合成仍然留在這裡做，
+// 不讓呼叫端自己查表：同一個合成規則有兩處實作時，總有一處會被忘了改。
 func (p Policy) AllowsAdminCreateStandard() bool {
 	return p.AdminCreateStandard && capabilities().AdminCreateStandard
 }

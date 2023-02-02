@@ -60,7 +60,10 @@ func (s *Server) apiRoutes() []apiRoute {
 	// 初始化狀態端點同一個來源、同一個有無判定（未注入來源時不掛）。
 	routes = append(routes, s.initStatusEndpoints()...)
 	// 帳戶建立策略端點（Root 讀寫＋對外的兩個布林）同一個來源、同一個有無判定。
-	return append(routes, s.accountPolicyEndpoints()...)
+	routes = append(routes, s.accountPolicyEndpoints()...)
+	// 管理員建立普通帳戶端點（POST /admin/accounts）同一個來源、同一個有無判定；
+	// 「/admin 首段屬於 API」因此只在端點掛上時才成立。
+	return append(routes, s.standardAccountEndpoints()...)
 }
 
 // apiFirstSegments 從登記清單導出各端點的路徑首段集合。

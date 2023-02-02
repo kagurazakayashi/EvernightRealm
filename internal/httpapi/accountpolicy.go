@@ -3,7 +3,7 @@
 // /auth/capabilities 一個路徑做一件事（GET／HEAD 回報登入前界面的兩個入口答案）。
 //
 // 這個檔案刻意只做協定層該做的四件事，一條領域規則都不寫在這裡：
-//  1. 來源（CSRF）判定與憑據解析——逐字複用 rootConsolePrincipal 那條共用鏈，
+//  1. 來源（CSRF）判定與憑據解析——逐字複用 consolePrincipal 那條共用鏈，
 //     不在這裡重寫一份「先看 Cookie 再看標頭」的順序；
 //  2. 請求本體的形態——PUT 的白名單就是那三個欄位，一個都不能省（省掉等於默默按
 //     「關」處理，而「關」是一個決定不是缺席）；未知欄位由 decodeJSON 的
@@ -113,7 +113,7 @@ func (s *Server) accountPolicyEndpoints() []apiRoute {
 
 // handleAccountPolicy 依方法分流：GET／HEAD 現讀策略、PUT 一次寫入三個值。
 func (s *Server) handleAccountPolicy(w http.ResponseWriter, r *http.Request) {
-	principal, ok := s.rootConsolePrincipal(w, r)
+	principal, ok := s.consolePrincipal(w, r)
 	if !ok {
 		return
 	}

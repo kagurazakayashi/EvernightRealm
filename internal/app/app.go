@@ -28,6 +28,7 @@ import (
 	"github.com/kagurazakayashi/EvernightRealm/internal/httpapi"
 	"github.com/kagurazakayashi/EvernightRealm/internal/runlog"
 	"github.com/kagurazakayashi/EvernightRealm/internal/session"
+	"github.com/kagurazakayashi/EvernightRealm/internal/stdacct"
 	"github.com/kagurazakayashi/EvernightRealm/internal/timeutil"
 	"github.com/kagurazakayashi/EvernightRealm/internal/webassets"
 )
@@ -559,17 +560,35 @@ func run(ctx context.Context, releaseSignals func(), args []string, out io.Write
 		lg.Error("開設管理員用例組裝失敗", "err", err)
 		return err
 	}
-	// 帳戶建立策略用例：審計倉儲與其餘 Root 域用例同一實例（「Root 域留痕只有一個出口」
+	// 帳戶建立策略倉儲與用例：審計倉儲與其餘 Root 域用例同一實例（「Root 域留痕只有一個出口」
 	// 在裝配層也成立），倉儲自帶時鐘以確保 updated_at 與審計時刻同源。
-	// 少了它，三個建立入口的開關就沒有一個能被設定的地方，而策略只能被寫死在執行檔裡。
+	// 少了倉儲，三個建立入口的開關就沒有一個能被設定的地方，而策略只能被寫死在執行檔裡；
+	// 同一份倉儲實例也交給建立普通帳戶的用例——「建號前現讀策略」讀的就是這一處，
+	// 不各建一份讀法。
+	policyStore := acctpolicy.NewStore(timeutil.System())
 	policyService, err := acctpolicy.New(acctpolicy.Deps{
 		DB:     db,
-		Store:  acctpolicy.NewStore(timeutil.System()),
+		Store:  policyStore,
 		Audits: auditStore,
 		Log:    lg.Logger,
 	})
 	if err != nil {
 		lg.Error("帳戶建立策略用例組裝失敗", "err", err)
+		return err
+	}
+	// 管理員建立普通帳戶用例：帳戶、審計與策略倉儲都沿用上面的同一批實例，
+	// 口令派生與 Root 開設管理員共用同一份參數檔。少了它，admin_create_standard
+	// 這個開關就只有一份設定而沒有一條通路去執行——策略與現實開始各說各話。
+	standardAccountService, err := stdacct.New(stdacct.Deps{
+		DB:       db,
+		Accounts: accountsStore,
+		Policy:   policyStore,
+		Audits:   auditStore,
+		Hashing:  hashingParams,
+		Log:      lg.Logger,
+	})
+	if err != nil {
+		lg.Error("建立普通帳戶用例組裝失敗", "err", err)
 		return err
 	}
 	srv := httpapi.New(&cfg, Version, httpapi.Deps{
@@ -583,6 +602,9 @@ func run(ctx context.Context, releaseSignals func(), args []string, out io.Write
 		// 帳戶建立策略：Root 讀寫入口與登入前的兩個對外布林都由這一份用例給出，
 		// 「策略值不等於能力」的合成只在 internal/acctpolicy 算一次。
 		AccountPolicy: policyService,
+		// 管理員建立普通帳戶：策略現讀與放行合成由 internal/stdacct 在自己的交易裡做，
+		// 傳輸層只負責把受信主體與三個欄位遞進去。
+		StandardAccounts: standardAccountService,
 		// Root 初始化狀態的只讀來源：只查組態檔本身，不開任何寫入通路
 		// （初始化仍然只有 evernight-server init-root 這一條路）。
 		InitStatus: initStatusSource(cfg),

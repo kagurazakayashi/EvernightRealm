@@ -174,6 +174,12 @@ var errorMessages = map[ErrorCode]map[string]string{
 		LocaleEnUS: "This self-registration mode is not enabled in this server version: the name is recognised, but the admission flow it needs has not shipped, so the policy will not record it. Choose a mode supported today (closed or open), or save again once that feature ships.",
 		LocaleJaJP: "この自己登録モードは現在のサーバー版では有効ではありません。名前は認識されますが、必要な申請受け入れ処理がまだ提供されていないため、ポリシーとして保存できません。現在対応しているモード（closed または open）を選び、該当機能が提供されてからもう一度保存してください。",
 	},
+	CodeAccountCreationDisabled: {
+		LocaleZhCN: "服务器当前的账户建立策略没有开放这条通路，本次建立没有执行。你的权限没有问题，改登录名或重新登录都不会改变这件事；请Root在服务器账户建立策略中打开对应开关后再试。",
+		LocaleZhTW: "伺服器目前的帳戶建立策略沒有開放這條通路，本次建立沒有執行。你的權限沒有問題，改登入名或重新登入都不會改變這件事；請 Root 在伺服器帳戶建立策略中打開對應開關後再試。",
+		LocaleEnUS: "The server's account-creation policy does not open this path right now, so this creation did not run. Your permissions are fine, and changing the login name or signing in again will not change that; ask Root to turn on the matching switch in the server account-creation policy, then try again.",
+		LocaleJaJP: "サーバーの現在のアカウント作成ポリシーはこの経路を開放していないため、今回の作成は実行されませんでした。権限に問題はありません。ログイン名を変えても再ログインしても状況は変わりません。Root にサーバーのアカウント作成ポリシーで対応するスイッチを有効にしてもらうまでお待ちください。",
+	},
 }
 
 // messageFor 取得錯誤碼在指定語言的使用者訊息；語言未支援或訊息為空時回退 defaultLocale。
