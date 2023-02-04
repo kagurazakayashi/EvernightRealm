@@ -104,7 +104,7 @@ func newStdEnv(t *testing.T) *stdEnv {
 		t.Fatalf("建立策略用例失敗：%v", err)
 	}
 	stdService, err := stdacct.New(stdacct.Deps{
-		DB: db, Accounts: accountsStore, Policy: policyStore,
+		DB: db, Accounts: accountsStore, Grants: grantsStore, Policy: policyStore,
 		Audits: auditStore, Hashing: credential.TestParams,
 	})
 	if err != nil {
@@ -430,9 +430,17 @@ func TestAuthorizationMatrix(t *testing.T) {
 	if crossSite.StatusCode != http.StatusForbidden || envelopeCode(t, crossSite) != int(CodeOriginForbidden) {
 		t.Errorf("跨站來源應回 2005/403，實際 %d", crossSite.StatusCode)
 	}
-	wrongMethod := getAuth(t, e.ts, "/admin/accounts", cookieHeader(admin), "", "")
-	if wrongMethod.StatusCode != http.StatusMethodNotAllowed || envelopeCode(t, wrongMethod) != int(CodeMethodNotAllowed) {
-		t.Errorf("GET /admin/accounts 應回 1002/405，實際 %d", wrongMethod.StatusCode)
+	// GET 已是目錄讀取（本步的變更），405 那一格改由兩個未登記的方法量：
+	// 「/admin/accounts 只認 GET／HEAD／POST」與「單筆路徑只認 GET／HEAD／PUT」。
+	for _, probe := range []struct{ method, path string }{
+		{http.MethodDelete, "/admin/accounts"},
+		{http.MethodPatch, "/admin/accounts/00000000-0000-7000-8000-000000000000"},
+	} {
+		wrongMethod := sendMethod(t, e.ts, probe.method, probe.path, admin)
+		if wrongMethod.StatusCode != http.StatusMethodNotAllowed ||
+			envelopeCode(t, wrongMethod) != int(CodeMethodNotAllowed) {
+			t.Errorf("%s %s 應回 1002/405，實際 %d", probe.method, probe.path, wrongMethod.StatusCode)
+		}
 	}
 	if n := countCreateAudits(t, e.db); n != 0 {
 		t.Errorf("被拒矩陣不得產生建號審計，實際 %d 筆", n)
@@ -548,8 +556,8 @@ func TestAuditActorIsRealOperator(t *testing.T) {
 	}
 }
 
-// TestEndpointAbsentWithoutWiring 未注入用例時端點一個都不掛：POST /admin/accounts
-// 與本步之前逐字相同（1001），「裝配了什麼就服務什麼」沒有分支。
+// TestEndpointAbsentWithoutWiring 未注入用例時端點一個都不掛：建號、目錄與單筆
+// 三個入口全都回到 1001，與本步之前逐字相同——「裝配了什麼就服務什麼」沒有分支。
 func TestEndpointAbsentWithoutWiring(t *testing.T) {
 	clock := timeutil.System()
 	dir := t.TempDir()
@@ -579,5 +587,17 @@ func TestEndpointAbsentWithoutWiring(t *testing.T) {
 	resp := postJSON(t, ts, "/admin/accounts", "{}", "", nil)
 	if resp.StatusCode != http.StatusNotFound || envelopeCode(t, resp) != int(CodeNotFound) {
 		t.Errorf("未注入用例時 POST /admin/accounts 應回 1001，實際 %d", resp.StatusCode)
+	}
+	// 本步新增的三個入口同一句話：沒裝配就一個都不掛，連「目錄讀得到但改不了」
+	// 這種半套形態也不可能出現。
+	for _, probe := range []struct{ method, path string }{
+		{http.MethodGet, "/admin/accounts"},
+		{http.MethodGet, "/admin/accounts/00000000-0000-7000-8000-000000000000"},
+		{http.MethodPut, "/admin/accounts/00000000-0000-7000-8000-000000000000"},
+	} {
+		got := sendMethod(t, ts, probe.method, probe.path, nil)
+		if got.StatusCode != http.StatusNotFound || envelopeCode(t, got) != int(CodeNotFound) {
+			t.Errorf("未注入用例時 %s %s 應回 1001，實際 %d", probe.method, probe.path, got.StatusCode)
+		}
 	}
 }

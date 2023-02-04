@@ -576,12 +576,14 @@ func run(ctx context.Context, releaseSignals func(), args []string, out io.Write
 		lg.Error("帳戶建立策略用例組裝失敗", "err", err)
 		return err
 	}
-	// 管理員建立普通帳戶用例：帳戶、審計與策略倉儲都沿用上面的同一批實例，
-	// 口令派生與 Root 開設管理員共用同一份參數檔。少了它，admin_create_standard
-	// 這個開關就只有一份設定而沒有一條通路去執行——策略與現實開始各說各話。
+	// 管理員打理普通帳戶用例（建立、目錄、詳情與資料編輯）：帳戶、授予、審計與策略倉儲
+	// 都沿用上面的同一批實例，口令派生與 Root 開設管理員共用同一份參數檔。少了它，
+	// admin_create_standard 這個開關就只有一份設定而沒有一條通路去執行——策略與現實
+	// 開始各說各話；少了目錄與詳情，管理員端就只能建人卻查不到自己建過誰。
 	standardAccountService, err := stdacct.New(stdacct.Deps{
 		DB:       db,
 		Accounts: accountsStore,
+		Grants:   grantsStore,
 		Policy:   policyStore,
 		Audits:   auditStore,
 		Hashing:  hashingParams,

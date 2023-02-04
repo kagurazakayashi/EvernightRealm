@@ -83,6 +83,7 @@ func newEnv(t *testing.T) *env {
 	service, err := New(Deps{
 		DB:       db,
 		Accounts: account.NewStore(clock),
+		Grants:   grant.NewStore(clock),
 		Policy:   policyStore,
 		Audits:   audit.NewStore(clock),
 		Hashing:  credential.TestParams,
@@ -565,12 +566,13 @@ func TestFirstSignInLoopCloses(t *testing.T) {
 func TestNewRejectsMissingDeps(t *testing.T) {
 	e := newEnv(t)
 	valid := Deps{
-		DB: e.db, Accounts: e.service.accounts, Policy: e.policy,
+		DB: e.db, Accounts: e.service.accounts, Grants: e.service.grants, Policy: e.policy,
 		Audits: audit.NewStore(e.clock), Hashing: credential.TestParams,
 	}
 	for _, mutate := range []func(*Deps){
 		func(d *Deps) { d.DB = nil },
 		func(d *Deps) { d.Accounts = nil },
+		func(d *Deps) { d.Grants = nil },
 		func(d *Deps) { d.Policy = nil },
 		func(d *Deps) { d.Audits = nil },
 	} {
@@ -580,8 +582,8 @@ func TestNewRejectsMissingDeps(t *testing.T) {
 			t.Error("缺少必要依賴時 New 必須報錯")
 		}
 	}
-	if _, err := New(Deps{DB: e.db, Accounts: e.service.accounts, Policy: e.policy,
-		Audits: audit.NewStore(e.clock), Hashing: credential.Params{}}); err == nil {
+	if _, err := New(Deps{DB: e.db, Accounts: e.service.accounts, Grants: e.service.grants,
+		Policy: e.policy, Audits: audit.NewStore(e.clock), Hashing: credential.Params{}}); err == nil {
 		t.Error("全零參數檔應被拒：它無法產生可用的憑據")
 	}
 }

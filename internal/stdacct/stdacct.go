@@ -1,15 +1,30 @@
-// Package stdacct 是「伺服器級管理員建立普通帳戶」的應用服務層：
-// 受信主體判定 → 策略現讀 → 憑據派生 → 帳戶建立與審計落地的原子用例。
+// Package stdacct 是「伺服器級管理員打理普通帳戶」的應用服務層：
+// 建立（受信主體判定 → 策略現讀 → 憑據派生 → 帳戶建立與審計落地的原子用例）、
+// 分頁目錄與單筆詳情、非安全資料（顯示名）的白名單編輯。
+//
+// 本套件的四個用例共用同一條授權邊界（NeedServerAdmin）與同一批仓储實例，
+// 卻各自回答不同的一句話：建立問「此刻准不准多出一筆」、目錄問「哪些人在我這本名冊上」、
+// 詳情與編輯問「這一筆的現值是什麼、能不能按白名單改一欄」。
+// 把「建號」與「目錄」放進同一個套件是刻意的：兩者認的是同一類主體（不持有伺服器級角色的
+// 普通與訪戶帳戶）、落的是同一個審計域（Root 域、actor 是真實操作者），
+// 拆成兩套就會出現「建號認得管理員排除規則、目錄卻把他列進來」這種兩處真相。
 //
 // 為什麼獨立成一個套件而不是放進 internal/adminacct 或 internal/account：
 //   - adminacct 回答的是「Root 如何打理管理員目錄」，每一個用例的授權邊界都是 NeedRoot，
 //     且建出的形態恆帶 server_admin 授予；本套件的授權邊界是 NeedServerAdmin，
-//     建出的形態恆「不帶任何伺服器級角色」——把兩者混進一個套件，
-//     「誰能建哪一類人」就要靠同一個 Service 上的分支來記，那是兩套邊界最容易互相污染的形状；
+//     建出的形態恆「不帶任何伺服器級角色」，而目錄的範圍定義恰恰是「把持有授予的人排掉」——
+//     把兩者混進一個套件，「誰能碰哪一類人」就要靠同一個 Service 上的分支來記，
+//     那是兩套邊界最容易互相污染的形態；
 //   - account 是帳戶實體與其倉儲（「一筆帳戶資料長什麼樣」），而「此刻准不准多出一筆帳戶」
-//     是使用帳戶的規則，屬策略與授權，不屬實體；
+//     「這個人歸不歸管理員管」是使用帳戶的規則，屬策略與授權，不屬實體；
 //   - 依賴方向因此保持單向：stdacct → acctpolicy（策略現讀與放行合成）、
-//     account（實體與唯一鍵）、audit（落地痕跡）、credential／database／identity。
+//     grant（授予有無）、account（實體與唯一鍵）、audit（落地痕跡）、
+//     credential／database／identity。
+//
+// 目錄那條跨表只讀 SQL 屬用戶批准的「只讀展示投影例外」（原為 internal/adminacct 而立，
+// 本步經用戶批准首次擴展到第二個套件）。三條邊界一個字不減：只讀、欄位白名單、
+// 永不參與授權判定；單筆詳情與編輯的範圍核實仍經 account 實體讀法＋grant 授予讀法，
+// 見 directory.go 與 profile.go 的頭注。
 //
 // 四條不可讓步的規定：
 //   - 角色、帳戶類型、審批狀態、首次改密要求都由本用例決定，請求裡沒有任何格子可填。
@@ -54,6 +69,7 @@ import (
 	"github.com/kagurazakayashi/EvernightRealm/internal/audit"
 	"github.com/kagurazakayashi/EvernightRealm/internal/credential"
 	"github.com/kagurazakayashi/EvernightRealm/internal/database"
+	"github.com/kagurazakayashi/EvernightRealm/internal/grant"
 	"github.com/kagurazakayashi/EvernightRealm/internal/identity"
 	"github.com/kagurazakayashi/EvernightRealm/internal/idgen"
 )
@@ -116,6 +132,9 @@ type Deps struct {
 	DB *database.DB
 	// Accounts 是帳戶倉儲（登入名正規化與唯一鍵的公共能力即來自它）。
 	Accounts *account.Store
+	// Grants 是伺服器級授予倉儲。目錄與詳情問「他是不是隻有普通帳戶這一層身份」時，
+	// 這句話的權威只在這裡——展示投影負責列出、授予倉儲負責答覆，兩處不各寫一套。
+	Grants *grant.Store
 	// Policy 是帳戶建立策略倉儲。放不放行問的是 acctpolicy，不自己查那張表——
 	// 策略的解讀規則（含「策略值不等於能力」的合成）必須只有那一個來源。
 	Policy *acctpolicy.Store
@@ -127,10 +146,11 @@ type Deps struct {
 	Log *slog.Logger
 }
 
-// Service 是建立普通帳戶用例的編排者。零值不可用，請經 New 取得。
+// Service 是普通帳戶用例（建立、目錄、詳情與資料編輯）的編排者。零值不可用，請經 New 取得。
 type Service struct {
 	db       *database.DB
 	accounts *account.Store
+	grants   *grant.Store
 	policy   *acctpolicy.Store
 	audits   *audit.Store
 	hashing  credential.Params
@@ -140,10 +160,13 @@ type Service struct {
 // New 校驗依賴並建立服務。
 //
 // 缺任何一個依賴都是組裝缺陷，在啟動階段當場報出：少策略倉儲就問不到「此刻准不准建」，
-// 等於默認放行；少審計倉儲就建出一個不留痕的伺服器級主體變更——後者正是審計要防的那件事。
+// 等於默認放行；少授予倉儲就分不清目錄裡誰是管理員（要嘛把管理員列進普通帳戶目錄、
+// 要嘛把普通帳戶誤判成出局）；少審計倉儲就建出或改出一個不留痕的伺服器級主體變更——
+// 後兩者正是審計要防的那件事。
 func New(deps Deps) (*Service, error) {
-	if deps.DB == nil || deps.Accounts == nil || deps.Policy == nil || deps.Audits == nil {
-		return nil, errors.New("stdacct: 用例缺少必要依賴（db/accounts/policy/audits）")
+	if deps.DB == nil || deps.Accounts == nil || deps.Grants == nil ||
+		deps.Policy == nil || deps.Audits == nil {
+		return nil, errors.New("stdacct: 用例缺少必要依賴（db/accounts/grants/policy/audits）")
 	}
 	if err := deps.Hashing.Validate(); err != nil {
 		return nil, fmt.Errorf("stdacct: 憑據雜湊參數檔不合格: %w", err)
@@ -155,6 +178,7 @@ func New(deps Deps) (*Service, error) {
 	return &Service{
 		db:       deps.DB,
 		accounts: deps.Accounts,
+		grants:   deps.Grants,
 		policy:   deps.Policy,
 		audits:   deps.Audits,
 		hashing:  deps.Hashing,
