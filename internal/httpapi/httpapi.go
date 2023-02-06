@@ -65,10 +65,11 @@ type Deps struct {
 	// 為 nil 表示本執行檔不開放策略端點：Root 讀寫入口與對外的兩個布林都不掛，
 	// 協定層行為與本步之前逐字相同（與 Deps.Auth、Deps.Admins 同一取向）。
 	AccountPolicy AccountPolicyUseCase
-	// StandardAccounts 為「管理員建立普通帳戶」用例的入口（internal/app 注入 *stdacct.Service）。
+	// StandardAccounts 為「管理員打理普通帳戶」用例的入口（internal/app 注入 *stdacct.Service）。
 	// 為 nil 表示本執行檔不開放 /admin/accounts：路徑、回退清單與錯誤面都和未掛載時逐字相同。
 	// 注意它與 AccountPolicy 是兩個依賴而不是同一個：策略端點是 Root 讀寫准入配置，
-	// 本用例是管理員依該配置建行——裝配了誰就服務誰，傳輸層不拿一方猜另一方。
+	// 本用例是管理員依該配置建行、翻名冊、改顯示名與開關登入能力——
+	// 裝配了誰就服務誰，傳輸層不拿一方猜另一方。
 	StandardAccounts StdAccountUseCase
 }
 
@@ -103,7 +104,7 @@ type Server struct {
 	// accountPolicy 為帳戶建立策略用例入口（可為 nil）；nil 時 accountPolicyEndpoints
 	// 回空清單，Root 端與對外端一個都不掛。
 	accountPolicy AccountPolicyUseCase
-	// stdAccounts 為「管理員打理普通帳戶」用例入口（建立、目錄、詳情與資料編輯；
+	// stdAccounts 為「管理員打理普通帳戶」用例入口（建立、目錄、詳情、資料編輯與登入狀態；
 	// 可為 nil）；nil 時 standardAccountEndpoints 回空清單，/admin 首段根本不在登記清單裡。
 	stdAccounts StdAccountUseCase
 }

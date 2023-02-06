@@ -595,7 +595,7 @@ func (s *Server) handleRootAdminStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	// 兩個欄位都必須落在封閉集合內：值取自 internal/account 的常數（字面值只有一份）。
 	// 非法值当场 1004 點名欄位，不帶進用例——那是拼寫問題，不是併發問題。
-	newStatus, expectedStatus, badField := parseAdminStatusPair(in)
+	newStatus, expectedStatus, badField := parseAdminStatusPair(in.Status, in.ExpectedStatus)
 	if badField != "" {
 		writeErrorDetails(w, r, CodeInvalidBody, http.StatusBadRequest,
 			map[string]any{"invalid_field": badField})
@@ -624,18 +624,23 @@ func (s *Server) handleRootAdminStatus(w http.ResponseWriter, r *http.Request) {
 
 // parseAdminStatusPair 把請求的字串欄位換成帳戶狀態枚舉；任何一侧不合格時
 // 回傳要點名的欄位名（「status」或「expected_status」），兩侧都缺就點新目標那一側。
-func parseAdminStatusPair(in updateAdminStatusRequest) (newStatus, expectedStatus account.Status, badField string) {
-	newStatus = account.Status(in.Status)
-	expectedStatus = account.Status(in.ExpectedStatus)
+//
+// 收兩個字串而不是收某個請求結構，是因為這句話對兩組端點都只有一份答案：
+// /root/admins/{account_id}/status 與 /admin/accounts/{account_id}/status 的本體形狀相同、
+// 合法值集合也相同（都是帳戶域那兩個可寫狀態）。抄兩份對映表就會出現
+// 「一處放寬了另一處沒放寬」的兩套協定，而這兩個端點說的本來是同一件事。
+func parseAdminStatusPair(status, expectedStatus string) (newStatus, expected account.Status, badField string) {
+	newStatus = account.Status(status)
+	expected = account.Status(expectedStatus)
 	switch {
-	case in.ExpectedStatus == "":
+	case expectedStatus == "":
 		return "", "", "expected_status"
 	case !isKnownAccountStatus(newStatus):
 		return "", "", "status"
-	case !isKnownAccountStatus(expectedStatus):
+	case !isKnownAccountStatus(expected):
 		return "", "", "expected_status"
 	}
-	return newStatus, expectedStatus, ""
+	return newStatus, expected, ""
 }
 
 // isKnownAccountStatus 回報狀態值是否落在帳戶域的封閉集合內。

@@ -585,6 +585,9 @@ func run(ctx context.Context, releaseSignals func(), args []string, out io.Write
 		Accounts: accountsStore,
 		Grants:   grantsStore,
 		Policy:   policyStore,
+		// 停用普通帳戶時在同一交易裡撤銷目標會話：與登入、Root 開設管理員那條停用
+		// 必須是同一個會話倉儲實例，否則「撤銷落庫的形態」與「驗證讀到的形態」各長一套。
+		Sessions: sessionStore,
 		Audits:   auditStore,
 		Hashing:  hashingParams,
 		Log:      lg.Logger,

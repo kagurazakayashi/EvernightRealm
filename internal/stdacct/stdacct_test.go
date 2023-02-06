@@ -85,6 +85,9 @@ func newEnv(t *testing.T) *env {
 		Accounts: account.NewStore(clock),
 		Grants:   grant.NewStore(clock),
 		Policy:   policyStore,
+		// 與登入用例同一個會話倉儲實例：停用那條通路要檢查「撤銷是不是真的落在
+		// 同一批會話上」，換一個實例就測不到。
+		Sessions: sessions,
 		Audits:   audit.NewStore(clock),
 		Hashing:  credential.TestParams,
 		Log:      slog.New(slog.NewTextHandler(&logs, nil)),

@@ -105,7 +105,7 @@ func newStdEnv(t *testing.T) *stdEnv {
 	}
 	stdService, err := stdacct.New(stdacct.Deps{
 		DB: db, Accounts: accountsStore, Grants: grantsStore, Policy: policyStore,
-		Audits: auditStore, Hashing: credential.TestParams,
+		Sessions: sessions, Audits: auditStore, Hashing: credential.TestParams,
 	})
 	if err != nil {
 		t.Fatalf("建立普通帳戶用例失敗：%v", err)
@@ -556,8 +556,8 @@ func TestAuditActorIsRealOperator(t *testing.T) {
 	}
 }
 
-// TestEndpointAbsentWithoutWiring 未注入用例時端點一個都不掛：建號、目錄與單筆
-// 三個入口全都回到 1001，與本步之前逐字相同——「裝配了什麼就服務什麼」沒有分支。
+// TestEndpointAbsentWithoutWiring 未注入用例時端點一個都不掛：建號、目錄、單筆與狀態
+// 四個入口全都回到 1001，與未掛載時逐字相同——「裝配了什麼就服務什麼」沒有分支。
 func TestEndpointAbsentWithoutWiring(t *testing.T) {
 	clock := timeutil.System()
 	dir := t.TempDir()
@@ -588,12 +588,13 @@ func TestEndpointAbsentWithoutWiring(t *testing.T) {
 	if resp.StatusCode != http.StatusNotFound || envelopeCode(t, resp) != int(CodeNotFound) {
 		t.Errorf("未注入用例時 POST /admin/accounts 應回 1001，實際 %d", resp.StatusCode)
 	}
-	// 本步新增的三個入口同一句話：沒裝配就一個都不掛，連「目錄讀得到但改不了」
+	// 本組端點的四個入口同一句話：沒裝配就一個都不掛，連「目錄讀得到但改不了狀態」
 	// 這種半套形態也不可能出現。
 	for _, probe := range []struct{ method, path string }{
 		{http.MethodGet, "/admin/accounts"},
 		{http.MethodGet, "/admin/accounts/00000000-0000-7000-8000-000000000000"},
 		{http.MethodPut, "/admin/accounts/00000000-0000-7000-8000-000000000000"},
+		{http.MethodPut, "/admin/accounts/00000000-0000-7000-8000-000000000000/status"},
 	} {
 		got := sendMethod(t, ts, probe.method, probe.path, nil)
 		if got.StatusCode != http.StatusNotFound || envelopeCode(t, got) != int(CodeNotFound) {

@@ -1,6 +1,7 @@
 // adminaccounts.go 是「伺服器級管理員打理普通帳戶」的傳輸層落點：
 // /admin/accounts 一個路徑做兩件事（GET／HEAD 分頁目錄、POST 建立），
-// /admin/accounts/{account_id} 一個路徑做兩件事（GET／HEAD 單筆詳情、PUT 編輯非安全資料）。
+// /admin/accounts/{account_id} 一個路徑做兩件事（GET／HEAD 單筆詳情、PUT 編輯非安全資料），
+// /admin/accounts/{account_id}/status 一個路徑做一件事（PUT 停用或恢復登入能力）。
 //
 // 這個檔案刻意只做協定層該做的四件事，一條領域規則都不寫在這裡：
 //  1. 來源（CSRF）判定與憑據解析——逐字複用 consolePrincipal 那條共用鏈，
@@ -8,6 +9,7 @@
 //  2. 首次改密門閂——同一條鏈上的 requirePasswordChangeDone，與其餘受保護端點同一把閘；
 //  3. 請求本體與查詢參數的形態——建立只有 login_name／display_name／password，
 //     編輯只有 display_name 與它所依據的 expected_display_name，
+//     狀態只有 status 與它所依據的 expected_status，
 //     目錄只認 page／page_size／status／type／q 五個查詢參數；
 //     未知欄位（含 role、account_type、status、subject_kind、must_change_password
 //     這類「自報身分或企圖覆蓋隱藏欄位」的嘗試）由 decodeJSON 的 DisallowUnknownFields
@@ -15,8 +17,8 @@
 //     不是由請求內容決定；「哪個活動」更是連格子都沒有——
 //     普通帳戶目錄不屬於任何活動，也塞不進任何活動；
 //  4. 結論對映——把用例回傳的可判別錯誤一一映射到機器碼，其餘一律 500 且細節只進日誌。
-//     本步不新增任何機器碼：1001（不在這本目錄裡）、1004（改寫法）、2011（換身分也沒用）、
-//     2012（那個名字是別人的）、2013（你看見的現值已過期）、
+//     這組端點不新增任何機器碼：1001（不在這本目錄裡）、1004（改寫法）、2011（換身分也沒用）、
+//     2012（那個名字是別人的）、2013（你看見的現值已過期）、2014（他的可用性已不是你確認時那樣）、
 //     2017（策略此刻不放開這條建號通路）各是各的處置。
 //
 // 與 /root/admins 的分工是一條邊界而不是一個目錄慣例：那組端點管的是「持有伺服器級
@@ -79,6 +81,13 @@ type StdAccountUseCase interface {
 	// 並回可判別的衝突結論。
 	UpdateStandardAccountProfile(ctx context.Context, principal identity.Principal,
 		accountID idgen.ID, displayName, expectedDisplayName, requestID string) (stdacct.StandardProfile, error)
+	// UpdateStandardAccountStatus 停用或恢復一名目錄內普通帳戶的伺服器級登入能力；
+	// expectedStatus 是呼叫端提交所依據的現狀，現狀已變時整個操作不發生
+	// （狀態沒改、會話沒撤、審計沒記）並回可判別的衝突結論。
+	// 撤銷目標既有會話與狀態寫入落在同一個交易，見 internal/stdacct/status.go。
+	UpdateStandardAccountStatus(ctx context.Context, principal identity.Principal,
+		accountID idgen.ID, in stdacct.StatusChangeInput,
+		requestID string) (stdacct.StatusChange, error)
 }
 
 // createStandardAccountRequest 是建立請求的本體。只有這三個欄位可用：
@@ -97,6 +106,14 @@ type createStandardAccountRequest struct {
 type updateStandardAccountProfileRequest struct {
 	DisplayName         string `json:"display_name"`
 	ExpectedDisplayName string `json:"expected_display_name"`
+}
+
+// updateStandardAccountStatusRequest 是停用／恢復請求的本體。白名單只有狀態一欄，
+// 外加它所依據的現狀：這兩欄是 /status 子資源特有的，父路徑那份編輯白名單不認它們，
+// 反之本體也不能帶 display_name／password／must_change_password 之類的欄位（未知欄位 1004）。
+type updateStandardAccountStatusRequest struct {
+	Status         string `json:"status"`
+	ExpectedStatus string `json:"expected_status"`
 }
 
 // createdStandardAccountResponse 是建立成功的回應本體。
@@ -119,9 +136,8 @@ type createdStandardAccountResponse struct {
 //
 // 與管理員那一個的兩處差異都是事實差：沒有的 granted_at（普通帳戶沒有授予可言）、
 // 多有的 account_type（他是普通帳戶還是訪戶帳戶，是本目錄必須講清楚的來源）。
-// disabled_at 只可能在單筆回應裡出現（目錄行不帶，與 /root/admins 同一分工）；
-// 由於本步尚未有停用普通帳戶的通路，它在實務上恆缺席——缺席是「沒有這件事」，
-// 不是「查不到」，界面據此不顯示這一行。
+// disabled_at 只可能在單筆回應裡出現（目錄行不帶，與 /root/admins 同一分工）：
+// 目錄要答的是「他在不在、是哪一類、能不能登入」，「何時被停的」屬於那一筆的細節。
 type standardAccountItem struct {
 	AccountID          string `json:"account_id"`
 	LoginName          string `json:"login_name"`
@@ -133,6 +149,7 @@ type standardAccountItem struct {
 	// LastLoginAt 為最近一次登入時刻；從未登入時欄位缺席（不拿建立時刻冒充）。
 	LastLoginAt string `json:"last_login_at,omitempty"`
 	// DisabledAt 為進入禁用狀態的時刻；可用狀態時欄位缺席（不拿零值冒充「停過」）。
+	// 與 /root/admins 同一分工：只可能在單筆回應裡出現，目錄行不帶。
 	DisabledAt string `json:"disabled_at,omitempty"`
 }
 
@@ -157,14 +174,30 @@ type standardAccountProfileResponse struct {
 	RequestID string              `json:"request_id"`
 }
 
+// standardAccountStatusResponse 是 PUT /admin/accounts/{account_id}/status 的回應本體。
+//
+// 帶 revoked_sessions 不是修飾：影響範圍是這次操作的实际结果之一，界面要能如實說出
+// 「這次讓 N 臺裝置必須重新登入」，而不是讓操作者對著一句「已停用」自己猜。
+// 恢復時恆為 0（這條通路不撤也不復活任何會話），0 是事實而不是失敗。
+// account 仍是「變更之後的資料庫現值」，與詳情、編輯同一個來源。
+type standardAccountStatusResponse struct {
+	Account         standardAccountItem `json:"account"`
+	RevokedSessions int                 `json:"revoked_sessions"`
+	RequestID       string              `json:"request_id"`
+}
+
 // standardAccountEndpoints 回傳普通帳戶端點的登記清單；未注入用例時為空。
 //
 // 登記與否只這一處來源，深連結回退用的 API 首段清單（/admin）因此自動同步。
 // 同一路徑上由方法決定做哪件事：分流都發生在各自 handle 的第一層，
 // 拆成多條路徑樣式反而會多出「幾個端點共用一份授權語意」的維護點。
-// {account_id} 匹配恰好一個路徑段；多出的段落到 catch-all，回 JSON 的 1001。
-// 詳情與編輯共用父路徑（與 /root/admins/{account_id} 同形）：這組端點裡只有
-// 「一欄非安全資料」這一個寫入口，不需要為它另開子路徑去宣稱動的是哪一欄。
+// {account_id} 匹配恰好一個路徑段；多出的段落只有 /status 這一條已登記的子路徑，
+// 其他多段仍落到 catch-all，回 JSON 的 1001。
+// 詳情與編輯共用父路徑（與 /root/admins/{account_id} 同形）：那條白名單只有
+// display_name 一欄非安全資料，不需要為它另開子路徑去宣稱動的是哪一欄。
+// 狀態走 /status 子資源（同樣與 /root/admins/{account_id}/status 同形）：
+// 狀態是安全欄位，與普通資料各有一把白名單閘，混在一條 PUT 裡就等於
+// 「能改顯示名的人也能順手改登入能力」，而那正是兩套邊界互相污染的地方。
 func (s *Server) standardAccountEndpoints() []apiRoute {
 	if s.stdAccounts == nil {
 		return nil
@@ -174,7 +207,61 @@ func (s *Server) standardAccountEndpoints() []apiRoute {
 			http.MethodGet, http.MethodHead, http.MethodPost)},
 		{"/admin/accounts/{account_id}", s.allowMethods(s.handleAdminAccountProfile,
 			http.MethodGet, http.MethodHead, http.MethodPut)},
+		{"/admin/accounts/{account_id}/status", s.allowMethods(s.handleAdminAccountStatus,
+			http.MethodPut)},
 	}
+}
+
+// handleAdminAccountStatus 處理 PUT /admin/accounts/{account_id}/status：停用或恢復登入。
+//
+// 這條子路徑只有 PUT 一個方法（allowMethods 已登記，其餘方法回 1002 帶 Allow）：
+// 「動狀態」在協定層就只有一個入口，讀現狀本來就在父路徑上，不在這裡開第二份讀法。
+// 前置鏈與父路徑逐字相同（consolePrincipal：來源判定 → 憑據解析 → 首次改密門閂），
+// 授權與目標範圍都由用例判，傳輸層不先判一次。
+//
+// 標識非法與「查無此人／他是管理員／他已刪除」同樣是 1001：這句話在本組端點的
+// 三個入口裡一直只有一個答案，加一個方法不該多出另一套語意。
+func (s *Server) handleAdminAccountStatus(w http.ResponseWriter, r *http.Request) {
+	principal, ok := s.consolePrincipal(w, r)
+	if !ok {
+		return
+	}
+	id, err := idgen.Parse(r.PathValue("account_id"))
+	if err != nil {
+		writeError(w, r, CodeNotFound, http.StatusNotFound)
+		return
+	}
+	var in updateStandardAccountStatusRequest
+	if !decodeJSON(w, r, &in) {
+		return
+	}
+	// 兩個欄位都必須落在封閉集合內：值取自 internal/account 的常數（字面值只有一份）。
+	// 非法值當場 1004 點名欄位，不帶進用例——那是拼寫問題，不是併發問題。
+	newStatus, expectedStatus, badField := parseAdminStatusPair(in.Status, in.ExpectedStatus)
+	if badField != "" {
+		writeErrorDetails(w, r, CodeInvalidBody, http.StatusBadRequest,
+			map[string]any{"invalid_field": badField})
+		return
+	}
+	// 新舊同值是一次必然寫不出新事實的請求（見 account.Store.SetStatus 的域不變量），
+	// 在這裡點名比回 2014 誠實：資料庫根本還不需要被問到。
+	if newStatus == expectedStatus {
+		writeErrorDetails(w, r, CodeInvalidBody, http.StatusBadRequest,
+			map[string]any{"invalid_field": "status"})
+		return
+	}
+	changed, err := s.stdAccounts.UpdateStandardAccountStatus(r.Context(), principal, id,
+		stdacct.StatusChangeInput{NewStatus: newStatus, ExpectedStatus: expectedStatus},
+		requestIDFromRequest(r))
+	if err != nil {
+		s.writeUpdateStandardAccountStatusFailure(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, standardAccountStatusResponse{
+		Account:         profileItemOf(changed.Profile),
+		RevokedSessions: changed.RevokedSessions,
+		RequestID:       requestIDFromRequest(r),
+	})
 }
 
 // handleAdminAccounts 依方法分流：POST 建立、GET／HEAD 分頁目錄。
@@ -438,6 +525,34 @@ func (s *Server) writeUpdateStandardAccountFailure(w http.ResponseWriter, r *htt
 		writeError(w, r, CodePermissionDenied, http.StatusForbidden)
 	default:
 		s.logger.Error("編輯普通帳戶資料失敗", "request_id", requestIDFromRequest(r), "err", err)
+		writeError(w, r, CodeUnknown, http.StatusInternalServerError)
+	}
+}
+
+// writeUpdateStandardAccountStatusFailure 把停用／恢復用例的錯誤對映為對外回應。
+//
+// 這組端點仍然一個新碼都不新增：1004 說「改寫法」、2014 說「重讀目標現狀再重新確認」、
+// 1001 說「他不在這本目錄」、2011 說「換個身分也沒用」，四句處置各不相同。
+// 2014 是 Root 那條停用通路已發布的碼，兩處處置逐字相同（都是「你確認時的那個可用性
+// 已經不是現值」），為同一句話再發一個數字只會讓界面多一條「兩個碼要不要各寫一句案」的
+// 維護點——與 R2-008 把資料衝突收斂到 2013 同一取向。
+// 已刪除的普通帳戶走的是 1001 而不是 2015：那本目錄按定義就不列他，
+// 「不在目錄」本來就是這裡對三種出局形態唯一的一句-answer（見 internal/stdacct/profile.go
+// 的三道範圍檢查），而 2015 說的是 Root 目錄裡列得到、但不再接受寫入的那個人。
+func (s *Server) writeUpdateStandardAccountStatusFailure(w http.ResponseWriter,
+	r *http.Request, err error) {
+	switch {
+	case errors.Is(err, stdacct.ErrInvalidStatusChange):
+		writeErrorDetails(w, r, CodeInvalidBody, http.StatusBadRequest,
+			map[string]any{"invalid_field": "status"})
+	case errors.Is(err, stdacct.ErrStatusConflict):
+		writeError(w, r, CodeAdminStatusConflict, http.StatusConflict)
+	case errors.Is(err, stdacct.ErrAccountNotFound):
+		writeError(w, r, CodeNotFound, http.StatusNotFound)
+	case errors.Is(err, identity.ErrPermissionDenied):
+		writeError(w, r, CodePermissionDenied, http.StatusForbidden)
+	default:
+		s.logger.Error("變更普通帳戶登入狀態失敗", "request_id", requestIDFromRequest(r), "err", err)
 		writeError(w, r, CodeUnknown, http.StatusInternalServerError)
 	}
 }

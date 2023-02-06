@@ -62,8 +62,9 @@ type StandardProfile struct {
 	DisplayName string
 	// Type 為來源類型（standard|guest，讀自經實體校驗的帳戶）。
 	Type account.Type
-	// Status 為帳戶狀態（只讀展示；普通帳戶的停用與恢復在本步尚未實作，
-	// 因此這裡可能出現 active 與 disabled 兩種值，但沒有任何通路能把一側改成另一側）。
+	// Status 為帳戶狀態（只讀展示；改它走另一條通路：見 status.go 的停用與恢復，
+	// 這條編輯白名單裡沒有狀態那一格）。active 與 disabled 都讀得到，
+	// disabled_at 也只在單筆詳情裡出現（見 internal/httpapi 的 standardAccountItem）。
 	Status account.Status
 	// DisabledAt 為進入禁用狀態的時刻；active 時恆為零值（資料庫 NULL）。
 	DisabledAt time.Time
