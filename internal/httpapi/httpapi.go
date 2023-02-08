@@ -104,8 +104,9 @@ type Server struct {
 	// accountPolicy 為帳戶建立策略用例入口（可為 nil）；nil 時 accountPolicyEndpoints
 	// 回空清單，Root 端與對外端一個都不掛。
 	accountPolicy AccountPolicyUseCase
-	// stdAccounts 為「管理員打理普通帳戶」用例入口（建立、目錄、詳情、資料編輯與登入狀態；
-	// 可為 nil）；nil 時 standardAccountEndpoints 回空清單，/admin 首段根本不在登記清單裡。
+	// stdAccounts 為「管理員打理普通帳戶」用例入口（建立、目錄、詳情、資料編輯、
+	// 登入狀態與憑據重置；可為 nil）；nil 時 standardAccountEndpoints 回空清單，
+	// /admin 首段根本不在登記清單裡。
 	stdAccounts StdAccountUseCase
 }
 

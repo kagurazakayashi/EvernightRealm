@@ -1,15 +1,17 @@
 // adminaccounts.go 是「伺服器級管理員打理普通帳戶」的傳輸層落點：
 // /admin/accounts 一個路徑做兩件事（GET／HEAD 分頁目錄、POST 建立），
 // /admin/accounts/{account_id} 一個路徑做兩件事（GET／HEAD 單筆詳情、PUT 編輯非安全資料），
-// /admin/accounts/{account_id}/status 一個路徑做一件事（PUT 停用或恢復登入能力）。
+// /admin/accounts/{account_id}/status 一條路徑做一件事（PUT 停用或恢復登入能力），
+// /admin/accounts/{account_id}/password 一條路徑做一件事（PUT 重置登入憑據，
+// 唯一白名單欄位是新口令）。
 //
 // 這個檔案刻意只做協定層該做的四件事，一條領域規則都不寫在這裡：
 //  1. 來源（CSRF）判定與憑據解析——逐字複用 consolePrincipal 那條共用鏈，
 //     不在這裡重寫一份「先看 Cookie 再看標頭」的順序；
 //  2. 首次改密門閂——同一條鏈上的 requirePasswordChangeDone，與其餘受保護端點同一把閘；
 //  3. 請求本體與查詢參數的形態——建立只有 login_name／display_name／password，
-//     編輯只有 display_name 與它所依據的 expected_display_name，
-//     狀態只有 status 與它所依據的 expected_status，
+//     編輯只有 display_name 與它所依據的現值，
+//     狀態只有 status 與它所依據的現狀，重置只有 password 一欄，
 //     目錄只認 page／page_size／status／type／q 五個查詢參數；
 //     未知欄位（含 role、account_type、status、subject_kind、must_change_password
 //     這類「自報身分或企圖覆蓋隱藏欄位」的嘗試）由 decodeJSON 的 DisallowUnknownFields
@@ -17,14 +19,19 @@
 //     不是由請求內容決定；「哪個活動」更是連格子都沒有——
 //     普通帳戶目錄不屬於任何活動，也塞不進任何活動；
 //  4. 結論對映——把用例回傳的可判別錯誤一一映射到機器碼，其餘一律 500 且細節只進日誌。
-//     這組端點不新增任何機器碼：1001（不在這本目錄裡）、1004（改寫法）、2011（換身分也沒用）、
+//     這組端點用到的碼：1001（不在這本目錄裡）、1004（改寫法）、2011（換身分也沒用）、
 //     2012（那個名字是別人的）、2013（你看見的現值已過期）、2014（他的可用性已不是你確認時那樣）、
-//     2017（策略此刻不放開這條建號通路）各是各的處置。
+//     2017（策略此刻不放開這條建號通路）、2018（他是訪戶，沒有可重置的憑據）。
+//     其中只有 2018 是本步新發布的一枚：它說的是「要等後續那條明確的訪戶升級通路」，
+//     與改寫法（1004）、換目標（1001）、換身分（2011）都不是同一處置。
 //
 // 與 /root/admins 的分工是一條邊界而不是一個目錄慣例：那組端點管的是「持有伺服器級
 // 角色的主體」，經 NeedRoot 判定、不受三個建立開關約束；這組端點管的是「不帶任何
 // 伺服器級授予的普通與訪戶帳戶」，經 NeedServerAdmin 判定，而建號這一條另受
 // admin_create_standard 約束且對所有主體一視同仁（Root 走這條路同樣被關擋）。
+// 憑據重置不受那三個開關約束：開關管的是「准不准多出一筆帳戶」，
+// 而重置動的是一筆已存在帳戶的口令，把它掛在建號開關下等於讓「關掉建號」
+// 順帶剝奪管理員恢復他人登入能力的手段。
 // 兩組端點各自把「誰能碰哪一類人」答完整，也不合成第三份意思：
 // 普通帳戶目錄把持有授予的人排掉（包括敲這條端點的操作者自己），
 // Root 的管理員目錄則只列持有授予的人。
@@ -88,6 +95,12 @@ type StdAccountUseCase interface {
 	UpdateStandardAccountStatus(ctx context.Context, principal identity.Principal,
 		accountID idgen.ID, in stdacct.StatusChangeInput,
 		requestID string) (stdacct.StatusChange, error)
+	// ResetStandardAccountPassword 重置一名目錄內普通帳戶的登入憑據：舊口令與既有會話
+	// 同交易失效、首次改密義務重設、停用與刪除狀態不動。
+	// 刻意不設依據值（操作者拿不出「現行哈希」那類誠實錨點），因此沒有 2013/2014
+	// 那樣的併發結論——重複提交是又做了一次完整重置，見 internal/stdacct/resetpassword.go。
+	ResetStandardAccountPassword(ctx context.Context, principal identity.Principal,
+		accountID idgen.ID, newPassword, requestID string) (stdacct.StandardPasswordReset, error)
 }
 
 // createStandardAccountRequest 是建立請求的本體。只有這三個欄位可用：
@@ -114,6 +127,15 @@ type updateStandardAccountProfileRequest struct {
 type updateStandardAccountStatusRequest struct {
 	Status         string `json:"status"`
 	ExpectedStatus string `json:"expected_status"`
+}
+
+// resetStandardAccountPasswordRequest 是重置憑據請求的本體。白名單只有新口令一欄：
+// 沒有 expected_*、沒有 status、沒有 must_change_password——前兩者是別的白名單通路
+// 的欄位（未知欄位 1004），第三者是本次重置要「強制寫成 1」的義務旗標，
+// 絕無可能被請求反向清掉（「重置不順手免義務」成立在本體連格子都沒有的形狀上）。
+// 它也絕不是「自報身分」的格子：account_id 在路徑上、roles 與 activity_id 不認。
+type resetStandardAccountPasswordRequest struct {
+	Password string `json:"password"`
 }
 
 // createdStandardAccountResponse 是建立成功的回應本體。
@@ -186,6 +208,19 @@ type standardAccountStatusResponse struct {
 	RequestID       string              `json:"request_id"`
 }
 
+// standardAccountPasswordResetResponse 是 PUT /admin/accounts/{account_id}/password 的回應本體。
+//
+// account 是「重置之後的資料庫現值」：must_change_password 恆為 true（這正是界面要把
+// 「這個口令只用一次」講給操作者聽的依據），status 與 disabled_at 保持原樣。
+// revoked_sessions 與停用回應同一理由：界面要能如實說出「這次讓 N 臺裝置重新登入」。
+// 回應裡絕對不會有的東西：新口令的任何回顯（連同前綴或長度）、任一側的雜湊、
+// 會話材料——口令只在請求本體裡出現一次，回應與交付都不碰它；線下的交付管道在協議之外。
+type standardAccountPasswordResetResponse struct {
+	Account         standardAccountItem `json:"account"`
+	RevokedSessions int                 `json:"revoked_sessions"`
+	RequestID       string              `json:"request_id"`
+}
+
 // standardAccountEndpoints 回傳普通帳戶端點的登記清單；未注入用例時為空。
 //
 // 登記與否只這一處來源，深連結回退用的 API 首段清單（/admin）因此自動同步。
@@ -198,6 +233,11 @@ type standardAccountStatusResponse struct {
 // 狀態走 /status 子資源（同樣與 /root/admins/{account_id}/status 同形）：
 // 狀態是安全欄位，與普通資料各有一把白名單閘，混在一條 PUT 裡就等於
 // 「能改顯示名的人也能順手改登入能力」，而那正是兩套邊界互相污染的地方。
+// 憑據走 /password 子資源（與 /root/admins/{account_id}/password 同形）：憑據與狀態同屬
+// 安全欄位，但兩條白名單、兩套確認語意、兩個審計動作各是各的——
+// 「重置不是解除停用、停用不是重置」在路由形狀上就分開。
+// 普通帳戶今日沒有刪除通路，所以父路徑上只有 GET／HEAD／PUT（Root 那側的 DELETE
+// 不在这裡複製一份）。
 func (s *Server) standardAccountEndpoints() []apiRoute {
 	if s.stdAccounts == nil {
 		return nil
@@ -209,7 +249,46 @@ func (s *Server) standardAccountEndpoints() []apiRoute {
 			http.MethodGet, http.MethodHead, http.MethodPut)},
 		{"/admin/accounts/{account_id}/status", s.allowMethods(s.handleAdminAccountStatus,
 			http.MethodPut)},
+		{"/admin/accounts/{account_id}/password", s.allowMethods(s.handleAdminAccountPassword,
+			http.MethodPut)},
 	}
+}
+
+// handleAdminAccountPassword 處理 PUT /admin/accounts/{account_id}/password：重置登入憑據。
+//
+// 這條子路徑只有 PUT 一個方法（allowMethods 已登記，其餘方法回 1002 帶 Allow）：
+// 「動憑據」在協定層就只有一個入口，讀現值本來就在父路徑上，不在這裡開第二份讀法。
+// 前置鏈與父路徑逐字相同（consolePrincipal：來源判定 → 憑據解析 → 首次改密門閂），
+// 授權、目標範圍與訪戶出局都由用例判，傳輸層不先判一次。
+//
+// 標識解析失敗與「查無此人／他是管理員／他已刪除」同樣是 1001；口令本身的形狀不合格
+// 不在此處判（那是 credential 模組那道閘，經用例映射為 1004＋點名 password 欄位）——
+// 傳輸層不抄寫第二份口令規則。
+func (s *Server) handleAdminAccountPassword(w http.ResponseWriter, r *http.Request) {
+	principal, ok := s.consolePrincipal(w, r)
+	if !ok {
+		return
+	}
+	id, err := idgen.Parse(r.PathValue("account_id"))
+	if err != nil {
+		writeError(w, r, CodeNotFound, http.StatusNotFound)
+		return
+	}
+	var in resetStandardAccountPasswordRequest
+	if !decodeJSON(w, r, &in) {
+		return
+	}
+	reset, err := s.stdAccounts.ResetStandardAccountPassword(r.Context(), principal, id,
+		in.Password, requestIDFromRequest(r))
+	if err != nil {
+		s.writeResetStandardAccountPasswordFailure(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, standardAccountPasswordResetResponse{
+		Account:         profileItemOf(reset.Profile),
+		RevokedSessions: reset.RevokedSessions,
+		RequestID:       requestIDFromRequest(r),
+	})
 }
 
 // handleAdminAccountStatus 處理 PUT /admin/accounts/{account_id}/status：停用或恢復登入。
@@ -553,6 +632,33 @@ func (s *Server) writeUpdateStandardAccountStatusFailure(w http.ResponseWriter,
 		writeError(w, r, CodePermissionDenied, http.StatusForbidden)
 	default:
 		s.logger.Error("變更普通帳戶登入狀態失敗", "request_id", requestIDFromRequest(r), "err", err)
+		writeError(w, r, CodeUnknown, http.StatusInternalServerError)
+	}
+}
+
+// writeResetStandardAccountPasswordFailure 把重置用例的錯誤對映為對外回應。
+//
+// 刻意沒有「衝突」這一句：本用例不設依據值（操作者拿不出「現行口令」那類誠實的錨點），
+// 所以不存在 2013/2014 那樣的併發結論——重複提交是又做了一次完整重置，每次都留一筆審計。
+// 處置各歸各：1004 要人改口令、2018 說「他是訪戶，今日沒有憑據可重置，要等後續那條
+// 明確的訪戶升級通路」、1001 是目標不在目錄、2011 是主體不對。
+// 2018 不降級成 1001：這本目錄按定義把訪戶列得進去，叫操作者「換個目標」是誤導；
+// 也不降級成 2011：那不是身分不夠，而是這個目標的形態不在這條通路的職責裡。
+// 其餘細節只進日誌。
+func (s *Server) writeResetStandardAccountPasswordFailure(w http.ResponseWriter,
+	r *http.Request, err error) {
+	switch {
+	case errors.Is(err, stdacct.ErrInvalidResetPassword):
+		writeErrorDetails(w, r, CodeInvalidBody, http.StatusBadRequest,
+			map[string]any{"invalid_field": "password"})
+	case errors.Is(err, stdacct.ErrGuestTarget):
+		writeError(w, r, CodeGuestUpgradeRequired, http.StatusForbidden)
+	case errors.Is(err, stdacct.ErrAccountNotFound):
+		writeError(w, r, CodeNotFound, http.StatusNotFound)
+	case errors.Is(err, identity.ErrPermissionDenied):
+		writeError(w, r, CodePermissionDenied, http.StatusForbidden)
+	default:
+		s.logger.Error("重置普通帳戶憑據失敗", "request_id", requestIDFromRequest(r), "err", err)
 		writeError(w, r, CodeUnknown, http.StatusInternalServerError)
 	}
 }

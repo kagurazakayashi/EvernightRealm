@@ -180,6 +180,12 @@ var errorMessages = map[ErrorCode]map[string]string{
 		LocaleEnUS: "The server's account-creation policy does not open this path right now, so this creation did not run. Your permissions are fine, and changing the login name or signing in again will not change that; ask Root to turn on the matching switch in the server account-creation policy, then try again.",
 		LocaleJaJP: "サーバーの現在のアカウント作成ポリシーはこの経路を開放していないため、今回の作成は実行されませんでした。権限に問題はありません。ログイン名を変えても再ログインしても状況は変わりません。Root にサーバーのアカウント作成ポリシーで対応するスイッチを有効にしてもらうまでお待ちください。",
 	},
+	CodeGuestUpgradeRequired: {
+		LocaleZhCN: "这名成员是访客账户，本来就没有一般密码，所以本次凭据重置没有执行。给他设置一个密码等于把他的身份改成普通账户，那要走专门的访客升级功能，不能顺带由重置口令完成；换一个目标、改写法或重新登录都不会改变这件事。",
+		LocaleZhTW: "這名成員是訪戶帳戶，本來就沒有一般密碼，所以本次憑據重置沒有執行。給他設定一個密碼等於把他的身分改成普通帳戶，那要走專門的訪戶升級功能，不能順帶由重置口令完成；換一個目標、改寫法或重新登入都不會改變這件事。",
+		LocaleEnUS: "This member is a guest account and has no general password, so this credential reset did not run. Setting a password for them would amount to converting them into a standard account, which needs the dedicated guest-upgrade feature rather than a password reset; choosing another target, rewording the request, or signing in again will not change that.",
+		LocaleJaJP: "このメンバーはゲストアカウントのためもともと一般的なパスワードを持たず、今回の認証情報リセットは実行されませんでした。パスワードを設定することは通常アカウントへの変更と同じであり、パスワードリセットではなく専用のゲスト昇格機能で行う必要があります。対象を変えても、書き直しても、再ログインしても状況は変わりません。",
+	},
 }
 
 // messageFor 取得錯誤碼在指定語言的使用者訊息；語言未支援或訊息為空時回退 defaultLocale。

@@ -62,7 +62,7 @@ func (s *Server) apiRoutes() []apiRoute {
 	// 帳戶建立策略端點（Root 讀寫＋對外的兩個布林）同一個來源、同一個有無判定。
 	routes = append(routes, s.accountPolicyEndpoints()...)
 	// 管理員打理普通帳戶端點（POST 與 GET /admin/accounts、GET／PUT /admin/accounts/{account_id}、
-	// PUT /admin/accounts/{account_id}/status）
+	// PUT /admin/accounts/{account_id}/status、PUT /admin/accounts/{account_id}/password）
 	// 同一個來源、同一個有無判定；「/admin 首段屬於 API」因此只在端點掛上時才成立。
 	return append(routes, s.standardAccountEndpoints()...)
 }

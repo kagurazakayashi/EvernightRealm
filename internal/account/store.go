@@ -176,11 +176,12 @@ func (s *Store) RotatePassword(ctx context.Context, q database.Querier, id idgen
 //
 // 它與 RotatePassword 是同一張表上的兩條不同授權通路，而不是彼此的重用：
 // RotatePassword 的 CAS 錨點是「現行雜湊」，那驗證的是「本人交得出現行口令」；
-// 強制替換的發起人（Root 重置他人口令）拿不出也不該拿出該雜湊——「拿不出舊口令」
-// 恰恰是这次操作存在的理由。因此本方法不做任何「舊值是什麼」的比對，
+// 強制替換的發起人（Root 重置他人口令、管理員重置普通帳戶口令）拿不出也不該拿出該雜湊——
+// 「拿不出舊口令」恰恰是这次操作存在的理由。因此本方法不做任何「舊值是什麼」的比對，
 // 只把形状閘（validatePasswordHash，與入庫同一道）留在倉儲層；
-// 「誰有資格對誰強制換口令」是使用例（internal/adminacct）經 NeedRoot 與
-// 目錄成員資格判定的事，倉儲不假裝認識主體。
+// 「誰有資格對誰強制換口令」是使用例（internal/adminacct 經 NeedRoot 與管理員目錄成員資格、
+// internal/stdacct 經 NeedServerAdmin 與普通帳戶目錄範圍規則）判定的事，
+// 倉儲不假裝認識主體。
 //
 // 沒有 CAS 不等於沒有併發語意：SQLite 單寫入者把每次重置串行化，每次提交都是
 // 「換哈希＋清旗標＋撤會話（由使用例同交易完成）」的整筆事實；後到的重置覆蓋
@@ -191,10 +192,11 @@ func (s *Store) RotatePassword(ctx context.Context, q database.Querier, id idgen
 // 成立在 SQL 形狀上，不靠呼叫端自律。
 //
 // 零行命中（changed=false 且無錯誤）代表目標行不存在：呼叫端通常已在同一交易
-// 核實過成員資格，走到 false 只剩併發刪除或程式缺陷，兩者都該讓交易回滾而不是
+// 核實過成員資格或目錄範圍，走到 false 只剩併發刪除或程式缺陷，兩者都該讓交易回滾而不是
 // 把「一個字沒寫」報成重置成功。訪客帳戶被遷移 0003 的 CHECK 凍結為
-// 「無哈希、無旗標」：本方法對它必然落庫失敗，目錄裡也不存在訪客（授予觸發器
-// 擋過），這條失敗是雙重閘的後一道。
+// 「無哈希、無旗標」：本方法對它必然落庫失敗。這條失敗是後一道閘，不是第一道——
+// internal/stdacct 的重置用例在同一條交易的寫入之前就把訪客出局（那叫隱式升級，
+// 不叫資料庫帮忙擋住了一半），adminacct 的目錄則由授予觸發器根本不含訪客。
 func (s *Store) SetPassword(ctx context.Context, q database.Querier, id idgen.ID,
 	newHash string) (bool, error) {
 	if q == nil {
