@@ -64,7 +64,10 @@ func (s *Server) apiRoutes() []apiRoute {
 	// 管理員打理普通帳戶端點（POST 與 GET /admin/accounts、GET／PUT /admin/accounts/{account_id}、
 	// PUT /admin/accounts/{account_id}/status、PUT /admin/accounts/{account_id}/password）
 	// 同一個來源、同一個有無判定；「/admin 首段屬於 API」因此只在端點掛上時才成立。
-	return append(routes, s.standardAccountEndpoints()...)
+	routes = append(routes, s.standardAccountEndpoints()...)
+	// 匿名自註冊端點（POST /auth/register）同一個來源、同一個有無判定；未注入用例時不掛。
+	// 它落在已被登入端點帶入 API 首段的 /auth 之下，因此不新增首段，只多一條路徑。
+	return append(routes, s.selfRegisterEndpoints()...)
 }
 
 // apiFirstSegments 從登記清單導出各端點的路徑首段集合。

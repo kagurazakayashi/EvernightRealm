@@ -105,6 +105,23 @@ security:
     source_fail_limit: 50           # 視窗內單一來源跨全部目標的失敗上限（不得低於 fail_limit）
     max_entries: 10000              # 限流條目總數上限（限流自身的記憶體封頂）
 
+  # 匿名自註冊失敗控制與限流：與 login_guard 同型別、共用同一套界限，只是預設更緊。
+  # 註冊端點對匿名開放，而「自行選一個唯一登入名」在結構上就是一個存在性探測器——
+  # 一次成功即代表這個名字還沒被佔用。防批量探測靠的是這裡的緊限流與下方派生併發封頂，
+  # 不是把錯誤訊息整形去掩蓋這件事（對外重名有可判別碼 2019）。目標同樣取登入名正規化鍵：
+  # 反覆撞同一個名字撞 fail_limit，橫掃多個不同名字撞 source_fail_limit。
+  # 重名與不合規輸入計為失敗；一次成功註冊清掉該「來源×名字」計數。
+  register_guard:
+    fail_limit: 5                   # 反覆撞同一個名字的來源×目標上限
+    window_minutes: 15              # 失敗計數的滑動視窗（分鐘）
+    cooldown_minutes: 30            # 觸發後的冷卻長度（分鐘）；比登入更久，拉高批量探測時成本
+    source_fail_limit: 20           # 單一來源橫掃多個不同名字的來源級上限（不得低於 fail_limit）
+    max_entries: 10000              # 限流條目總數上限
+
+  # 同時進入 Argon2id 口令派生的註冊請求數上限（1..64）。超出的請求在訊號量上等待，
+  # 可被各自請求的 context 取消；等待期不佔交易、不寫審計、不做派生。
+  register_hash_concurrency: 4
+
   # Root 憑據（root_password_hash）不要在這裡手工填寫：它由伺服器本機的一次性命令寫入，
   # 存進檔案的是 Argon2id 編碼而不是明文口令，而且一旦有值就不再開放第二次初始化。
   #   evernight-server init-root --password-stdin --data-dir <執行資料目錄>

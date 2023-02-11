@@ -186,6 +186,12 @@ var errorMessages = map[ErrorCode]map[string]string{
 		LocaleEnUS: "This member is a guest account and has no general password, so this credential reset did not run. Setting a password for them would amount to converting them into a standard account, which needs the dedicated guest-upgrade feature rather than a password reset; choosing another target, rewording the request, or signing in again will not change that.",
 		LocaleJaJP: "このメンバーはゲストアカウントのためもともと一般的なパスワードを持たず、今回の認証情報リセットは実行されませんでした。パスワードを設定することは通常アカウントへの変更と同じであり、パスワードリセットではなく専用のゲスト昇格機能で行う必要があります。対象を変えても、書き直しても、再ログインしても状況は変わりません。",
 	},
+	CodeSelfRegisterNameTaken: {
+		LocaleZhCN: "这个登录名已被占用（比对会吸收大小写与全角／半角等差异写法），本次注册没有创建账户。请换一个名字后重新提交。",
+		LocaleZhTW: "這個登入名已被佔用（比對會吸收大小寫與全形／半形等差異寫法），本次註冊沒有建立帳戶。請換一個名字後重新提交。",
+		LocaleEnUS: "This login name is already taken (matching absorbs case and width variants such as full-width letters), so this sign-up created no account. Choose another name and submit again.",
+		LocaleJaJP: "このログイン名はすでに使用されています（比較では大小文字や全角・半角などの表記の差異が吸収される）ため、今回の登録ではアカウントが作成されませんでした。別の名前を選んで再度送信してください。",
+	},
 }
 
 // messageFor 取得錯誤碼在指定語言的使用者訊息；語言未支援或訊息為空時回退 defaultLocale。

@@ -188,6 +188,18 @@ type SecurityConfig struct {
 	Hashing HashingConfig `yaml:"hashing"`
 	// LoginGuard 是登入失敗控制與限流的閾值（見 internal/auth 的 LoginGuard）。
 	LoginGuard LoginGuardConfig `yaml:"login_guard"`
+	// RegisterGuard 是匿名自註冊的失敗控制與限流閾值，與 LoginGuard 同型別、共用同一套界限
+	// （實作見 internal/selfregister）。預設比登入更緊：註冊端點對匿名開放，而任何
+	// 「自行選一個唯一登入名」的入口在結構上就是一個存在性探測器——一次成功代表這個名字還沒被佔用。
+	// 防批量探測靠的是這裡的緊限流與下方的派生併發封頂，不是把錯誤訊息整形掩蓋這件事
+	// （對外重名有可判別碼，見 httpapi 的 2019）。計量主軸與登入同為「來源×目標」配對，
+	// 目標取登入名的正規化鍵：橫掃多個不同名字撞來源級上限、反覆撞同一個名字撞配對上限。
+	RegisterGuard LoginGuardConfig `yaml:"register_guard"`
+	// RegisterHashConcurrency 封頂同時進入 Argon2id 口令派生的註冊請求數。
+	// 派生是 CPU 密集且按生產參數檔是數百毫秒級；匿名入口若無上限，
+	// 「併發刷註冊」就成為對伺服器 CPU 的免費拒絕服務路線。超出的請求在訊號量上等待，
+	// 可被各自請求的 context 取消（等待期不佔交易、不寫審計、不做派生）。
+	RegisterHashConcurrency int `yaml:"register_hash_concurrency"`
 	// DevicePolicy 是裝置登入策略：一個主體能同時握有幾份有效會話（見 DevicePolicyConfig）。
 	DevicePolicy DevicePolicyConfig `yaml:"device_policy"`
 	// Headers 為 HTTP 安全回應頭。
@@ -217,40 +229,51 @@ type LoginGuardConfig struct {
 	MaxEntries int `yaml:"max_entries"`
 }
 
-// Validate 正規化並校驗登入失敗控制閾值。
+// Validate 校驗登入失敗控制閾值，錯誤訊息以 security.login_guard 為鍵名前綴。
+func (g LoginGuardConfig) Validate() error {
+	return g.validateWith("security.login_guard")
+}
+
+// validateWith 以給定鍵名前綴報出第一處不合格，讓 login_guard 與 register_guard
+// 共用同一套界限與同一份校驗邏輯，只差訊息裡的鍵名。
 //
 // 界限與 internal/auth 的 LoginGuard 構造校驗一致（兩邊都擋：啟動時組態層先報
 // 帶鍵名的可讀錯誤，構造層再守最後一道——組裝代碼出錯也不讓半套閾值上線）。
 // 上界的意義是「這個值本身還構不構成資源風險」：MaxEntries 十萬條約十 MB 量級，
-// 分鐘数超過一天就不再是「稍後再試」而是變相永久鎖人。
-func (g LoginGuardConfig) Validate() error {
+// 分鐘數超過一天就不再是「稍後再試」而是變相永久鎖人。
+func (g LoginGuardConfig) validateWith(prefix string) error {
 	if g.FailLimit < 1 || g.FailLimit > maxLoginGuardLimit {
-		return fmt.Errorf("config: security.login_guard.fail_limit 需為 1..%d，實際為 %d", maxLoginGuardLimit, g.FailLimit)
+		return fmt.Errorf("config: %s.fail_limit 需為 1..%d，實際為 %d", prefix, maxLoginGuardLimit, g.FailLimit)
 	}
 	if g.SourceFailLimit < 1 || g.SourceFailLimit > maxLoginGuardLimit {
-		return fmt.Errorf("config: security.login_guard.source_fail_limit 需為 1..%d，實際為 %d", maxLoginGuardLimit, g.SourceFailLimit)
+		return fmt.Errorf("config: %s.source_fail_limit 需為 1..%d，實際為 %d", prefix, maxLoginGuardLimit, g.SourceFailLimit)
 	}
 	if g.SourceFailLimit < g.FailLimit {
-		return fmt.Errorf("config: security.login_guard.source_fail_limit(%d) 不得低於 fail_limit(%d)（否則單一帳戶就會鎖死整個來源）",
-			g.SourceFailLimit, g.FailLimit)
+		return fmt.Errorf("config: %s.source_fail_limit(%d) 不得低於 fail_limit(%d)（否則單一帳戶就會鎖死整個來源）",
+			prefix, g.SourceFailLimit, g.FailLimit)
 	}
 	if g.WindowMinutes < 1 || g.WindowMinutes > maxLoginGuardMinutes {
-		return fmt.Errorf("config: security.login_guard.window_minutes 需為 1..%d，實際為 %d", maxLoginGuardMinutes, g.WindowMinutes)
+		return fmt.Errorf("config: %s.window_minutes 需為 1..%d，實際為 %d", prefix, maxLoginGuardMinutes, g.WindowMinutes)
 	}
 	if g.CooldownMinutes < 1 || g.CooldownMinutes > maxLoginGuardMinutes {
-		return fmt.Errorf("config: security.login_guard.cooldown_minutes 需為 1..%d，實際為 %d", maxLoginGuardMinutes, g.CooldownMinutes)
+		return fmt.Errorf("config: %s.cooldown_minutes 需為 1..%d，實際為 %d", prefix, maxLoginGuardMinutes, g.CooldownMinutes)
 	}
 	if g.MaxEntries < 1 || g.MaxEntries > maxLoginGuardEntries {
-		return fmt.Errorf("config: security.login_guard.max_entries 需為 1..%d，實際為 %d", maxLoginGuardEntries, g.MaxEntries)
+		return fmt.Errorf("config: %s.max_entries 需為 1..%d，實際為 %d", prefix, maxLoginGuardEntries, g.MaxEntries)
 	}
 	return nil
 }
 
-// 登入失敗控制的硬界限（與 internal/auth 的 LoginGuard 上界對齊）。
+// 登入／註冊失敗控制的硬界限（兩者同為 LoginGuardConfig 型別、共用這組上界；
+// 與 internal/auth 的 LoginGuard 構造上界對齊）。
 const (
 	maxLoginGuardLimit   = 10000
 	maxLoginGuardMinutes = 1440
 	maxLoginGuardEntries = 100000
+
+	// maxRegisterHashConcurrency 封頂同時進行的註冊口令派生數。上界只是「這個值本身
+	// 還構不構成資源風險」的一道攔截，真正的併發天花板由部署者在 1..此值 之間自行選。
+	maxRegisterHashConcurrency = 64
 )
 
 // DevicePolicyConfig 為裝置登入策略組態（伺服器級，套用全部可擁有會話的主體）。
@@ -503,6 +526,20 @@ func Default() Config {
 				SourceFailLimit: 50,
 				MaxEntries:      10000,
 			},
+			// 匿名自註冊失敗控制預設（比登入更緊，使用者批准「最完整機制」）：
+			// 配對 5 次、來源 20 次、視窗 15 分鐘、冷卻 30 分鐘、封頂一萬條。
+			// 之所以來源級要更緊：註冊掃的是「哪些登入名已存在」，每個名字各撞一次也是探測，
+			// 制衡它的是來源級跨目標上限而非配對上限；冷卻拉長是讓批量探測的時成本提高。
+			RegisterGuard: LoginGuardConfig{
+				FailLimit:       5,
+				WindowMinutes:   15,
+				CooldownMinutes: 30,
+				SourceFailLimit: 20,
+				MaxEntries:      10000,
+			},
+			// 註冊派生併發封頂預設 4：單寫入鎖 SQLite 下這已綽綽有餘，同時把
+			// 「併發刷註冊燒 CPU」這條路線的天花板壓到個位數。
+			RegisterHashConcurrency: 4,
 			// 裝置登入策略預設 multi：這正是本項存在之前的行為（每次登入各簽發一份
 			// 互不影響的會話）。把它改成 single 或 limited 會真的把人踢下線或把人擋在門外，
 			// 屬部署者的明確決定，不該由一次「新增策略開關」的改動順帶代勞。
@@ -798,6 +835,17 @@ func (c *Config) Validate() error {
 	// （Default() 已填好預設值，寫出 0 只可能是組態檔打錯），一律拒絕。
 	if err := c.Security.LoginGuard.Validate(); err != nil {
 		return err
+	}
+	// 註冊失敗控制與登入同型別、共用同一套界限，只差鍵名前綴（register_guard）。
+	if err := c.Security.RegisterGuard.validateWith("security.register_guard"); err != nil {
+		return err
+	}
+	// 註冊派生併發封頂：0 不是「沿用預設」（Default() 已填 4），寫出 0 只可能是打錯；
+	// 上界 maxRegisterHashConcurrency 讓一個誤填的天文數字在啟動門外就被擋，而不是
+	// 變成一把無上限的訊號量、把「封頂 CPU」這個目的自己消解掉。
+	if c.Security.RegisterHashConcurrency < 1 || c.Security.RegisterHashConcurrency > maxRegisterHashConcurrency {
+		return fmt.Errorf("config: security.register_hash_concurrency 需為 1..%d，實際為 %d",
+			maxRegisterHashConcurrency, c.Security.RegisterHashConcurrency)
 	}
 
 	// 裝置登入策略：模式限列舉值（空值正規化為預設 multi），名額只在 limited 下要求。
@@ -1228,6 +1276,12 @@ func applyEnv(cfg *Config) error {
 		{&cfg.Security.LoginGuard.CooldownMinutes, "ER_SECURITY_LOGIN_GUARD_COOLDOWN_MINUTES"},
 		{&cfg.Security.LoginGuard.SourceFailLimit, "ER_SECURITY_LOGIN_GUARD_SOURCE_FAIL_LIMIT"},
 		{&cfg.Security.LoginGuard.MaxEntries, "ER_SECURITY_LOGIN_GUARD_MAX_ENTRIES"},
+		{&cfg.Security.RegisterGuard.FailLimit, "ER_SECURITY_REGISTER_GUARD_FAIL_LIMIT"},
+		{&cfg.Security.RegisterGuard.WindowMinutes, "ER_SECURITY_REGISTER_GUARD_WINDOW_MINUTES"},
+		{&cfg.Security.RegisterGuard.CooldownMinutes, "ER_SECURITY_REGISTER_GUARD_COOLDOWN_MINUTES"},
+		{&cfg.Security.RegisterGuard.SourceFailLimit, "ER_SECURITY_REGISTER_GUARD_SOURCE_FAIL_LIMIT"},
+		{&cfg.Security.RegisterGuard.MaxEntries, "ER_SECURITY_REGISTER_GUARD_MAX_ENTRIES"},
+		{&cfg.Security.RegisterHashConcurrency, "ER_SECURITY_REGISTER_HASH_CONCURRENCY"},
 		{&cfg.Security.DevicePolicy.MaxDevices, "ER_SECURITY_DEVICE_POLICY_MAX_DEVICES"},
 		{&cfg.Logs.RetentionDays, "ER_LOGS_RETENTION_DAYS"},
 		{&cfg.Disk.CheckIntervalMS, "ER_DISK_CHECK_INTERVAL_MS"},
@@ -1361,6 +1415,22 @@ security:
     cooldown_minutes: 15            # 觸發後的冷卻長度（分鐘）；冷卻期內的嘗試不延長它
     source_fail_limit: 50           # 視窗內單一來源跨全部目標的失敗上限（不得低於 fail_limit）
     max_entries: 10000              # 限流條目總數上限（限流自身的記憶體封頂）
+
+  # 匿名自註冊失敗控制與限流：與 login_guard 同型別、同一套界限，只是預設更緊。
+  # 註冊端點對匿名開放，而「自行選一個唯一登入名」在結構上就是存在性探測器——
+  # 成功即代表這個名字還沒被佔用。防批量探測靠這裡的緊限流與下方派生併發封頂，
+  # 不靠把訊息整形掩蓋（對外重名有可判別碼 2019）。目標同樣取登入名正規化鍵。
+  # 重名與不合規的輸入計為失敗；一次成功註冊清掉該「來源×名字」計數。
+  register_guard:
+    fail_limit: 5                   # 反覆撞同一個名字的來源×目標上限
+    window_minutes: 15              # 失敗計數的滑動視窗（分鐘）
+    cooldown_minutes: 30            # 觸發後的冷卻長度（分鐘）；比登入更久，拉高批量探測時成本
+    source_fail_limit: 20           # 單一來源橫掃多個不同名字的來源級上限（不得低於 fail_limit）
+    max_entries: 10000              # 限流條目總數上限
+
+  # 同時進入 Argon2id 口令派生的註冊請求數上限（1..64）。超出的請求在訊號量上等待、
+  # 可被各自 context 取消；等待期不佔交易、不寫審計、不做派生。
+  register_hash_concurrency: 4
 
   # 憑據雜湊（Argon2id）參數檔：只在「新產生憑據」時生效，
   # 既有 Root 雜湊與帳戶雜湊按編碼內自帶參數校驗，換檔不影響登入。

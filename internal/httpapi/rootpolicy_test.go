@@ -466,10 +466,14 @@ func TestAccountPolicyRejectsUnapprovedModes(t *testing.T) {
 }
 
 // TestEntryCapabilitiesAreMinimalAndClosed 驗證對外入口端點：匿名可讀、只有三個鍵，
-// 而且 Root 把策略改成放開之後它仍回答「不開放」。
+// 而且「策略值不等於能力」在放開策略後仍逐條成立。
 //
 // 這一條同時管兩件事：揭露的面要小到不能再用（不得出現模式名字、時刻、建號開關、
-// 任何帳戶或閾值資料），以及「策略值不等於能力」不能只寫在注釋裡。
+// 任何帳戶或閾值資料），以及兩個布林各自是「策略 ∧ 這條通路已實作」的合成結果——
+// 自註冊通路已落地，故 Root 把模式改到 open 後 sign_up_open 隨之放開；
+// 訪客通路尚未落地，故即便 guest_enabled 被設成 true，guest_open 仍必須是關。
+// 後者正是「策略值不等於能力」不能只寫在注釋裡的證據：一個開、一個關，
+// 界面因此不會把一條還不存在的通路冒充可用。
 func TestEntryCapabilitiesAreMinimalAndClosed(t *testing.T) {
 	env := newPolicyEnv(t)
 
@@ -494,10 +498,12 @@ func TestEntryCapabilitiesAreMinimalAndClosed(t *testing.T) {
 		}
 	}
 	if raw["sign_up_open"] != false || raw["guest_open"] != false {
-		t.Errorf("三條通路都未實作，對外答案應全為關，實際 %v", raw)
+		t.Errorf("出廠默認為 closed 模式，對外入口答案應全為關，實際 %v", raw)
 	}
 
-	// 策略放開之後仍然關：這條是「能力登記」真的在把關的證據。
+	// Root 把模式改到 open 後：自註冊通路已落地，sign_up_open 應隨策略放開；
+	// 訪客通路尚未落地，guest_open 即使 guest_enabled=true 也必須仍是關。
+	// 這一組「一開一關」正是「能力登記」真的在逐條把關、而不是跟著策略值一起翻的證據。
 	cookie := env.rootCookie(t)
 	if put := env.putPolicy(t, policyBody(true, "open", true), cookie, env.ts.URL, nil); put.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(put.Body)
@@ -505,8 +511,11 @@ func TestEntryCapabilitiesAreMinimalAndClosed(t *testing.T) {
 	}
 	after := getAuth(t, env.ts, "/auth/capabilities", "", "", "")
 	afterBody := decodeJSONBody(t, after)
-	if afterBody["sign_up_open"] != false || afterBody["guest_open"] != false {
-		t.Errorf("通路未落地時對外仍不得放開，實際 %v", afterBody)
+	if afterBody["sign_up_open"] != true {
+		t.Errorf("自註冊通路已落地且策略已 open，對外應放開註冊入口，實際 %v", afterBody)
+	}
+	if afterBody["guest_open"] != false {
+		t.Errorf("訪客通路未落地，對外不得放開訪客入口，實際 %v", afterBody)
 	}
 
 	// Root 端的回應裡看得到那份意圖（策略值與對外答案要能同時被核對）。

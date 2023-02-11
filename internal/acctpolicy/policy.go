@@ -182,13 +182,18 @@ type Capabilities struct {
 //
 // 這一處是「策略 ∧ 通路存在」裡的第二側：開關講的是部署者想要什麼，
 // 這裡講的是這個執行檔做不做得到。AdminCreateStandard 已翻真——管理員建立
-// 普通帳戶的用例與端點已落地（見 internal/stdacct），其餘兩條仍然為 false，
-// 而且這不是妥協：自註冊與訪客任何一條都還沒實作，把某一位先寫成 true，
-// 界面就會出現一個按下去必然失敗的入口，或讓一個不存在的端點被當成可用——
-// 那正是「未開發的模組冒充可用」。反過來，策略值可以由 Root 先設定成放開：
-// 那份意圖是真的，只是還沒有執行它的東西，下面的合成會把兩者如實算成「仍不放行」。
+// 普通帳戶的用例與端點已落地（見 internal/stdacct）；SelfRegister 也已翻真——
+// 匿名自註冊的用例與端點已落地（見 internal/selfregister），因此 Root 把模式設成
+// open 時這個入口才真的能按下去成功。Guest 仍然為 false，而且這不是妥協：訪客帳戶
+// 通路還沒實作，先把它寫成 true，界面就會出現一個按下去必然失敗的入口，或讓一個
+// 不存在端點被當成可用——那正是「未開發的模組冒充可用」。反過來，策略值可以由 Root
+// 先設定成放開：那份意圖是真的，只是還沒有執行它的東西，下面的合成會把兩者如實算成「仍不放行」。
+//
+// selfregister 只實作 open 模式：approval／invite 需要的准入流程尚未上線（Mode.writable
+// 也仍把它們擋在寫入之外），故即使 AllowsSelfRegister 回 true，用例仍會把非 open 的模式
+// 如實拒絕（見 internal/selfregister 的 ErrRegisterModeUnsupported），不冒充「已批准」。
 func capabilities() Capabilities {
-	return Capabilities{AdminCreateStandard: true}
+	return Capabilities{AdminCreateStandard: true, SelfRegister: true}
 }
 
 // AllowsAdminCreateStandard 回報「管理員此刻可否建立普通帳戶」：策略開關與通路存在與否。
@@ -207,11 +212,14 @@ func (p Policy) AllowsGuest() bool {
 
 // AllowsSelfRegister 回報「此刻可否以自註冊建立帳戶」，並帶著實際生效的模式。
 //
-// 模式為 closed 時不放行，其餘模式要放行都還需要對應通路真的存在；
-// approval／invite 在通路落地前根本寫不進策略（見 Mode.writable），
-// 因此這裡不會出現「記錄了一種執行不了的模式」的中間狀態。
+// 模式為 closed、或不是本枚舉認識的值、或通路尚未落地時都不放行；其餘有效模式（open／
+// approval／invite）回 true 並原樣帶出模式，讓呼叫端自己去分辨「放行的是哪一種」——
+// 本版本的 selfregister 只服務 open，approval／invite 會被用例回 2016，不對外冒充准入流程。
+//
+// valid() 這一側不可省：Mode 是字串型別，零值 "" 既不是 closed 也不是任何已登記模式。
+// 少了這層把關，通路翻真後一個未設定的零值 Policy 會被算成「放行」，而它帶的模式誰也執行不了。
 func (p Policy) AllowsSelfRegister() (bool, Mode) {
-	if p.SelfRegisterMode == ModeClosed || !capabilities().SelfRegister {
+	if p.SelfRegisterMode == ModeClosed || !p.SelfRegisterMode.valid() || !capabilities().SelfRegister {
 		return false, p.SelfRegisterMode
 	}
 	return true, p.SelfRegisterMode
@@ -232,13 +240,16 @@ type EntryCapabilities struct {
 
 // EntryOf 把策略與通路落地狀況合成對外入口的答案。
 //
-// 規則只有一條：放開必須同時「策略要求放開」與「這條通路真的存在」。
-// 少了任何一側都是關——這讓「不認識的值」在合成上不可能變成放行，
+// 規則只有一條：放開必須同時「策略要求放開」與「這條通路真的存在」，
+// 而且對自註冊還要再加一層——生效的模式得是本版本真的服務得動的 open。
+// 少了任何一側都是關：這讓「不認識的值」在合成上不可能變成放行，
 // 也讓尚未實作的入口不可能被一個策略開關變成可點擊的假象。
+// approval／invite 的准入流程尚未上線（用例會把非 open 回 2016），若在這裡回 true，
+// 登入前畫面就出現一個按下去必然失敗的註冊入口——那正是「未開發的模組冒充可用」。
 func (p Policy) EntryOf() EntryCapabilities {
-	open, _ := p.AllowsSelfRegister()
+	allowed, mode := p.AllowsSelfRegister()
 	return EntryCapabilities{
-		SignUpOpen: open,
+		SignUpOpen: allowed && mode == ModeOpen,
 		GuestOpen:  p.AllowsGuest(),
 	}
 }

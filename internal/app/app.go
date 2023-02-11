@@ -27,6 +27,7 @@ import (
 	"github.com/kagurazakayashi/EvernightRealm/internal/grant"
 	"github.com/kagurazakayashi/EvernightRealm/internal/httpapi"
 	"github.com/kagurazakayashi/EvernightRealm/internal/runlog"
+	"github.com/kagurazakayashi/EvernightRealm/internal/selfregister"
 	"github.com/kagurazakayashi/EvernightRealm/internal/session"
 	"github.com/kagurazakayashi/EvernightRealm/internal/stdacct"
 	"github.com/kagurazakayashi/EvernightRealm/internal/timeutil"
@@ -596,6 +597,41 @@ func run(ctx context.Context, releaseSignals func(), args []string, out io.Write
 		lg.Error("建立普通帳戶用例組裝失敗", "err", err)
 		return err
 	}
+	// 匿名自註冊用例（開放自註冊時，門外的人自行建一筆可立即登入的普通帳戶）。
+	// 頻率守衛是另一個 auth.LoginGuard 實例：與登入守衛分開的記憶體、一組較緊且可組態的閾值
+	// （security.register_guard）——自註冊是匿名可達的寫入入口，把它的失敗帳記在登入守衛上
+	// 會讓「刷註冊」與「暴力破解登入」共用同一份預算，任一方能餵飽對方把另一條路也擋死。
+	// 帳戶、策略與審計倉儲沿用上面同一批實例（「建號現讀的策略只有一份」「Root 域留痕只有
+	// 一個出口」在裝配層也成立），口令派生與其餘建號／登入路徑共用同一份參數檔。
+	// 少了它，開放自註冊就只是策略上一個能被設成 open 卻沒有一條通路去執行值的開關；
+	// 失敗一律中斷啟動，不帶病上線。
+	registerGuard, err := auth.NewLoginGuard(auth.GuardConfig{
+		FailLimit:       cfg.Security.RegisterGuard.FailLimit,
+		Window:          time.Duration(cfg.Security.RegisterGuard.WindowMinutes) * time.Minute,
+		Cooldown:        time.Duration(cfg.Security.RegisterGuard.CooldownMinutes) * time.Minute,
+		SourceFailLimit: cfg.Security.RegisterGuard.SourceFailLimit,
+		MaxEntries:      cfg.Security.RegisterGuard.MaxEntries,
+	}, timeutil.System())
+	if err != nil {
+		lg.Error("自註冊守衛組裝失敗", "err", err)
+		return err
+	}
+	selfRegisterService, err := selfregister.New(selfregister.Deps{
+		DB:       db,
+		Accounts: accountsStore,
+		Policy:   policyStore,
+		Audits:   auditStore,
+		Guard:    registerGuard,
+		Hashing:  hashingParams,
+		// 同時進入 Argon2id 的註冊數上限：把「併發刷註冊燒 CPU」這條路線的天花板壓住，
+		// 閾值取自 security.register_hash_concurrency（啟動校驗已過）。
+		HashConcurrency: cfg.Security.RegisterHashConcurrency,
+		Log:             lg.Logger,
+	})
+	if err != nil {
+		lg.Error("自註冊用例組裝失敗", "err", err)
+		return err
+	}
 	srv := httpapi.New(&cfg, Version, httpapi.Deps{
 		Ready:    readinessCheck(db, space),
 		Clock:    timeutil.System(),
@@ -610,6 +646,9 @@ func run(ctx context.Context, releaseSignals func(), args []string, out io.Write
 		// 管理員建立普通帳戶：策略現讀與放行合成由 internal/stdacct 在自己的交易裡做，
 		// 傳輸層只負責把受信主體與三個欄位遞進去。
 		StandardAccounts: standardAccountService,
+		// 匿名自註冊：准入（策略現讀＋模式校驗）、頻率封頂與派生併發封頂都由
+		// internal/selfregister 在自己的交易裡做，傳輸層只把三個欄位與實際連線來源遞進去。
+		SelfRegister: selfRegisterService,
 		// Root 初始化狀態的只讀來源：只查組態檔本身，不開任何寫入通路
 		// （初始化仍然只有 evernight-server init-root 這一條路）。
 		InitStatus: initStatusSource(cfg),

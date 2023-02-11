@@ -679,6 +679,96 @@ func TestLoginGuardAcceptsCoherentOverride(t *testing.T) {
 	}
 }
 
+// 釘住使用者批准的匿名自註冊預設：這組值與 internal/selfregister 的裝配、
+// ExampleYAML 與 config.example.yaml 三處必須一致（比登入更緊是刻意的）。
+func TestRegisterGuardDefaultsAreApprovedValues(t *testing.T) {
+	g := Default().Security.RegisterGuard
+	if g.FailLimit != 5 || g.WindowMinutes != 15 || g.CooldownMinutes != 30 ||
+		g.SourceFailLimit != 20 || g.MaxEntries != 10000 {
+		t.Errorf("register_guard 預設值偏離批准值: %+v", g)
+	}
+	// 併發封頂預設 4：與 RegisterHashConcurrency 三處同步（內建預設、ExampleYAML、實檔）。
+	if got := Default().Security.RegisterHashConcurrency; got != 4 {
+		t.Errorf("register_hash_concurrency 預設應為 4，實際 %d", got)
+	}
+}
+
+// register_guard 與 register_hash_concurrency 都應能從 yaml 讀入，並被同名環境變數覆蓋：
+// 這一條把「部署者能不能不改檔就調緊匿名入口」釘成證據。
+func TestRegisterGuardYAMLAndEnvOverride(t *testing.T) {
+	path := writeConfig(t, "security:\n  register_guard:\n    fail_limit: 3\n    source_fail_limit: 10\n  register_hash_concurrency: 8\n")
+	cfg, err := Load(Options{ConfigPath: path})
+	if err != nil {
+		t.Fatalf("Load 失敗: %v", err)
+	}
+	if cfg.Security.RegisterGuard.FailLimit != 3 ||
+		cfg.Security.RegisterGuard.SourceFailLimit != 10 ||
+		cfg.Security.RegisterHashConcurrency != 8 {
+		t.Errorf("yaml 覆蓋未落地: %+v (hash %d)", cfg.Security.RegisterGuard, cfg.Security.RegisterHashConcurrency)
+	}
+	// 未覆蓋的欄位仍走預設：單欄覆蓋不應把同段的其餘欄位打回零值。
+	if cfg.Security.RegisterGuard.WindowMinutes != 15 || cfg.Security.RegisterGuard.CooldownMinutes != 30 {
+		t.Errorf("register_guard 未覆蓋欄位應沿用預設: %+v", cfg.Security.RegisterGuard)
+	}
+
+	t.Setenv("ER_SECURITY_REGISTER_GUARD_COOLDOWN_MINUTES", "60")
+	t.Setenv("ER_SECURITY_REGISTER_HASH_CONCURRENCY", "2")
+	cfg, err = Load(Options{ConfigPath: path})
+	if err != nil {
+		t.Fatalf("Load 失敗: %v", err)
+	}
+	if cfg.Security.RegisterGuard.CooldownMinutes != 60 || cfg.Security.RegisterGuard.FailLimit != 3 {
+		t.Errorf("環境變數應覆蓋 yaml 欄位且不波及同段其他欄: %+v", cfg.Security.RegisterGuard)
+	}
+	if cfg.Security.RegisterHashConcurrency != 2 {
+		t.Errorf("環境變數應覆蓋 register_hash_concurrency，實際 %d", cfg.Security.RegisterHashConcurrency)
+	}
+}
+
+// register_guard 複用與 login_guard 同一套界限，只差報錯時點的鍵名前綴（security.register_guard）；
+// register_hash_concurrency 另有 1..64 的獨立界線。
+func TestRegisterGuardRejectsBadValues(t *testing.T) {
+	cases := []struct {
+		name string
+		set  func(*Config)
+		want string
+	}{
+		{"配對上限為零", func(c *Config) { c.Security.RegisterGuard.FailLimit = 0 }, "security.register_guard"},
+		{"來源低於配對", func(c *Config) {
+			c.Security.RegisterGuard.FailLimit = 20
+			c.Security.RegisterGuard.SourceFailLimit = 10
+		}, "security.register_guard"},
+		{"冷卻超過一天", func(c *Config) { c.Security.RegisterGuard.CooldownMinutes = maxLoginGuardMinutes + 1 }, "security.register_guard"},
+		{"條目上限越界", func(c *Config) { c.Security.RegisterGuard.MaxEntries = maxLoginGuardEntries + 1 }, "security.register_guard"},
+		{"派生併發為零", func(c *Config) { c.Security.RegisterHashConcurrency = 0 }, "register_hash_concurrency"},
+		{"派生併發越界", func(c *Config) { c.Security.RegisterHashConcurrency = maxRegisterHashConcurrency + 1 }, "register_hash_concurrency"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := Default()
+			tc.set(&cfg)
+			err := cfg.Validate()
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("應拒絕並指出 %s，實際: %v", tc.want, err)
+			}
+		})
+	}
+}
+
+// 合法覆蓋要整體通過：把 register_guard 拉到緊、hash 拉到界內最大也不應誤傷。
+func TestRegisterGuardAcceptsCoherentOverride(t *testing.T) {
+	cfg := Default()
+	cfg.Security.RegisterGuard.FailLimit = 1
+	cfg.Security.RegisterGuard.SourceFailLimit = 1
+	cfg.Security.RegisterGuard.WindowMinutes = 1
+	cfg.Security.RegisterGuard.CooldownMinutes = 1440
+	cfg.Security.RegisterGuard.MaxEntries = 1
+	cfg.Security.RegisterHashConcurrency = maxRegisterHashConcurrency
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("合法 register_guard 組合不應報錯: %v", err)
+	}
+}
+
 func TestListenAllInterfaces(t *testing.T) {
 	cfg := Default()
 	cfg.Server.Listen = "0.0.0.0:5206"

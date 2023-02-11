@@ -388,7 +388,7 @@ func TestPolicySurvivesReopen(t *testing.T) {
 }
 
 // TestEntryNeedsNoPrincipalButNeverGuesses 驗證對外入口：不用主體就能問，
-// 通路未落地時答案恆為關，而庫裡讀不到策略時它是失敗而不是憑空的一組布林。
+// 答案如實反映「策略 ∧ 通路 ∧ 可服務的模式」，而庫裡讀不到策略時它是失敗而不是憑空的一組布林。
 func TestEntryNeedsNoPrincipalButNeverGuesses(t *testing.T) {
 	e := newEnv(t)
 	ctx := context.Background()
@@ -397,11 +397,13 @@ func TestEntryNeedsNoPrincipalButNeverGuesses(t *testing.T) {
 	if err != nil {
 		t.Fatalf("匿名現讀對外答案應成功：%v", err)
 	}
+	// 出廠策略是自註冊 closed：通路已落地，但部署者關著，對外仍是全關。
 	if entry.SignUpOpen || entry.GuestOpen {
-		t.Errorf("出廠狀態的答案應全為關，實際 %+v", entry)
+		t.Errorf("出廠狀態（closed）的答案應全為關，實際 %+v", entry)
 	}
 
-	// 即使 Root 把策略改成放開，通路不存在時對外仍是關（策略值不等於能力）。
+	// Root 把自註冊設成 open：通路已落地、模式可服務，SignUpOpen 才翻成 true；
+	// 訪客通路仍未實作，GuestEnabled 開關再放，GuestOpen 也必須是關（策略值不等於能力）。
 	if _, err := e.service.UpdatePolicy(ctx, root(t), inputOf(true, "open", true), "req"); err != nil {
 		t.Fatalf("變更失敗：%v", err)
 	}
@@ -409,8 +411,11 @@ func TestEntryNeedsNoPrincipalButNeverGuesses(t *testing.T) {
 	if err != nil {
 		t.Fatalf("變更後現讀對外答案應成功：%v", err)
 	}
-	if entry.SignUpOpen || entry.GuestOpen {
-		t.Errorf("三條通路都未實作，對外答案應仍為全關，實際 %+v", entry)
+	if !entry.SignUpOpen {
+		t.Errorf("通路已落地且模式=open 時 SignUpOpen 應為 true，實際 %+v", entry)
+	}
+	if entry.GuestOpen {
+		t.Errorf("訪客通路未實作，GuestOpen 應仍為關，實際 %+v", entry)
 	}
 
 	// 單例行被外部工具拿掉：必須回報失敗。降級成一組布林（不管全開或全關）

@@ -86,42 +86,58 @@ func TestSwitchesAreIndependent(t *testing.T) {
 	}
 }
 
-// TestEntryOfNeverOpensWithoutCapability 是本步最重要的一條：通路尚未實作時，
-// 任何策略組合都算不出「對外開放」。
+// TestEntryOfKeepsEachSideGated 把「對外答案 = 策略 ∧ 通路 ∧ 可服務的模式」釘死。
 //
-// 反過來的缺陷（把開關當能力）會是：Root 打開自註冊，登入前的畫面就出現一個
-// 按下去必然失敗的註冊入口——那是讓未開發的模組冒充可用。
-// 管理員建號那一條通路已落地，因此它不再受「恆為假」約束： Allows 合成結果
-// 恰等於策略開關本身，而對外兩個布林與它無關（那個開關從不對門外揭露）。
-func TestEntryOfNeverOpensWithoutCapability(t *testing.T) {
-	combos := []Policy{
-		{AdminCreateStandard: true, SelfRegisterMode: ModeOpen, GuestEnabled: true},
-		{SelfRegisterMode: ModeOpen},
-		{GuestEnabled: true},
-		{AdminCreateStandard: true, SelfRegisterMode: ModeApproval, GuestEnabled: true},
+// 訪客通路仍未實作：無論策略怎麼設，GuestOpen 恆為關（把開關當能力會讓自己沒有的入口冒充可用）。
+// 自註冊通路已隨 internal/selfregister 落地，因此 SignUpOpen 不再恆為關——但只在
+// 「模式=open」時才對外放開：closed 是部署者關著，approval／invite 的准入流程還沒上線，
+// 三者都不該在登入前畫面上出現一個按下去必然失敗的註冊入口。
+// AllowsSelfRegister 的契約與對外答案不同：它對任何有效非 closed 模式都回 true 並帶出模式，
+// 由用例去分辨 open 放行、approval／invite 回 2016；零值 "" 不是有效模式，回 false。
+func TestEntryOfKeepsEachSideGated(t *testing.T) {
+	cases := []struct {
+		name               string
+		mode               Mode
+		wantSignUpOpen     bool
+		wantSelfRegisterOK bool
+	}{
+		{"open", ModeOpen, true, true},
+		{"closed", ModeClosed, false, false},
+		{"approval（准入未上線，對外關、Allows 帶出模式）", ModeApproval, false, true},
+		{"invite（同上）", ModeInvite, false, true},
+		{"零值 \"\"（不是有效模式，兩側都關）", Mode(""), false, false},
 	}
-	for i, p := range combos {
+	for _, tc := range cases {
+		p := Policy{AdminCreateStandard: true, SelfRegisterMode: tc.mode, GuestEnabled: true}
 		entry := p.EntryOf()
-		if entry.SignUpOpen || entry.GuestOpen {
-			t.Errorf("第 %d 組：自註冊與訪客通路都不存在，對外答案應全為關，實際 %+v", i+1, entry)
+		if entry.SignUpOpen != tc.wantSignUpOpen {
+			t.Errorf("%s：SignUpOpen 應為 %v，實際 %v", tc.name, tc.wantSignUpOpen, entry.SignUpOpen)
 		}
-		if p.AllowsAdminCreateStandard() != p.AdminCreateStandard {
-			t.Errorf("第 %d 組：建號通路已落地，Allows 應恰等於策略開關 %v，實際 %v",
-				i+1, p.AdminCreateStandard, p.AllowsAdminCreateStandard())
-		}
-		if ok, _ := p.AllowsSelfRegister(); ok {
-			t.Errorf("第 %d 組：自註冊通路未實作，Allows 應為假", i+1)
+		// 訪客通路未實作：策略開關再怎麼放，對外都是關。
+		if entry.GuestOpen {
+			t.Errorf("%s：GuestOpen 在通路未落地時必須恆為關，實際 true", tc.name)
 		}
 		if p.AllowsGuest() {
-			t.Errorf("第 %d 組：訪客通路未實作，Allows 應為假", i+1)
+			t.Errorf("%s：訪客通路未實作，Allows 應為假", tc.name)
+		}
+		// 建號通路已落地：Allows 恰等於策略開關（對門外永不揭露，與 EntryOf 無關）。
+		if !p.AllowsAdminCreateStandard() {
+			t.Errorf("%s：建號通路已落地而開關為真，Allows 應為真", tc.name)
+		}
+		ok, gotMode := p.AllowsSelfRegister()
+		if ok != tc.wantSelfRegisterOK {
+			t.Errorf("%s：AllowsSelfRegister 放行與否應為 %v，實際 %v", tc.name, tc.wantSelfRegisterOK, ok)
+		}
+		if gotMode != tc.mode {
+			t.Errorf("%s：AllowsSelfRegister 應原樣帶出模式 %q，實際 %q", tc.name, tc.mode, gotMode)
 		}
 	}
 }
 
 // TestAllowsSelfRegisterKeepsMode 驗證 Allows 同時給出「放不放行」與「按哪種模式放行」。
 //
-// 模式要一起回：日後自註冊通路落地時，closed 與 open 的差別就在這個返回值上，
-// 而呼叫端不該再去比一次字串（兩處判定的結果遲早不一致）。
+// 模式要一起回：closed 與 open 的差別、以及 open 之外哪些模式該被用例擋掉，
+// 都靠這個返回值，而呼叫端不該再去比一次字串（兩處判定的結果遲早不一致）。
 func TestAllowsSelfRegisterKeepsMode(t *testing.T) {
 	closed := Policy{SelfRegisterMode: ModeClosed}
 	ok, mode := closed.AllowsSelfRegister()
@@ -130,22 +146,32 @@ func TestAllowsSelfRegisterKeepsMode(t *testing.T) {
 	}
 	open := Policy{SelfRegisterMode: ModeOpen}
 	ok, mode = open.AllowsSelfRegister()
-	if ok || mode != ModeOpen {
-		t.Errorf("通路未實作時 open 仍不應放行，且模式要如實帶出，實際 %v/%q", ok, mode)
+	if !ok || mode != ModeOpen {
+		t.Errorf("通路已落地時 open 應放行並帶出模式，實際 %v/%q", ok, mode)
+	}
+	// 零值不是任何已登記模式：即使通路翻真也不能被算成放行（否則帶著誰也執行不了的模式回 true）。
+	zero := Policy{}
+	ok, mode = zero.AllowsSelfRegister()
+	if ok || mode != Mode("") {
+		t.Errorf("零值模式不是有效模式，應不放行且原樣帶出，實際 %v/%q", ok, mode)
 	}
 }
 
 // TestCapabilitiesReflectThisBuild 把「本版本哪幾條建立通路存在」釘成一條可失敗的斷言。
 //
-// 它不是湊數：日後某人實作了自註冊卻忘了在 capabilities 裡改一位，對外入口就不會開放，
+// 它不是湊數：日後某人實作了某條通路卻忘了在 capabilities 裡改一位，對外入口就不會開放，
 // 而那正是「做了功能但沒上線」最難查的形態；這條斷言會把他導向那個唯一的登記點。
-// 管理員建號已隨 internal/stdacct 落地而翻真，其餘兩條仍必須是假。
+// 管理員建號（internal/stdacct）與匿名自註冊（internal/selfregister）都已落地而翻真，
+// 訪客通路仍未實作，該位必須是假。
 func TestCapabilitiesReflectThisBuild(t *testing.T) {
 	caps := capabilities()
 	if !caps.AdminCreateStandard {
 		t.Error("管理員建立普通帳戶的通路已落地，能力登記該位必須為真")
 	}
-	if caps.SelfRegister || caps.Guest {
-		t.Errorf("自註冊與訪客通路仍未實作，能力登記該兩位應為假，實際 %+v", caps)
+	if !caps.SelfRegister {
+		t.Error("匿名自註冊的通路已落地，能力登記該位必須為真")
+	}
+	if caps.Guest {
+		t.Errorf("訪客通路仍未實作，能力登記該位應為假，實際 %+v", caps)
 	}
 }

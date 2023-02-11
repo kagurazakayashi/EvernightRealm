@@ -71,6 +71,12 @@ type Deps struct {
 	// 本用例是管理員依該配置建行、翻名冊、改顯示名與開關登入能力——
 	// 裝配了誰就服務誰，傳輸層不拿一方猜另一方。
 	StandardAccounts StdAccountUseCase
+	// SelfRegister 為「匿名自註冊普通帳戶」用例的入口（internal/app 注入 *selfregister.Service）。
+	// 為 nil 表示本執行檔不開放 /auth/register：路徑、回退清單與錯誤面都和未掛載時逐字相同。
+	// 它與 Auth、StandardAccounts 都是三個依賴而不是同一個：登入是「拿已有憑據換會話」、
+	// 管理員建號是「持伺服器級授予者代人建一筆帳戶」、本用例是「門外的人自行建一筆帳戶且立刻可登入」——
+	// 三種准入邊界各是各的，裝配了誰就服務誰，傳輸層不拿一方猜另一方。
+	SelfRegister SelfRegisterUseCase
 }
 
 // Server 為 HTTP 服務層。
@@ -108,6 +114,10 @@ type Server struct {
 	// 登入狀態與憑據重置；可為 nil）；nil 時 standardAccountEndpoints 回空清單，
 	// /admin 首段根本不在登記清單裡。
 	stdAccounts StdAccountUseCase
+	// selfRegister 為「匿名自註冊普通帳戶」用例入口（可為 nil）；nil 時
+	// selfRegisterEndpoints 回空清單，/auth/register 這條路徑根本不掛（/auth 首段
+	// 仍因登入端點屬 API，回退行為不受影響）。
+	selfRegister SelfRegisterUseCase
 }
 
 // New 以組態、版本字串與外部依賴建立 HTTP 服務層。
@@ -142,6 +152,9 @@ func New(cfg *config.Config, version string, deps Deps) *Server {
 		// 「裝配了什麼就服務什麼」在這一層沒有分支。
 		accountPolicy: deps.AccountPolicy,
 		stdAccounts:   deps.StandardAccounts,
+		// 自註冊用例為 nil 時一個端點都不掛（見 selfRegisterEndpoints）：
+		// 「裝配了什麼就服務什麼」在這一層沒有分支。
+		selfRegister: deps.SelfRegister,
 	}
 	s.httpSrv = &http.Server{
 		Addr:    cfg.Server.Listen,
