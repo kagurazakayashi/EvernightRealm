@@ -50,6 +50,11 @@ func NewStore(clock timeutil.Clock) *Store {
 // 唯一性走「先算鍵、INSERT 由 UNIQUE 索引兜底」：並發註冊同鍵時後到的收到
 // ErrDuplicateLogin——正確性來自資料庫約束，不來自查插之間的時間窗。
 // New 已完成全部領域校驗，那裏不重複檢查，也不採信呼叫端填了 ID/CreatedAt。
+//
+// 語句裡刻意沒有 reviewed_at：沒有人做過決定時，一筆新行不該帶決定時刻
+// （遷移 0009 的 accounts_insert_not_reviewed 觸發器把這條釘在資料庫層）。
+// 待審批帳戶因此是這張表唯一一個「出生就帶著一個非登入狀態」的形態，
+// 而它帶的也只有 status 一欄。
 func (s *Store) Create(ctx context.Context, q database.Querier, in NewInput) (Account, error) {
 	if q == nil {
 		return Account{}, errors.New("account: 需要可用的資料庫連線或交易")
@@ -367,7 +372,8 @@ func (s *Store) MarkDeleted(ctx context.Context, q database.Querier, id idgen.ID
 
 // selectAccountSQL 是欄位清單的唯一定義點（查詢用的欄序與 scanRow 的取值順序同源）。
 const selectAccountSQL = `SELECT id, login_name, login_name_key, display_name, password_hash,
-		account_type, status, must_change_password, created_at, last_login_at, disabled_at, deleted_at
+		account_type, status, must_change_password, created_at, last_login_at, disabled_at, deleted_at,
+		reviewed_at
 	FROM accounts`
 
 // scanOne 收攏 QueryRow 的取行與錯誤映射。
@@ -378,9 +384,11 @@ func scanOne(row *sql.Row) (Account, error) {
 		typeText, statusText                     string
 		mustChange, createdAt                    int64
 		lastLoginAt, disabledAt, deletedAt       sql.NullInt64
+		reviewedAt                               sql.NullInt64
 	)
 	err := row.Scan(&idText, &loginName, &loginKey, &displayName, &passwordHash,
-		&typeText, &statusText, &mustChange, &createdAt, &lastLoginAt, &disabledAt, &deletedAt)
+		&typeText, &statusText, &mustChange, &createdAt, &lastLoginAt, &disabledAt, &deletedAt,
+		&reviewedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Account{}, ErrNotFound
 	}
@@ -388,22 +396,22 @@ func scanOne(row *sql.Row) (Account, error) {
 		return Account{}, fmt.Errorf("account: 讀取帳戶失敗: %w", err)
 	}
 	return accountFromRow(idText, loginName, loginKey, displayName, passwordHash,
-		typeText, statusText, mustChange, createdAt, lastLoginAt, disabledAt, deletedAt)
+		typeText, statusText, mustChange, createdAt, lastLoginAt, disabledAt, deletedAt, reviewedAt)
 }
 
 // accountFromRow 把一列欄位讀回實體並做入庫後校驗。
 //
 // 標識讀不回來、或帶著表外枚舉值時一律報錯：那代表資料庫被繞過校驗寫入了東西
 // （或執行檔比資料庫舊），靜默跳過會讓那筆帳戶在介面上徹底消失。
-// 狀態與三個時刻的配對也在這裡複核（遷移 0007 的三條方向規則）：
-// 讀path是「帳戶實體」唯一的成形點，放行一個形態矛盾的行，
-// 等於讓下游每個用例各自決定「deleted 但沒有 deleted_at」算什麼。
+// 狀態與四個時刻的配對也在這裡複核（遷移 0007 的三條方向規則加 0009 的三條）：
+// 讀取路徑是「帳戶實體」唯一的成形點，放行一個形態矛盾的行，
+// 等於讓下游每個用例各自決定「rejected 但沒有 reviewed_at」算什麼。
 func accountFromRow(
 	idText, loginName, loginKey, displayName string,
 	passwordHash sql.NullString,
 	typeText, statusText string,
 	mustChange, createdAt int64,
-	lastLoginAt, disabledAt, deletedAt sql.NullInt64,
+	lastLoginAt, disabledAt, deletedAt, reviewedAt sql.NullInt64,
 ) (Account, error) {
 	id, err := idgen.Parse(idText)
 	if err != nil {
@@ -432,7 +440,10 @@ func accountFromRow(
 	if deletedAt.Valid {
 		a.DeletedAt = timeutil.FromMillis(deletedAt.Int64)
 	}
-	// 形態複核：三條方向規則與遷移 0007 的 CHECK 逐字同口徑。
+	if reviewedAt.Valid {
+		a.ReviewedAt = timeutil.FromMillis(reviewedAt.Int64)
+	}
+	// 形態複核：0007 的三條方向規則逐字承接。
 	//   - disabled 必帶停用時刻；
 	//   - active 必不帶停用時刻（重新啟用時清回 NULL）；
 	//   - deleted 與刪除時刻同生同滅；deleted 可保留停用時刻（被刪前本就是停用者，
@@ -446,6 +457,24 @@ func accountFromRow(
 	}
 	if a.Status == StatusActive && !a.DisabledAt.IsZero() {
 		return Account{}, fmt.Errorf("account: 帳戶 %s 是可用狀態卻帶著停用時刻", idText)
+	}
+	// 0009 新增的三條：待審批與已拒絕都不在「被停用過」那條鏈上，而決定時刻只與其中一個成對
+	// （pending 必無、rejected 必有）。
+	//   - pending 帶著決定時刻＝一句話裡同時有「還在等」與「已經定案」；
+	//   - rejected 沒有決定時刻＝一句查不出是哪一次審核說的話；
+	//   - pending／rejected 帶著停用時刻：審核中的申請人沒被誰停過用。
+	// approved 那一跳之後的行（active／disabled／deleted）帶著決定時刻是合法形態，
+	// 因此這裡刻意不寫「非 pending／rejected 就必須如何」——那會把開放自註冊建成的
+	// 帳戶（時刻恆為 NULL）判成形態矛盾。
+	if a.Status == StatusPending && !a.ReviewedAt.IsZero() {
+		return Account{}, fmt.Errorf("account: 帳戶 %s 還在待審批卻帶著審核時刻", idText)
+	}
+	if a.Status == StatusRejected && a.ReviewedAt.IsZero() {
+		return Account{}, fmt.Errorf("account: 帳戶 %s 已被拒絕卻沒有審核時刻", idText)
+	}
+	if (a.Status == StatusPending || a.Status == StatusRejected) && !a.DisabledAt.IsZero() {
+		return Account{}, fmt.Errorf("account: 帳戶 %s 是審批鏈的狀態卻帶著停用時刻（%s）",
+			idText, statusText)
 	}
 	return a, nil
 }

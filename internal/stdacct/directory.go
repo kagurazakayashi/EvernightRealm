@@ -143,9 +143,23 @@ func (s *Service) Directory(ctx context.Context, principal identity.Principal,
 			ErrInvalidPageSize, q.PageSize, DirectoryMaxPageSize)
 	}
 
-	where := []string{"a.status <> ?", "NOT EXISTS (SELECT 1 FROM account_server_roles r" +
+	// 範圍恆排除兩類行：刪除終態（0007 起），以及待審批與已拒絕的申請（0009 起）。
+	// 把 pending／rejected 排除在同一條 WHERE 裡，是這一頁最容易出事的地方，理由逐條寫清：
+	//   - 這一頁的語意是「管理員能打理的普通帳戶名冊」，而一個還沒被批准的人不是名冊上的人：
+	//     他沒有登入能力，也就沒有一件「停用／恢復」「重置口令」「改顯示名」可對他做；
+	//   - 留他在頁上，下一跳就會把「恢復」按到他頭上——那條通路的 CAS 原語
+	//     （account.Store.SetStatus）硬鎖 active|disabled 兩側，按下去必然失敗，
+	//     做出來的正是一個「列得到、點得下去、必然回錯」的入口；
+	//   - 審批看的不是這一頁。待審批名冊屬下一步的審批通路（它的授權邊界與本目錄相同，
+	//     但回答的是另一句話），本步不拿這頁冒充那頁。
+	// 排除用的是狀態而不是「有沒有審核時刻」：前者是一句可讀的範圍規則，後者會把
+	// 「曾被批准、後來被停用」的人一起藏掉——那個人仍然屬於名冊。
+	where := []string{"a.status NOT IN (?, ?, ?)", "NOT EXISTS (SELECT 1 FROM account_server_roles r" +
 		" WHERE r.account_id = a.id AND r.role = ?)"}
-	args := []any{account.StatusDeleted.String(), identity.RoleServerAdmin.String()}
+	args := []any{
+		account.StatusDeleted.String(), account.StatusPending.String(),
+		account.StatusRejected.String(), identity.RoleServerAdmin.String(),
+	}
 
 	switch q.StatusFilter {
 	case "", DirectoryFilterAll:

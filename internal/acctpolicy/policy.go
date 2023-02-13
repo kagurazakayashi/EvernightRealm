@@ -85,7 +85,9 @@ const (
 	// ModeOpen 是開放自註冊：符合條件者自行建立、無需他人核准。
 	ModeOpen Mode = "open"
 	// ModeApproval 是需要核准的自註冊：申請落地後須由人批准才可用。
-	// 本版本沒有申請與核准的任何通路，因此它是一個「已批准的名字」，不可寫入。
+	// 申請與本人查狀態的通路已落地（見 internal/selfregister 的 approval 分支），
+	// 因此本版本起它可寫入；「批准／拒絕的那一跳」屬後續步驟，這一欄此刻記的是
+	// 「伺服器會收待審批的申請，且收進來的人不會有任何登入能力」。
 	ModeApproval Mode = "approval"
 	// ModeInvite 是邀請碼自註冊：只有持有效邀請碼者可建立帳戶。
 	// 本版本沒有邀請碼的產生與核銷通路，因此同樣不可寫入。
@@ -111,17 +113,31 @@ func (m Mode) valid() bool {
 // writable 回報這個模式在本版本能否被 Root 寫入。
 //
 // closed 永遠寫得：它的意思就是不開放，不需要任何通路支撐。
-// open 也寫得，因為「把模式記為開放」本身就是一個合法的策略決定——注意它不等於對外
-// 入口可用，那由通路登記決定（見 EntryOf）。
-// approval／invite 的名字已批准，但申請／核准與邀請碼的通路尚未落地，現在寫進去只會
-// 造出一個「伺服器記錄了一種它自己執行不了的模式」的狀態；等對應步驟完成時，
-// 只需在 capabilities 裡把該模式標為已落地，這裡隨之放行——介面與協議都不必再改形狀。
+// 其餘三個名字的寫入資格一律問「這條准入通路落地了沒有」（ModeServed），
+// 不在這裡另寫一份判定：同一條「策略值不等於能力」的規則有兩處實作時，總有一處會被忘了改。
+// open 早已落地，approval 的「收申請＋本人查狀態」也已經落地（本步），
+// 所以兩者現在都寫得；invite 仍然寫不得——邀請碼的產生與核銷一件都沒有，
+// 寫進去只會造出一個「伺服器記錄了一種它自己執行不了的模式」的狀態。
 func (m Mode) writable() bool {
-	switch m {
-	case ModeClosed, ModeOpen:
+	if m == ModeClosed {
 		return true
 	}
-	return false
+	return ModeServed(m)
+}
+
+// ModeServed 回報這個自註冊模式在本版本有沒有一條真的執行得動的通路。
+//
+// 這是全倉庫唯一一處回答該問題的地方（通路登記見 capabilities）：
+//   - 建立通路（internal/selfregister）在交易內現讀策略後用它分辨「放行的是哪一種」——
+//     AllowsSelfRegister 只說「模式不是 closed 而且通路存在」，而一個尚未落地的模式
+//     既不該被當成「關閉」（那是另一句錯誤、另一種處置），也不該被默默按 open 執行；
+//   - 對外入口答案（EntryOf）用它決定「要不要露這扇門」——把還沒落地的准入在入口層回 true，
+//     界面就會出現一個按下去必然失敗的入口。
+//
+// 新增模式時只改 capabilities 那一處登記：這裡的分支不需要跟著改，
+// 因為它問的是登記表，不是自己記的一份名單。
+func ModeServed(m Mode) bool {
+	return capabilities().ServesSelfRegisterMode(m)
 }
 
 // ParseMode 解析自註冊模式字串，只認四個已批准名字。
@@ -174,6 +190,15 @@ type Capabilities struct {
 	AdminCreateStandard bool
 	// SelfRegister 是「用戶自註冊」的端點與界面是否存在。
 	SelfRegister bool
+	// SelfRegisterApproval 是「自註冊的核准模式」那一側的准入通路是否存在：
+	// 收一筆待審批的申請、以及讓申請人憑自己的憑據查本人的申請結果。
+	//
+	// 它與 SelfRegister 刻意分開登記：open 與 approval 打的是同一個端點、走的是同一條用例，
+	// 但落地的是兩種不同的准入形態。「端點在」講的是有人能提交，
+	// 「核准通路在」講的是提交之後那個「等」字有没有資料層與查詢通路接得住。
+	// 混成一欄的結局是：要么開放模式跟著申請功能一起被誤關，
+	// 要么界面把 approval 顯示成「提交就能用」。
+	SelfRegisterApproval bool
 	// Guest 是「訪客（臨時）帳戶建立」的通路是否存在。
 	Guest bool
 }
@@ -184,16 +209,39 @@ type Capabilities struct {
 // 這裡講的是這個執行檔做不做得到。AdminCreateStandard 已翻真——管理員建立
 // 普通帳戶的用例與端點已落地（見 internal/stdacct）；SelfRegister 也已翻真——
 // 匿名自註冊的用例與端點已落地（見 internal/selfregister），因此 Root 把模式設成
-// open 時這個入口才真的能按下去成功。Guest 仍然為 false，而且這不是妥協：訪客帳戶
-// 通路還沒實作，先把它寫成 true，界面就會出現一個按下去必然失敗的入口，或讓一個
-// 不存在端點被當成可用——那正是「未開發的模組冒充可用」。反過來，策略值可以由 Root
-// 先設定成放開：那份意圖是真的，只是還沒有執行它的東西，下面的合成會把兩者如實算成「仍不放行」。
-//
-// selfregister 只實作 open 模式：approval／invite 需要的准入流程尚未上線（Mode.writable
-// 也仍把它們擋在寫入之外），故即使 AllowsSelfRegister 回 true，用例仍會把非 open 的模式
-// 如實拒絕（見 internal/selfregister 的 ErrRegisterModeUnsupported），不冒充「已批准」。
+// open 時這個入口才真的能按下去成功。SelfRegisterApproval 本步翻真——
+// approval 模式下提交會落成一個待審批帳戶、申請人也能查到本人的申請結果；
+// 注意它不含「批准／拒絕」那一個動作，那屬下一步，而 Root 現在把模式設成 approval
+// 得到的事實就是「收申請、一個也不放行」，這句話本身是可執行、可核實的。
+// Guest 仍然為 false，而且這不是妥協：訪客帳戶通路還沒實作，先把它寫成 true，
+// 界面就會出現一個按下去必然失敗的入口，或讓一個不存在端點被當成可用——
+// 那正是「未開發的模組冒充可用」。反過來，策略值可以由 Root 先設定成放開：
+// 那份意圖是真的，只是還沒有執行它的東西，下面的合成會把兩者如實算成「仍不放行」。
 func capabilities() Capabilities {
-	return Capabilities{AdminCreateStandard: true, SelfRegister: true}
+	return Capabilities{
+		AdminCreateStandard:  true,
+		SelfRegister:         true,
+		SelfRegisterApproval: true,
+	}
+}
+
+// ServesSelfRegisterMode 回報「以這個模式提交」在本版本執行不執行得動。
+//
+// closed 回 false：它不是一種提交方式，而是不提交——問「closed 模式下怎麼服務」
+// 沒有一句真的答案，故由 AllowsSelfRegister 先把關掉的那一側擋在放行之外。
+// invite 回 false：邀請碼的產生與核銷一件都沒落地，這一行是「尚未實作」的登記處，
+// 落地時只加一個 Capabilities 欄位並在這裡帶出，介面與協議不必改形狀。
+func (c Capabilities) ServesSelfRegisterMode(m Mode) bool {
+	if !c.SelfRegister || !m.valid() {
+		return false
+	}
+	switch m {
+	case ModeOpen:
+		return true
+	case ModeApproval:
+		return c.SelfRegisterApproval
+	}
+	return false
 }
 
 // AllowsAdminCreateStandard 回報「管理員此刻可否建立普通帳戶」：策略開關與通路存在與否。
@@ -214,7 +262,9 @@ func (p Policy) AllowsGuest() bool {
 //
 // 模式為 closed、或不是本枚舉認識的值、或通路尚未落地時都不放行；其餘有效模式（open／
 // approval／invite）回 true 並原樣帶出模式，讓呼叫端自己去分辨「放行的是哪一種」——
-// 本版本的 selfregister 只服務 open，approval／invite 會被用例回 2016，不對外冒充准入流程。
+// 哪一種真的執行得動由 ModeServed 回答（本版本的 selfregister 服務 open 與 approval 兩種，
+// invite 仍會被抓出來回 2016）。這裡刻意不再內嵌「落不落得動」的判斷：
+// 「策略准不准」與「這個版本做不做得到」是兩句話，合成點只放在 ModeServed 與 EntryOf。
 //
 // valid() 這一側不可省：Mode 是字串型別，零值 "" 既不是 closed 也不是任何已登記模式。
 // 少了這層把關，通路翻真後一個未設定的零值 Policy 會被算成「放行」，而它帶的模式誰也執行不了。
@@ -228,11 +278,13 @@ func (p Policy) AllowsSelfRegister() (bool, Mode) {
 // EntryCapabilities 是登入前界面需要的最小對外事實：兩個入口開還是關。
 //
 // 欄位就只有這兩個，是刻意的：普通帳戶由誰建立對還站在門外的人毫無意義；
-// 模式名字（closed 還是 approval）也不出去——它不改變「現在能不能自行建立」這個答案，
-// 卻屬「這台伺服器打算怎麼做准入」的內部計畫。策略全文、updated_at、任何帳戶資料、
-// 任何名額或閾值都不在這裡。
+// 模式名字（closed 還是 approval 還是 invite）也不出去——它不改變「現在能不能自行提交」
+// 這個答案，卻屬「這臺伺服器打算怎麼做准入」的內部計畫。
+// 因此這個入口也不回答「提交之後立刻能用還是要等審批」：那一句由提交成功的回應裡
+// 的 status 講（伺服器在寫入那一刻判出的事實），界面不靠猜、也不靠多一個布林。
+// 策略全文、updated_at、任何帳戶資料、任何名額或閾值都不在這裡。
 type EntryCapabilities struct {
-	// SignUpOpen 是用戶自註冊入口對外是否開放。
+	// SignUpOpen 是用戶自註冊入口對外是否開放（提交得了，還是提交不了）。
 	SignUpOpen bool
 	// GuestOpen 是訪客（臨時帳戶）入口對外是否開放。
 	GuestOpen bool
@@ -240,16 +292,17 @@ type EntryCapabilities struct {
 
 // EntryOf 把策略與通路落地狀況合成對外入口的答案。
 //
-// 規則只有一條：放開必須同時「策略要求放開」與「這條通路真的存在」，
-// 而且對自註冊還要再加一層——生效的模式得是本版本真的服務得動的 open。
+// 規則只有一條：放開必須同時「策略要求放開」與「這個版本真的服務得動那個模式」，
+// 後者就是 ModeServed（open 與 approval 都已落地，invite 還沒有）。
 // 少了任何一側都是關：這讓「不認識的值」在合成上不可能變成放行，
 // 也讓尚未實作的入口不可能被一個策略開關變成可點擊的假象。
-// approval／invite 的准入流程尚未上線（用例會把非 open 回 2016），若在這裡回 true，
-// 登入前畫面就出現一個按下去必然失敗的註冊入口——那正是「未開發的模組冒充可用」。
+// approval 現在回 true 是因為那扇門此刻真的推得開——提交會落成一個待審批帳戶，
+// 而「待審批」三個字有資料層與查詢通路接得住；它不等於「提交完就能登入」，
+// 那句話由提交回應裡的 status 各自說。
 func (p Policy) EntryOf() EntryCapabilities {
 	allowed, mode := p.AllowsSelfRegister()
 	return EntryCapabilities{
-		SignUpOpen: allowed && mode == ModeOpen,
+		SignUpOpen: allowed && ModeServed(mode),
 		GuestOpen:  p.AllowsGuest(),
 	}
 }

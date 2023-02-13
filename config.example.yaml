@@ -98,6 +98,9 @@ security:
   # 同一出口位址後面的其他用戶不受影響；source_fail_limit 是同一位址橫掃大量帳戶時
   # 才會觸發的來源級補集，因此刻意遠高於 fail_limit。
   # 來源位址一律取實際連線（本服務沒有可信代理約定，不採信任何轉發標頭）。
+  # 「申請人查本人待審批狀態」（POST /auth/registration-status）沿用這一份帳，而不是另立一條：
+  # 它與登入做的是同一件事——拿一枚口令去對一個名字。分账等於給同一個來源多一份猜口令的預算。
+  # 提交註冊（/auth/register）則走下方的 register_guard 分账，因為那不交憑據、燒的是另一樣東西。
   login_guard:
     fail_limit: 10                  # 視窗內單一「來源×目標」的失敗上限
     window_minutes: 15              # 失敗計數的滑動視窗（分鐘）

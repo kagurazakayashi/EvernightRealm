@@ -191,7 +191,17 @@ func (s *Service) readStandardProfile(ctx context.Context, q database.Querier,
 	} else if !errors.Is(err, grant.ErrNotFound) {
 		return StandardProfile{}, err
 	}
-	if a.Status == account.StatusDeleted {
+	// 刪除終態與審批鏈的兩個狀態都在這裡出局，而且對它們都回同一句 ErrAccountNotFound：
+	//   - deleted：沿用既有語意（本目錄按定義不列已刪者，因此不該拿到 2015 那句
+	//     「列得到但不接受寫入」的話）；
+	//   - pending／rejected：他還在門外，本目錄沒這個人可打理。回「查無此帳戶」而不是
+	//     另發一枚「他在待審批」的碼，是因為這句話對操作者與外人意味著同一件事——
+	//     這條通路對他沒有可做的動作；待審批名冊屬下一步的審批通路（用戶批准的範圍規則）。
+	// 少這一層的後果是具體的：目錄的 WHERE 把他藏起來之後，只剩按 ID 直打這條路能碰到他，
+	// 而 SetStatus 的 CAS 會把他的 pending 當成 expected_status 之外的一種值拒掉——
+	// 那是一句「參數不合法」的內部故障而不是範圍拒絕，形體上就像後端壞了。
+	if a.Status == account.StatusDeleted || a.Status == account.StatusPending ||
+		a.Status == account.StatusRejected {
 		return StandardProfile{}, ErrAccountNotFound
 	}
 	return StandardProfile{

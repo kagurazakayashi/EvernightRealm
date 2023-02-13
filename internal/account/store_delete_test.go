@@ -249,16 +249,24 @@ func TestReadRowRejectsContradictoryShape(t *testing.T) {
 		status    string
 		disabled  sql.NullInt64
 		deletedAt sql.NullInt64
+		reviewed  sql.NullInt64
 	}{
-		{"刪除態卻沒有刪除時刻", "deleted", sql.NullInt64{}, sql.NullInt64{}},
-		{"可用態卻帶著刪除時刻", "active", sql.NullInt64{}, sql.NullInt64{Int64: 1730000000001, Valid: true}},
-		{"停用態卻沒有停用時刻", "disabled", sql.NullInt64{}, sql.NullInt64{}},
+		{"刪除態卻沒有刪除時刻", "deleted", sql.NullInt64{}, sql.NullInt64{}, sql.NullInt64{}},
+		{"可用態卻帶著刪除時刻", "active", sql.NullInt64{}, sql.NullInt64{Int64: 1730000000001, Valid: true},
+			sql.NullInt64{}},
+		{"停用態卻沒有停用時刻", "disabled", sql.NullInt64{}, sql.NullInt64{}, sql.NullInt64{}},
+		// 0009 的三條方向規則各自擋一種「審批鏈上說不通」的行。
+		{"待審批卻帶著審核時刻", "pending", sql.NullInt64{}, sql.NullInt64{},
+			sql.NullInt64{Int64: 1730000000001, Valid: true}},
+		{"已拒絕卻沒有審核時刻", "rejected", sql.NullInt64{}, sql.NullInt64{}, sql.NullInt64{}},
+		{"待審批卻帶著停用時刻", "pending", sql.NullInt64{Int64: 1730000000001, Valid: true},
+			sql.NullInt64{}, sql.NullInt64{}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := accountFromRow(mustID(t), "l", "l", "n",
 				sql.NullString{String: testHash, Valid: true}, "standard", tc.status, 0, 1730000000000,
-				sql.NullInt64{}, tc.disabled, tc.deletedAt)
+				sql.NullInt64{}, tc.disabled, tc.deletedAt, tc.reviewed)
 			if err == nil {
 				t.Error("矛盾形態應在成形階段報錯，實際靜默放行")
 			}
@@ -268,12 +276,36 @@ func TestReadRowRejectsContradictoryShape(t *testing.T) {
 	// 同一組欄位換成一致形態就必須讀得出來——否則上面那條拒絕只是「什麼都拒」。
 	ok, err := accountFromRow(mustID(t), "l", "l", "n",
 		sql.NullString{String: testHash, Valid: true}, "standard", "deleted", 0, 1730000000000,
-		sql.NullInt64{}, sql.NullInt64{}, sql.NullInt64{Int64: 1730000000001, Valid: true})
+		sql.NullInt64{}, sql.NullInt64{}, sql.NullInt64{Int64: 1730000000001, Valid: true}, sql.NullInt64{})
 	if err != nil {
 		t.Fatalf("一致的刪除形態應讀得出來：%v", err)
 	}
 	if ok.Status != StatusDeleted || ok.DeletedAt.IsZero() {
 		t.Errorf("讀回的刪除形態不正確：%+v", ok)
+	}
+
+	// 待審批的一致形態：沒有停用時刻、也沒有審核時刻（還沒有人做過決定）。
+	pending, err := accountFromRow(mustID(t), "l", "l", "n",
+		sql.NullString{String: testHash, Valid: true}, "standard", "pending", 0, 1730000000000,
+		sql.NullInt64{}, sql.NullInt64{}, sql.NullInt64{}, sql.NullInt64{})
+	if err != nil {
+		t.Fatalf("一致的待審批形態應讀得出來：%v", err)
+	}
+	if pending.Status != StatusPending || !pending.ReviewedAt.IsZero() {
+		t.Errorf("讀回的待審批形態不正確：%+v", pending)
+	}
+
+	// 批准之後再被停用：停用時刻與審核時刻同時存在是合法形態——
+	// 後者記的是「他當初被批准過」，屬於不會被後續狀態抹掉的歷史。
+	approvedThenDisabled, err := accountFromRow(mustID(t), "l", "l", "n",
+		sql.NullString{String: testHash, Valid: true}, "standard", "disabled", 0, 1730000000000,
+		sql.NullInt64{}, sql.NullInt64{Int64: 1730000000002, Valid: true}, sql.NullInt64{},
+		sql.NullInt64{Int64: 1730000000001, Valid: true})
+	if err != nil {
+		t.Fatalf("「批准過而後停用」的形態應讀得出來：%v", err)
+	}
+	if approvedThenDisabled.ReviewedAt.IsZero() {
+		t.Error("讀回的帳戶丟了審核時刻，受限狀態通路就無從分辨他是否走過審批")
 	}
 }
 

@@ -192,6 +192,12 @@ var errorMessages = map[ErrorCode]map[string]string{
 		LocaleEnUS: "This login name is already taken (matching absorbs case and width variants such as full-width letters), so this sign-up created no account. Choose another name and submit again.",
 		LocaleJaJP: "このログイン名はすでに使用されています（比較では大小文字や全角・半角などの表記の差異が吸収される）ため、今回の登録ではアカウントが作成されませんでした。別の名前を選んで再度送信してください。",
 	},
+	CodeNotAnApplication: {
+		LocaleZhCN: "凭据有效，但这个账户不是待审批的申请——它由开放自注册、管理员创建或 Root 开设直接生效。请改用登录入口。",
+		LocaleZhTW: "憑據有效，但這個帳戶不是待審批的申請——它由開放自註冊、管理員建立或 Root 開設直接生效。請改用登入入口。",
+		LocaleEnUS: "These credentials are valid, but this account is not an application awaiting approval; it was created directly by open sign-up, an administrator, or Root. Please use the sign-in page.",
+		LocaleJaJP: "認証情報は有効ですが、このアカウントは承認待ちの申請ではありません。公開登録、管理者、または Root によって直接有効化されています。ログイン画面をご利用ください。",
+	},
 }
 
 // messageFor 取得錯誤碼在指定語言的使用者訊息；語言未支援或訊息為空時回退 defaultLocale。

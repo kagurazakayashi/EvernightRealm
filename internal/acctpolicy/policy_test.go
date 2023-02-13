@@ -34,9 +34,17 @@ func TestParseModeAcceptsOnlyApprovedNames(t *testing.T) {
 
 // TestModeWritableGate 驗證「名字已批准」與「本版本寫得進去」是兩件事。
 //
-// 這一條是分岔點：approval／invite 的 valid 為真（形態合法）、writable 為假（通路未落地）。
-// 把兩者混為一談的話，要嘛介面現在就能記一種執行不了的模式，要嘛日後加模式時
-// 必須改寫既有注釋裡那句「合法」的定義。
+// 這一條是分岔點，而且它會隨著通路落地而移動——這正是它存在的理由：
+//   - closed／open 兩者皆真（不開放不需要通路支撐，開放的通路早已落地）；
+//   - approval 現在兩側皆真：收申請與本人查狀態已經落地（見 internal/selfregister），
+//     Root 把模式設成 approval 得到的是「收待審批申請、一個也不放行」，
+//     這句話本身可執行、可核實，所以它寫得進去了；
+//   - invite 仍是 valid 為真而 writable 為假：名字被批准過，但邀請碼的產生與核銷一件都沒有，
+//     寫進去只造出一種伺服器自己執行不了的模式。
+//
+// 換言之「合法」與「寫得進」的定義都沒動，動的是通路登記表裡哪一欄翻真了。
+// 這一格翻真的同時，Mode.writable 不再自己記名單，而是經 ModeServed 問 capabilities()——
+// 日後 invite 落地時只需要多登記一欄，這條測試跟著翻一個取值即可。
 func TestModeWritableGate(t *testing.T) {
 	cases := []struct {
 		mode     Mode
@@ -45,7 +53,7 @@ func TestModeWritableGate(t *testing.T) {
 	}{
 		{ModeClosed, true, true},
 		{ModeOpen, true, true},
-		{ModeApproval, true, false},
+		{ModeApproval, true, true},
 		{ModeInvite, true, false},
 		{Mode("pending"), false, false},
 	}
@@ -89,11 +97,16 @@ func TestSwitchesAreIndependent(t *testing.T) {
 // TestEntryOfKeepsEachSideGated 把「對外答案 = 策略 ∧ 通路 ∧ 可服務的模式」釘死。
 //
 // 訪客通路仍未實作：無論策略怎麼設，GuestOpen 恆為關（把開關當能力會讓自己沒有的入口冒充可用）。
-// 自註冊通路已隨 internal/selfregister 落地，因此 SignUpOpen 不再恆為關——但只在
-// 「模式=open」時才對外放開：closed 是部署者關著，approval／invite 的准入流程還沒上線，
-// 三者都不該在登入前畫面上出現一個按下去必然失敗的註冊入口。
+// 自註冊那一側現在問的是 ModeServed（本版本服務得動 open 與 approval 兩種）：
+//   - open：提交即成一個可登入的帳戶，入口自然放；
+//   - approval：提交收成一筆待審批申請，而那個「等」字有資料層與本人查狀態的通路接得住，
+//     所以門也放——注意它放的是「這扇門推得開」，不是「進去就有帳號用」，
+//     那句由提交成功的回應裡 status 各自說（匿名入口不透露模式名字，用戶批准於 R2-006／R2-012）；
+//   - invite：邀請碼的產生與核銷還沒上線，若在這裡回 true，登入前畫面就出現
+//     一個按下去必然失敗的註冊入口——那正是「未開發的模組冒充可用」。
+//
 // AllowsSelfRegister 的契約與對外答案不同：它對任何有效非 closed 模式都回 true 並帶出模式，
-// 由用例去分辨 open 放行、approval／invite 回 2016；零值 "" 不是有效模式，回 false。
+// 分辨「放行的是哪一種」是使用例經 ModeServed 做的事；零值 "" 不是有效模式，兩側都關。
 func TestEntryOfKeepsEachSideGated(t *testing.T) {
 	cases := []struct {
 		name               string
@@ -103,8 +116,8 @@ func TestEntryOfKeepsEachSideGated(t *testing.T) {
 	}{
 		{"open", ModeOpen, true, true},
 		{"closed", ModeClosed, false, false},
-		{"approval（准入未上線，對外關、Allows 帶出模式）", ModeApproval, false, true},
-		{"invite（同上）", ModeInvite, false, true},
+		{"approval（准入已上線：對外開、Allows 帶出模式）", ModeApproval, true, true},
+		{"invite（通路未上線，對外關、Allows 帶出模式）", ModeInvite, false, true},
 		{"零值 \"\"（不是有效模式，兩側都關）", Mode(""), false, false},
 	}
 	for _, tc := range cases {

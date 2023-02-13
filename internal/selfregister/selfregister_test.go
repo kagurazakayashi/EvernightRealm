@@ -48,11 +48,12 @@ var testBase = time.Date(2026, 10, 3, 9, 0, 0, 0, time.UTC)
 // （上限極高），讓除限流外的用例都不被頻率封頂干擾；需要的用例各自換緊守衛或翻開關，
 // 那些方向由對應用例自己斷言。
 type env struct {
-	db      *database.DB
-	clock   *timeutil.Test
-	logs    *bytes.Buffer
-	policy  *acctpolicy.Store
-	service *Service
+	db       *database.DB
+	clock    *timeutil.Test
+	logs     *bytes.Buffer
+	policy   *acctpolicy.Store
+	accounts *account.Store
+	service  *Service
 }
 
 // newEnv 以寬鬆守衛與 open 起點模式建立現場。口令雜湊用 credential.TestParams（低成本檔）：
@@ -74,8 +75,17 @@ func lenientGuard() auth.GuardConfig {
 	}
 }
 
-// newEnvWithPolicy 建立現場並以給定模式作為起點策略。
+// newEnvWithPolicy 建立現場並以給定模式作為起點策略，兩個守衛共用同一組閾值。
 func newEnvWithPolicy(t *testing.T, guard auth.GuardConfig, mode acctpolicy.Mode) *env {
+	t.Helper()
+	return newEnvWithGuards(t, guard, guard, mode)
+}
+
+// newEnvWithGuards 是上面那個的完整形態：註冊那條分账的帳與查狀態那份（生產上＝登入的帳）
+// 可以各自給閾值。限流用例需要只擰緊其中一條，否則「刷註冊刷到冷卻」會順帶把查狀態擋掉，
+// 斷言就分不清是誰擋的。
+func newEnvWithGuards(t *testing.T, registerGuard, credentialGuardCfg auth.GuardConfig,
+	mode acctpolicy.Mode) *env {
 	t.Helper()
 	dir := t.TempDir()
 	t.Cleanup(func() {
@@ -96,6 +106,7 @@ func newEnvWithPolicy(t *testing.T, guard auth.GuardConfig, mode acctpolicy.Mode
 		t.Fatalf("套用遷移失敗：%v", err)
 	}
 	var logs bytes.Buffer
+	accountsStore := account.NewStore(clock)
 	policyStore := acctpolicy.NewStore(clock)
 	if _, err := policyStore.Put(context.Background(), db.SQL(), acctpolicy.Policy{
 		AdminCreateStandard: false,
@@ -104,16 +115,23 @@ func newEnvWithPolicy(t *testing.T, guard auth.GuardConfig, mode acctpolicy.Mode
 	}); err != nil {
 		t.Fatalf("鋪設起點策略失敗：%v", err)
 	}
-	loginGuard, err := auth.NewLoginGuard(guard, clock)
+	loginGuard, err := auth.NewLoginGuard(registerGuard, clock)
 	if err != nil {
 		t.Fatalf("建立自註冊守衛失敗：%v", err)
 	}
+	// 兩個守衛在測試現場也是兩個實例：與裝配層同一形状（提交走自己那條分账的帳，
+	// 查狀態走「登入那份」）。
+	credentialGuard, err := auth.NewLoginGuard(credentialGuardCfg, clock)
+	if err != nil {
+		t.Fatalf("建立憑據守衛失敗：%v", err)
+	}
 	service, err := New(Deps{
 		DB:              db,
-		Accounts:        account.NewStore(clock),
+		Accounts:        accountsStore,
 		Policy:          policyStore,
 		Audits:          audit.NewStore(clock),
 		Guard:           loginGuard,
+		CredentialGuard: credentialGuard,
 		Hashing:         credential.TestParams,
 		HashConcurrency: 2,
 		Log:             slog.New(slog.NewTextHandler(&logs, nil)),
@@ -121,7 +139,8 @@ func newEnvWithPolicy(t *testing.T, guard auth.GuardConfig, mode acctpolicy.Mode
 	if err != nil {
 		t.Fatalf("建立自註冊用例失敗：%v", err)
 	}
-	return &env{db: db, clock: clock, logs: &logs, policy: policyStore, service: service}
+	return &env{db: db, clock: clock, logs: &logs, policy: policyStore,
+		accounts: accountsStore, service: service}
 }
 
 // setSelfRegisterMode 經策略倉儲（與生產同一個寫入點）翻動 self_register_mode，
@@ -288,13 +307,15 @@ func TestPolicyJudgedAtWriteTime(t *testing.T) {
 	}
 }
 
-// TestNonOpenModeIsUnsupported 策略放行但不是 open 的模式（approval／invite）：
-// 准入流程尚未上線，必須回可判別的模式未開放結論，而且一個帳戶都不建、一條審計都不寫。
+// TestNonOpenModeIsUnsupported 策略放行但本版本服務不動的模式（現在只剩 invite）：
+// 必須回可判別的模式未開放結論，而且一個帳戶都不建、一條審計都不寫。
 //
 // 這一條把「AllowsSelfRegister 對任何有效非 closed 模式都回 true」這半句話堵死在用例裡：
 // 用例不能因為策略說「放行」就默默按 open 建號——那等於替尚未實作的准入流程冒充可用。
+// approval 不在這一組了：它的准入（收申請＋本人查狀態）已隨 R2-012 落地，
+// 由本檔案的 approval 一組測試釘住它落成的是待審批而不是 active。
 func TestNonOpenModeIsUnsupported(t *testing.T) {
-	for _, mode := range []acctpolicy.Mode{acctpolicy.ModeApproval, acctpolicy.ModeInvite} {
+	for _, mode := range []acctpolicy.Mode{acctpolicy.ModeInvite} {
 		e := newEnv(t)
 		e.setSelfRegisterMode(t, mode)
 		ctx := context.Background()
@@ -508,7 +529,7 @@ func TestHashConcurrencySerializesWithoutLoss(t *testing.T) {
 	}
 	service, err := New(Deps{
 		DB: db, Accounts: account.NewStore(clock), Policy: policyStore,
-		Audits: audit.NewStore(clock), Guard: guard,
+		Audits: audit.NewStore(clock), Guard: guard, CredentialGuard: guard,
 		Hashing: credential.TestParams, HashConcurrency: 1,
 	})
 	if err != nil {
@@ -693,7 +714,7 @@ func TestNewRejectsMissingDeps(t *testing.T) {
 	}
 	valid := Deps{
 		DB: e.db, Accounts: account.NewStore(e.clock), Policy: e.policy,
-		Audits: audit.NewStore(e.clock), Guard: guard,
+		Audits: audit.NewStore(e.clock), Guard: guard, CredentialGuard: guard,
 		Hashing: credential.TestParams, HashConcurrency: 2,
 	}
 	for _, mutate := range []func(*Deps){
@@ -702,6 +723,7 @@ func TestNewRejectsMissingDeps(t *testing.T) {
 		func(d *Deps) { d.Policy = nil },
 		func(d *Deps) { d.Audits = nil },
 		func(d *Deps) { d.Guard = nil },
+		func(d *Deps) { d.CredentialGuard = nil },
 		func(d *Deps) { d.Hashing = credential.Params{} },
 		func(d *Deps) { d.HashConcurrency = 0 },
 		func(d *Deps) { d.HashConcurrency = -1 },

@@ -286,12 +286,17 @@ func TestRepeatedSaveIsAnotherConfirmation(t *testing.T) {
 }
 
 // TestUnapprovedModeRejected 驗證已批准但通路未落地的模式寫不進去，且零副作用。
+//
+// 這一組現在只剩 invite：approval 的申請與本人查狀態已經落地（R2-012），
+// 它從「名字批准了但執行不了」搬到「寫得進去」那一側，由下一個測試釘住。
+// 留在這裡的斷言對象沒變——一個本版本執行不了的模式不該被記成伺服器的現值，
+// 而且拒絕不留下任何痕跡（既不改策略也不追加審計）。
 func TestUnapprovedModeRejected(t *testing.T) {
 	e := newEnv(t)
 	beforeAdmin, beforeMode, beforeGuest, beforeUpdatedAt := readRow(t, e.db)
 	auditBefore := len(auditRows(t, e.db))
 
-	for _, mode := range []string{"approval", "invite"} {
+	for _, mode := range []string{"invite"} {
 		_, err := e.service.UpdatePolicy(context.Background(), root(t), inputOf(true, mode, true), "req")
 		if !errors.Is(err, ErrModeUnavailable) {
 			t.Errorf("模式 %q 應被拒（ErrModeUnavailable），實際 %v", mode, err)
@@ -303,6 +308,61 @@ func TestUnapprovedModeRejected(t *testing.T) {
 	}
 	if got := len(auditRows(t, e.db)); got != auditBefore {
 		t.Errorf("被拒的寫入不應追加審計，實際從 %d 筆變成 %d 筆", auditBefore, got)
+	}
+}
+
+// TestApprovalModeIsWritable 驗證 approval 現在寫得進去，而且落地後合成把「待審批」如實說。
+//
+// 這一條釘的是通路登記翻真之後的兩側同時對：
+//   - Root 能把模式設成 approval，同交易追加一筆審計（前後值都是被批准的那個名字）；
+//   - 讀回的策略 AllowsSelfRegister 帶出 approval，而 EntryOf 的 SignUpOpen 為真——
+//     門外的人看得到那扇門，因為門後面確實有一條收申請的通路；
+//   - 同一份策略下 AllowsGuest 照舊為假（訪客通路與本步無關，不順手翻真）。
+func TestApprovalModeIsWritable(t *testing.T) {
+	e := newEnv(t)
+	beforeMode := ""
+	_, m, _, _ := readRow(t, e.db)
+	beforeMode = m
+	auditBefore := len(auditRows(t, e.db))
+
+	updated, err := e.service.UpdatePolicy(context.Background(), root(t),
+		inputOf(false, "approval", false), "req")
+	if err != nil {
+		t.Fatalf("approval 現在寫得進去，實際失敗：%v", err)
+	}
+	if beforeMode != "closed" {
+		t.Fatalf("測試前提跑偏：起點模式應為 closed，實際 %q", beforeMode)
+	}
+	if updated.SelfRegisterMode != ModeApproval {
+		t.Errorf("回傳應是重讀後的現值 approval，實際 %q", updated.SelfRegisterMode)
+	}
+	if _, m2, _, _ := readRow(t, e.db); m2 != "approval" {
+		t.Errorf("落庫現值應為 approval，實際 %q", m2)
+	}
+	if got := len(auditRows(t, e.db)); got != auditBefore+1 {
+		t.Errorf("成功的策略變更應追加一筆審計，實際 %d→%d", auditBefore, got)
+	}
+
+	// 合成兩側：Allows 帶出模式，對外入口因此放開（推得開，但不是「進去就有帳號用」）。
+	policy, err := e.service.Policy(context.Background(), root(t))
+	if err != nil {
+		t.Fatalf("現讀策略失敗：%v", err)
+	}
+	if ok, mode := policy.AllowsSelfRegister(); !ok || mode != ModeApproval {
+		t.Errorf("AllowsSelfRegister 應放行並帶出 approval，實際 %v/%q", ok, mode)
+	}
+	entry := policy.EntryOf()
+	if !entry.SignUpOpen {
+		t.Error("approval 已落地，SignUpOpen 應隨之為真（那扇門推得開）")
+	}
+	if entry.GuestOpen {
+		t.Error("訪客通路未落地，GuestOpen 必須仍為關")
+	}
+	if !ModeServed(ModeApproval) {
+		t.Error("通路登記未翻真時 ModeServed 不該回報已落地")
+	}
+	if ModeServed(ModeInvite) || ModeServed(ModeClosed) {
+		t.Error("ModeServed 只回答「提交服務得動」：invite 尚未落地，closed 不是一種提交方式")
 	}
 }
 

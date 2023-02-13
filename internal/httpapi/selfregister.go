@@ -57,6 +57,13 @@ type SelfRegisterUseCase interface {
 	// 改不了寫入那一刻的事實）。被拒的結論全部可判別，見 internal/selfregister。
 	RegisterAccount(ctx context.Context, in selfregister.RegisterInput,
 		requestID, sourceIP string) (selfregister.RegisteredAccount, error)
+	// ApplicationStatus 讓申請人憑自己的憑據查本人申請的狀態。
+	//
+	// 它掛在同一個用例上而不是另開一份 Deps 欄位，是因為兩者本就是同一條准入通路的兩側
+	// （提交與查結果），共用同一批倉儲與同一份口令參數檔。它的邊界寫在
+	// internal/httpapi/registrationstatus.go 的頭注：這是一條驗證憑據但不簽發會話的通路。
+	ApplicationStatus(ctx context.Context, in selfregister.ApplicationStatusInput,
+		requestID, sourceIP string) (selfregister.ApplicationStatus, error)
 }
 
 // registerRequest 是自註冊請求的本體。只有這三個欄位可用：
@@ -152,7 +159,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 //     （與需要已認證主體的 2012 分開：那枚碼的合同寫明只在 Root 建號入口出現）；
 //   - 2017：策略此刻不開放自註冊。它不是權限問題、也不是寫法問題——要等的是 Root 把模式
 //     打開，換名字、重新整理都不是處置；
-//   - 2016：策略開著、但生效模式是 approval／invite 這種准入流程尚未上線的類型。
+//   - 2016：策略開著、但生效模式是本版本服務不動的那一種（現在只剩 invite）。
 //     與 2017 分開是因為處置不同：一個是「沒開這條路」，另一個是「開著但功能還沒上線」；
 //   - 500：其餘（策略行缺失、派生故障這類非拒絕錯誤），細節只進日誌。
 func (s *Server) writeRegisterFailure(w http.ResponseWriter, r *http.Request, err error) {

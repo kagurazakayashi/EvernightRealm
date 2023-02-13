@@ -67,7 +67,10 @@ func (s *Server) apiRoutes() []apiRoute {
 	routes = append(routes, s.standardAccountEndpoints()...)
 	// 匿名自註冊端點（POST /auth/register）同一個來源、同一個有無判定；未注入用例時不掛。
 	// 它落在已被登入端點帶入 API 首段的 /auth 之下，因此不新增首段，只多一條路徑。
-	return append(routes, s.selfRegisterEndpoints()...)
+	routes = append(routes, s.selfRegisterEndpoints()...)
+	// 申請人的受限狀態查詢（POST /auth/registration-status）與註冊同一批注入：
+	// 它落在已被登入端點帶入 API 首段的 /auth 之下，不新增首段、只多掛一條路徑。
+	return append(routes, s.registrationStatusEndpoints()...)
 }
 
 // apiFirstSegments 從登記清單導出各端點的路徑首段集合。

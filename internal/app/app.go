@@ -597,7 +597,8 @@ func run(ctx context.Context, releaseSignals func(), args []string, out io.Write
 		lg.Error("建立普通帳戶用例組裝失敗", "err", err)
 		return err
 	}
-	// 匿名自註冊用例（開放自註冊時，門外的人自行建一筆可立即登入的普通帳戶）。
+	// 匿名自註冊用例（開放自註冊時門外的人自行建一筆可立即登入的普通帳戶；
+	// 核准模式時同一條通路收一份待審批的申請，並讓申請人查本人的狀態）。
 	// 頻率守衛是另一個 auth.LoginGuard 實例：與登入守衛分開的記憶體、一組較緊且可組態的閾值
 	// （security.register_guard）——自註冊是匿名可達的寫入入口，把它的失敗帳記在登入守衛上
 	// 會讓「刷註冊」與「暴力破解登入」共用同一份預算，任一方能餵飽對方把另一條路也擋死。
@@ -622,7 +623,12 @@ func run(ctx context.Context, releaseSignals func(), args []string, out io.Write
 		Policy:   policyStore,
 		Audits:   auditStore,
 		Guard:    registerGuard,
-		Hashing:  hashingParams,
+		// 查本人申請狀態用的是登入那一份守衛（同一個實例、同一份記憶體）：
+		// 那條通路做的事與登入相同——拿一枚口令對一個名字。給它另立一條分账的預算，
+		// 等於讓同一個來源對同一個名字多拿一份猜口令的機會；與上面那條刻意相反，
+		// 因為註冊提交不交憑據，它的失敗帳不該記到登入頭上。
+		CredentialGuard: loginGuard,
+		Hashing:         hashingParams,
 		// 同時進入 Argon2id 的註冊數上限：把「併發刷註冊燒 CPU」這條路線的天花板壓住，
 		// 閾值取自 security.register_hash_concurrency（啟動校驗已過）。
 		HashConcurrency: cfg.Security.RegisterHashConcurrency,

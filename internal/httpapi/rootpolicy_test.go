@@ -436,16 +436,19 @@ func TestAccountPolicyRejectsMalformedBodies(t *testing.T) {
 	}
 }
 
-// TestAccountPolicyRejectsUnapprovedModes 驗證 approval／invite 得到屬於自己的那句結論（2016）。
+// TestAccountPolicyRejectsUnapprovedModes 驗證通路尚未落地的模式（現在只剩 invite）
+// 得到屬於自己的那句結論（2016），而已落地的 approval 寫得進去。
 //
 // 這是最容易被寫錯的一條：把「尚未開放」降級成 1004，界面就會告訴 Root「你打錯字」，
 // 而那個名字是被批准的；反過來把它當成成功，策略就會記下一種伺服器自己執行不了的模式。
+// approval 移到「寫得進」這一側（R2-012）：它現在對應的事實是「收待審批的申請」，
+// 而那句話有端點、有資料層形態、有本人查狀態的通路接得住，所以 200 才是誠實的回答。
 func TestAccountPolicyRejectsUnapprovedModes(t *testing.T) {
 	env := newPolicyEnv(t)
 	cookie := env.rootCookie(t)
 	auditsBefore := env.auditCount(t)
 
-	for _, mode := range []string{"approval", "invite"} {
+	for _, mode := range []string{"invite"} {
 		resp := env.putPolicy(t, policyBody(true, mode, true), cookie, env.ts.URL, nil)
 		assertCode(t, "模式 "+mode, resp, CodeAccountPolicyModeUnavailable, http.StatusBadRequest)
 	}
@@ -455,6 +458,24 @@ func TestAccountPolicyRejectsUnapprovedModes(t *testing.T) {
 	}
 	if got := env.auditCount(t); got != auditsBefore {
 		t.Errorf("被拒的寫入不應追加審計，實際 %d 筆", got)
+	}
+
+	// approval 寫得進，而且對外入口的答案隨之翻真（門推得開，但不是「進去就能登入」）。
+	write := env.putPolicy(t, policyBody(true, "approval", false), cookie, env.ts.URL, nil)
+	if write.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(write.Body)
+		t.Fatalf("approval 現在該寫得進去：%d %s", write.StatusCode, body)
+	}
+	saved := decodeJSONBody(t, write)
+	if saved["self_register_mode"] != "approval" {
+		t.Errorf("回應應帶著落庫後的現值，實際 %#v", saved["self_register_mode"])
+	}
+	entry, _ := saved["entry"].(map[string]any)
+	if entry == nil || entry["sign_up_open"] != true {
+		t.Errorf("approval 已落地，entry.sign_up_open 應為 true，實際 %#v", saved["entry"])
+	}
+	if _, leaked := saved["mode"]; leaked {
+		t.Error("回應不該另開一個 mode 別名欄位")
 	}
 
 	// 四語言都要有這句：缺任何一語，訊息會靜默退回英文。

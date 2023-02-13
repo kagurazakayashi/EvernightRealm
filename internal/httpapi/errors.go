@@ -167,8 +167,8 @@ const (
 	// 把兩者混成一句，界面就只能對 Root 念「請求不合法」，而 Root 明明填了一個
 	// 他在規格裡見過的名字。
 	//
-	// 它也絕不降級成成功：把 approval／invite 默默寫成 closed 或 open，等於伺服器等
-	// 於對一個沒有實作的計畫給出兩種不同的說法。回應不回顯當前策略現值——
+	// 它也絕不降級成成功：把 invite 默默寫成 closed 或 open，等於伺服器對一個沒有實作的
+	// 計畫給出兩種不同的說法。回應不回顯當前策略現值——
 	// 那是重讀策略端點本來就該拿到的資料。
 	CodeAccountPolicyModeUnavailable ErrorCode = 2016
 	// CodeAccountCreationDisabled 表示這條帳戶建立通路此刻被伺服器策略關閉：
@@ -210,6 +210,17 @@ const (
 	// 真正的批量防護來自緊限流（2006）與併發封頂（見 internal/selfregister），
 	// 而不是靠謊報失敗。回應不回顯既有帳戶的任何資料，也不回顯口令。
 	CodeSelfRegisterNameTaken ErrorCode = 2019
+	// CodeNotAnApplication（HTTP 403）：憑據成立，但這一筆帳戶不是待審批的申請。
+	//
+	// 它只在 POST /auth/registration-status 上出現，而且只在「已經證明你是他本人」之後
+	// 才可能回出來：查無此名、訪客帳戶與口令不符一律收斂成 2001（與登入同形），
+	// 所以這條通路對「誰的名字存在」不新增任何信號，2020 也只對持有正確憑據的人說話。
+	//
+	// 它與 2011（PermissionDenied）分開是因為處置完全不同：2011 說的是「你的身分不夠」，
+	// 而這裡問的恰恰不是權限——他登得進去（或根本沒申請過），處置是「走 /auth/login」，
+	// 不是「去要一個更大的身分」。也不與 2017（策略未開放）共用：2017 描述的是伺服器狀態，
+	// 一句「等 Root 打開」；2020 描述的是這個呼叫者的帳戶由哪條通路誕生，等誰都沒有用。
+	CodeNotAnApplication ErrorCode = 2020
 )
 
 // ErrorEnvelope 是所有錯誤回應的統一信封，也是錯誤回應格式的唯一權威定義。

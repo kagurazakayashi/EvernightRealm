@@ -40,13 +40,24 @@ func (t Type) valid() bool {
 
 // Status 是帳戶狀態（資料庫欄 status）。
 //
-// 三個級別的刪除語意（0003 定前兩級，0007 增第三級）：
+// 三個級別的刪除語意（0003 定前兩級，0007 增第三級），加上待審批通路帶來的兩級
+// （0009 增 pending 與 rejected）：
 //   - StatusActive：可登入；
 //   - StatusDisabled：停用，「視同沒有這個帳戶」但行與登入名鍵保留，
 //     其他模組據此對其隱形，登入名不可被復用，且可經停用/恢復通路重新登入；
 //   - StatusDeleted：軟刪除的終態。行與登入名鍵同樣保留，差別在「沒有回去的路」：
 //     它只能由 Root 的刪除用例進入，既不是可設定的登入狀態，也不受恢復登入通路承認。
 //     保留行而不是刪掉，正是既有審計與其他實際存在的參照仍能指回同一個穩定身份的原因。
+//   - StatusPending：待審批的申請。行、標識與登入名鍵都已經存在（統一帳戶模型：
+//     申請人從提交那一刻起就是同一個人，批准不是把一筆申請「搬成」一個帳戶），
+//     但它既不能登入也不屬於任何一本人可打理的目錄。
+//   - StatusRejected：申請被拒絕。與 pending 一樣保留行與登入名佔用，差別只在「審核已做過決定，
+//     而那個決定是拒絕」。它不是終態觸發器釘住的那種狀態——是否允許同一人重新申請、
+//     或由審核者改判，屬後續審批步驟的產品決定，本枚舉不替它預先關門也不預先開門。
+//
+// 全部五個取值裡，「可登入」只有一個：現行的登入、主體成形、會話簽發與解析都寫成
+// 「status 不是 active 就拒絕」，因此新增取值天然落在門外——安全預設來自既有形狀，
+// 不是來自各處再補一個分支。
 //
 // 物理 DELETE（徹底清庫、登入名因此釋放）屬後續的帳戶管理步驟，不在本枚舉的通路之內。
 type Status string
@@ -58,6 +69,11 @@ const (
 	StatusDisabled Status = "disabled"
 	// StatusDeleted 是軟刪除終態：行保留、登入名仍被佔用，但不可再登入也不可被恢復。
 	StatusDeleted Status = "deleted"
+	// StatusPending 是待審批：申請已落地、還沒有人做過決定，不可登入也不可經停用/恢復通路變動。
+	StatusPending Status = "pending"
+	// StatusRejected 是申請已被拒絕：行與登入名佔用保留，差別是審核已做過一次拒絕的決定
+	// （時刻記在 reviewed_at，與批准共用那一欄）。
+	StatusRejected Status = "rejected"
 )
 
 // String 回傳資料庫/協議表示。
@@ -66,25 +82,37 @@ func (s Status) String() string { return string(s) }
 // valid 回報是否為已批准的狀態。
 //
 // 這裡回答的是「資料庫裡出現這個值合不合形態」，不是「呼叫端可不可以要求這個值」：
-// StatusDeleted 形態上合法，卻只能經 Store.MarkDeleted 進入（見 New 對建立輸入的額外拒絕）。
+// StatusDeleted 與 StatusRejected 形態上合法（前者由刪除用例、後者由未來的審批用例寫入），
+// 卻都不在建立時給得出來（見 creatable）；而 StatusPending 是唯一一個
+// 「由某條建立通路生下來就帶著」的狀態——待審批帳戶的出生地就是自註冊的 approval 模式。
 func (s Status) valid() bool {
 	switch s {
-	case StatusActive, StatusDisabled, StatusDeleted:
+	case StatusActive, StatusDisabled, StatusDeleted, StatusPending, StatusRejected:
 		return true
 	}
 	return false
 }
 
-// settable 回報狀態是否可由「建立」或「停用/恢復」通路寫入。
+// settable 回報狀態是否可由「停用/恢復」通路寫入。
 //
-// 刪除終態不在其中，而這條拒絕對兩個呼叫點都必須成立：
-//   - 建立：「一出生就是已刪除的帳戶」沒有一句誠實的話可說；
-//   - 停用/恢復：那條通路的語意是「登入能力開或關」，
-//     把已刪除的人「恢復」、或對著還沒被刪的人「一步刪掉」，都不是它在回答的問題。
+// 這個集合刻意只有兩個取值，而且這正是「待審批不能從這裡被批准」的結構保證：
+// 恢復登入的語意是「他曾經可用，現在重新開放他可用」，而一個還沒獲准過的人不屬於那句話。
+// 把 pending 放進 settable，等於讓目錄那條「恢復」按下去就把一個申請變成帳戶——
+// 那是審批的決定，不是登入能力的開關。
 //
-// 唯一能寫入 deleted 的是 Store.MarkDeleted，而那條 UPDATE 語句的形狀本身就是那句話的證據。
+// 刪除終態與拒絕態同樣不在其中：一個只能由 MarkDeleted 進入，
+// 一個只能由未來的審批用例進入，那條 UPDATE 的形狀本身就是那句話的證據。
 func (s Status) settable() bool {
 	return s == StatusActive || s == StatusDisabled
+}
+
+// creatable 回報建立一筆帳戶時可作為初始狀態的取值。
+//
+// 與 settable 的差別只有一處、但那處正是本步的要害：待審批是一筆帳戶的出生狀態，
+// 而不是任何既有人身上的一次狀態變更。「一出生就是已刪除／已拒絕的帳戶」沒有一個誠實的說法，
+// 而 active 與 disabled 的出生各自已有通路在講（管理員建號、Root 開設管理員）。
+func (s Status) creatable() bool {
+	return s == StatusActive || s == StatusDisabled || s == StatusPending
 }
 
 // argon2idPrefix 是憑據雜湊的必填前綴（與 config 對 Root 雜湊的校驗同一形狀要求）。
@@ -165,6 +193,13 @@ type Account struct {
 	// DeletedAt 為進入刪除終態的時刻；Status 不為 deleted 時必須為零值。
 	// 它記的是「他被刪於何時」這件事本身：軟刪除保留行，沒有這一欄就等於留了一個查不出的時刻。
 	DeletedAt time.Time
+	// ReviewedAt 為審核做出決定的時刻（批准與拒絕都是決定）；零值代表這筆帳戶不經審批通路。
+	//
+	// 它與 Status 是兩件事：Status 答「他現在能不能登入」，這一欄答「他是不是走審批進來的、
+	// 哪一天定的」。因此 approved 之後被停用或被刪除的帳戶仍然帶著這個時刻——
+	// 一句「他不是待審批申請」對一個剛被批准的人來說是錯的，而這個欄位正是把兩者分開的依據。
+	// 沒有審核人欄與審核備註欄：審核人是誰屬 root_audit 的事實，自由文本不進資料庫層。
+	ReviewedAt time.Time
 }
 
 // New 從建立輸入構造領域實體並完成全部領域校驗。
@@ -175,8 +210,8 @@ func New(in NewInput) (Account, error) {
 	if !in.Type.valid() {
 		return Account{}, fmt.Errorf("account: 不認識的帳戶類型 %q（可用 standard|guest）", in.Type)
 	}
-	if !in.Status.settable() {
-		return Account{}, fmt.Errorf("account: 不認識或不可在建立時給出的帳戶狀態 %q（可用 active|disabled）", in.Status)
+	if !in.Status.creatable() {
+		return Account{}, fmt.Errorf("account: 不認識或不可在建立時給出的帳戶狀態 %q（可用 active|disabled|pending）", in.Status)
 	}
 	key, err := LoginKey(in.LoginName)
 	if err != nil {
@@ -200,12 +235,20 @@ func New(in NewInput) (Account, error) {
 		if a.PasswordHash != "" || a.MustChangePassword {
 			return Account{}, errors.New("account: 訪客帳戶不得攜帶憑據雜湊或設 must_change_password")
 		}
+		// 訪客不經審批通路：待審批與拒絕都是「申請人出示憑據」之後才有的說法，
+		// 而訪客按定義沒有憑據。與遷移 0009 的同名 CHECK 成對——域層給出可操作錯誤，
+		// 資料庫擋住繞過域層的自傷。
+		if a.Status == StatusPending || a.Status == StatusRejected {
+			return Account{}, errors.New("account: 訪客帳戶不得以待審批或已拒絕的狀態出生")
+		}
 	} else {
 		if err := validatePasswordHash(a.PasswordHash); err != nil {
 			return Account{}, err
 		}
 	}
-	// 禁用必帶時刻、啟用必不帶：與資料庫 CHECK (status='disabled')=(disabled_at IS NOT NULL) 同口徑。
+	// 禁用必帶時刻、其餘狀態必不帶：與遷移 0007 的方向規則加 0009 那條
+	// 「pending／rejected 不帶 disabled_at」同口徑（這條判斷本身是雙向的，
+	// 所以一個式子就同時罩住「停用卻沒時刻」與「待審批卻有停用時刻」兩件事）。
 	if (a.Status == StatusDisabled) != !a.DisabledAt.IsZero() {
 		return Account{}, errors.New("account: status 與 disabled_at 必須同生同滅（disabled 帶時刻、active 不帶）")
 	}
@@ -222,7 +265,7 @@ type NewInput struct {
 	PasswordHash string
 	// Type 為帳戶類型。
 	Type Type
-	// Status 為初始狀態；只接受 active|disabled（刪除終態不能憑空建立）。
+	// Status 為初始狀態；只接受 active|disabled|pending（刪除終態與拒絕態不能憑空建立）。
 	Status Status
 	// MustChangePassword 為首次登入是否必須改密。
 	MustChangePassword bool

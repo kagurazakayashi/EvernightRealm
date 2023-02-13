@@ -27,6 +27,9 @@ import (
 
 // fakeSelfRegister 是 SelfRegisterUseCase 的傳輸層替身：回吐預置結果並記錄收到的輸入，
 // 讓「未知欄位拒殺、來源取實際連線、錯誤對映、不簽發 Cookie」這些傳輸層規則脫離資料庫被釘死。
+//
+// 它同時頂著查狀態那一側（status* 那幾欄），因為那條端點與註冊共用同一個 Deps 欄位：
+// 一個替身就能把「兩條路徑都只在使用例注入時才掛」這句話釘在同一處。
 type fakeSelfRegister struct {
 	result  selfregister.RegisteredAccount
 	err     error
@@ -34,6 +37,12 @@ type fakeSelfRegister struct {
 	lastIn  selfregister.RegisterInput
 	lastReq string
 	lastIP  string
+
+	statusResult selfregister.ApplicationStatus
+	statusErr    error
+	statusCalls  int
+	lastStatusIn selfregister.ApplicationStatusInput
+	lastStatusIP string
 }
 
 func (f *fakeSelfRegister) RegisterAccount(ctx context.Context, in selfregister.RegisterInput,
@@ -43,6 +52,15 @@ func (f *fakeSelfRegister) RegisterAccount(ctx context.Context, in selfregister.
 	f.lastReq = requestID
 	f.lastIP = sourceIP
 	return f.result, f.err
+}
+
+func (f *fakeSelfRegister) ApplicationStatus(ctx context.Context, in selfregister.ApplicationStatusInput,
+	requestID, sourceIP string) (selfregister.ApplicationStatus, error) {
+	f.statusCalls++
+	f.lastStatusIn = in
+	f.lastReq = requestID
+	f.lastStatusIP = sourceIP
+	return f.statusResult, f.statusErr
 }
 
 // registerTestServer 建立只注入自註冊用例的 HTTP 測試服務（走完整中介層鏈）。
