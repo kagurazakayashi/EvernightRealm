@@ -70,7 +70,13 @@ func (s *Server) apiRoutes() []apiRoute {
 	routes = append(routes, s.selfRegisterEndpoints()...)
 	// 申請人的受限狀態查詢（POST /auth/registration-status）與註冊同一批注入：
 	// 它落在已被登入端點帶入 API 首段的 /auth 之下，不新增首段、只多掛一條路徑。
-	return append(routes, s.registrationStatusEndpoints()...)
+	routes = append(routes, s.registrationStatusEndpoints()...)
+	// 註冊申請的審批側（GET／HEAD /admin/registrations 與
+	// PUT /admin/registrations/{account_id}/decision）由自己那個依賴決定有無：
+	// 它落在已被普通帳戶端點帶入 API 首段的 /admin 之下，不新增首段、只多兩條路徑。
+	// 與上一行刻意分開注入——「門外的人查自己的結局」與「管理者替別人做決定」
+	// 是兩套准入邊界，不該共用一個有開關。
+	return append(routes, s.registrationReviewEndpoints()...)
 }
 
 // apiFirstSegments 從登記清單導出各端點的路徑首段集合。

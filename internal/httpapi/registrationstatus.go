@@ -157,7 +157,9 @@ func (s *Server) writeApplicationStatusFailure(w http.ResponseWriter, r *http.Re
 
 // 以下三個函式不存在，是刻意的：
 //   - 沒有一個「按 account_id 查申請狀態」的讀法——那是一條不需要憑據的旁路；
-//   - 沒有一個回傳 pending 名單的讀法——那是審批那一步的工作，而且它的授權邊界
-//     是伺服器級管理權，不屬於這條匿名通路；
-//   - 沒有任何寫入（批准／拒絕）掛在這條路徑上：本步只收申請與回報結局，
-//     「讓等待變成已批准」的那一跳屬下一步，不在此處留任何半成品入口。
+//   - 沒有一個回傳 pending 名單的讀法——那屬 internal/acctreview 的 /admin/registrations，
+//     它的授權邊界是伺服器級管理權，不屬於這條匿名通路（匿名這側一旦能翻名冊，
+//     「只回答他自己那一份結局」這句話就廢了）；
+//   - 沒有任何寫入（批准／拒絕）掛在這條路徑上：決定屬 internal/acctreview 那組端點，
+//     由已認證的主體經另一道授權做出。兩側各掛各的依賴（Deps.SelfRegister 與
+//     Deps.RegistrationReview），少注入誰就少一組端點，不會出現半條能用的通路。

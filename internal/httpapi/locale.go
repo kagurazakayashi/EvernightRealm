@@ -198,6 +198,12 @@ var errorMessages = map[ErrorCode]map[string]string{
 		LocaleEnUS: "These credentials are valid, but this account is not an application awaiting approval; it was created directly by open sign-up, an administrator, or Root. Please use the sign-in page.",
 		LocaleJaJP: "認証情報は有効ですが、このアカウントは承認待ちの申請ではありません。公開登録、管理者、または Root によって直接有効化されています。ログイン画面をご利用ください。",
 	},
+	CodeApplicationDecided: {
+		LocaleZhCN: "这份注册申请已经有了决定，本次审批没有生效。请重新读取申请名册；已批准的人请到普通账户目录处理，已拒绝的人没有改判通道。",
+		LocaleZhTW: "這份註冊申請已經有過決定，本次審批沒有生效。請重新讀取申請名冊；已批准的人請到普通帳戶目錄處理，已拒絕的人沒有改判通路。",
+		LocaleEnUS: "This registration has already been decided, so your review did not take effect. Reload the application roster: approved accounts are managed in the standard account directory, and rejected ones cannot be reversed.",
+		LocaleJaJP: "この登録申請はすでに判定済みため、今回の承認操作は反映されませんでした。申請一覧を再読み込みしてください。承認済みのアカウントは一般アカウント一覧で、却下された申請は元に戻せません。",
+	},
 }
 
 // messageFor 取得錯誤碼在指定語言的使用者訊息；語言未支援或訊息為空時回退 defaultLocale。

@@ -79,6 +79,14 @@ type Deps struct {
 	// 開放模式建成立刻可登入的、核准模式建成待審批的，而申請人查狀態那條路徑只驗憑據、
 	// 照樣不簽發會話。三種准入邊界各是各的，裝配了誰就服務誰，傳輸層不拿一方猜另一方。
 	SelfRegister SelfRegisterUseCase
+	// RegistrationReview 為「審批註冊申請」用例的入口（internal/app 注入 *acctreview.Service）。
+	// 為 nil 表示本執行檔不開放這組端點：路徑、回退清單與錯誤面都和未掛載時逐字相同，
+	// 少掉的是兩個端點（名冊與決定），不會留下一條能被人探測的半成品寫入口。
+	// 它與 SelfRegister 是兩個依賴而不是同一個：那一個認的是「門外的人交申請與本人查結局」
+	// （匿名、驗憑據、不簽會話），這一個認的是「已認證的管理者讀名冊並做決定」
+	// （NeedServerAdmin、不碰任何憑據）。兩套准入邊界各是各的，裝配了誰就服務誰，
+	// 傳輸層不拿一方猜另一方，更不讓一方缺注入時另一方默默變成可利用的入口。
+	RegistrationReview RegistrationReviewUseCase
 }
 
 // Server 為 HTTP 服務層。
@@ -120,6 +128,10 @@ type Server struct {
 	// selfRegisterEndpoints 回空清單，/auth/register 這條路徑根本不掛（/auth 首段
 	// 仍因登入端點屬 API，回退行為不受影響）。
 	selfRegister SelfRegisterUseCase
+	// regReview 為「審批註冊申請」用例入口（可為 nil）；nil 時 registrationReviewEndpoints
+	// 回空清單，/admin/registrations 這條路徑根本不掛（/admin 首段仍因普通帳戶端點屬 API，
+	// 回退行為不受影響）。
+	regReview RegistrationReviewUseCase
 }
 
 // New 以組態、版本字串與外部依賴建立 HTTP 服務層。
@@ -157,6 +169,9 @@ func New(cfg *config.Config, version string, deps Deps) *Server {
 		// 自註冊用例為 nil 時一個端點都不掛（見 selfRegisterEndpoints）：
 		// 「裝配了什麼就服務什麼」在這一層沒有分支。
 		selfRegister: deps.SelfRegister,
+		// 審批用例為 nil 時一個端點都不掛（見 registrationReviewEndpoints）：
+		// 「裝配了什麼就服務什麼」在這一層沒有分支。
+		regReview: deps.RegistrationReview,
 	}
 	s.httpSrv = &http.Server{
 		Addr:    cfg.Server.Listen,

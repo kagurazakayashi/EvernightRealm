@@ -52,8 +52,9 @@ func (t Type) valid() bool {
 //     申請人從提交那一刻起就是同一個人，批准不是把一筆申請「搬成」一個帳戶），
 //     但它既不能登入也不屬於任何一本人可打理的目錄。
 //   - StatusRejected：申請被拒絕。與 pending 一樣保留行與登入名佔用，差別只在「審核已做過決定，
-//     而那個決定是拒絕」。它不是終態觸發器釘住的那種狀態——是否允許同一人重新申請、
-//     或由審核者改判，屬後續審批步驟的產品決定，本枚舉不替它預先關門也不預先開門。
+//     而那個決定是拒絕」。它由審批用例進入、不再由任何通路離開（用戶批准的單向決定：
+//     已做過決定的申請不能被改判，也不能被同一個人重新申請而覆蓋——登入名持續被佔用正是
+//     那句決定的落庫形態）。要讓同一個人再進來是另行建立一筆帳戶，那是另一句話。
 //
 // 全部五個取值裡，「可登入」只有一個：現行的登入、主體成形、會話簽發與解析都寫成
 // 「status 不是 active 就拒絕」，因此新增取值天然落在門外——安全預設來自既有形狀，
@@ -73,6 +74,11 @@ const (
 	StatusPending Status = "pending"
 	// StatusRejected 是申請已被拒絕：行與登入名佔用保留，差別是審核已做過一次拒絕的決定
 	// （時刻記在 reviewed_at，與批准共用那一欄）。
+	//
+	// 用戶批准的保留策略（R2-013）：拒絕是一個單向的決定。本套件不提供「把 rejected 改回
+	// pending」或「事後補一個批准」的原語——那等於把審批做成一臺通用狀態編輯器，而兩個審核者
+	// 各按一次就得出兩套真相。被拒者日後若要進來，由管理員或 Root 另行建一筆帳戶
+	// （一個新的登入名、一份新的憑據，與這一行無關），而不是把這一行翻回來。
 	StatusRejected Status = "rejected"
 )
 
@@ -82,7 +88,7 @@ func (s Status) String() string { return string(s) }
 // valid 回報是否為已批准的狀態。
 //
 // 這裡回答的是「資料庫裡出現這個值合不合形態」，不是「呼叫端可不可以要求這個值」：
-// StatusDeleted 與 StatusRejected 形態上合法（前者由刪除用例、後者由未來的審批用例寫入），
+// StatusDeleted 與 StatusRejected 形態上合法（前者由 MarkDeleted、後者由 DecideApplication 寫入），
 // 卻都不在建立時給得出來（見 creatable）；而 StatusPending 是唯一一個
 // 「由某條建立通路生下來就帶著」的狀態——待審批帳戶的出生地就是自註冊的 approval 模式。
 func (s Status) valid() bool {
@@ -101,7 +107,7 @@ func (s Status) valid() bool {
 // 那是審批的決定，不是登入能力的開關。
 //
 // 刪除終態與拒絕態同樣不在其中：一個只能由 MarkDeleted 進入，
-// 一個只能由未來的審批用例進入，那條 UPDATE 的形狀本身就是那句話的證據。
+// 一個只能由 DecideApplication 的拒絕分支進入，那條 UPDATE 的形狀本身就是那句話的證據。
 func (s Status) settable() bool {
 	return s == StatusActive || s == StatusDisabled
 }
@@ -117,6 +123,71 @@ func (s Status) creatable() bool {
 
 // argon2idPrefix 是憑據雜湊的必填前綴（與 config 對 Root 雜湊的校驗同一形狀要求）。
 const argon2idPrefix = "$argon2id$"
+
+// Decision 是審核對一筆待審批申請做出的決定（資料庫層沒有這個欄位：它落成的是
+// 一躍 status 加一枚 reviewed_at，見 Store.DecideApplication）。
+//
+// 封閉集合只有兩格，而且刻意不含「重新打開」「改判」這類第三種說法：
+//   - 一個決定都沒有做過的申請才是處理對象（status 為 pending）；
+//   - 已經做過決定的行不再有任何可寫的形態——批准過的人走停用／恢復與刪除那幾條
+//     各自的通路，拒絕過的人今日沒有任何離開 rejected 的道路（用戶批准的保留策略）。
+//
+// 這枚型別屬帳戶域而不是任何一個用例層：「哪種決定落成哪種狀態」是帳戶自己的事實，
+// 讓審批用例各自記一份對應表，遲早會有一處把拒絕寫成 disabled。
+type Decision string
+
+const (
+	// DecisionApprove 是批准：申請人成為一個可登入的普通帳戶（status 落為 active），
+	// 同時留下決定時刻。他自選的口令與 must_change_password 都不在這一跳之內——
+	// 他等的從來不是口令，是批准。
+	DecisionApprove Decision = "approve"
+	// DecisionReject 是拒絕：status 落為 rejected 並留下決定時刻，行與登入名佔用都保留。
+	DecisionReject Decision = "reject"
+)
+
+// String 回傳協議表示。
+func (d Decision) String() string { return string(d) }
+
+// valid 回報是否為審核可做出的決定。
+//
+// 「pending」「approved」這類申請人側的說法不在其中：那一組描述的是申請的結局，
+// 而這一格問的是「審核者按下哪一顆」；把兩者混成一個集合，界面就會出現
+// 「把申請設成 pending」這種把人已做過的決定改回去的寫法。
+func (d Decision) valid() bool {
+	return d == DecisionApprove || d == DecisionReject
+}
+
+// result 換出這個決定落成的帳戶狀態。
+//
+// 對應關係只寫這一處：批准就是回到那個唯一可登入的取值，拒絕就是那個帶著決定時刻的
+// 拒絕態。它不含 disabled——「先批起來再停掉」是兩條通路兩次決定，不是一顆按鈕。
+func (d Decision) result() Status {
+	if d == DecisionReject {
+		return StatusRejected
+	}
+	return StatusActive
+}
+
+// ErrUnknownDecision 表示把一個不認得的字串當成審批決定使用。
+//
+// 它屬請求本體或呼叫鏈的缺陷而不是業務結論：一個拼寫變體如果被默默接受，
+// 「按下批准」與「按下拒絕」在資料庫裡就可能落成同一件事。
+var ErrUnknownDecision = errors.New("account: 不認得的審批決定")
+
+// ParseDecision 是把外部字串轉成 Decision 的唯一入口（與 identity.ParseRole 同一取向）。
+//
+// 只認封閉集合內的值，且不放過空白、大小寫與「approved」「pending」這類申請人側的說法：
+// 那一組詞描述的是申請的結局，不是審核者能按下的動作，把它們收進來就會多出一格
+// 「把申請設回 pending」的寫法——而那是用戶明確否決過的改判通路。
+// 傳輸層據此在進用例之前當場點名欄位（1004），字面值因此在本倉庫只有這一處定義。
+func ParseDecision(raw string) (Decision, error) {
+	d := Decision(raw)
+	if !d.valid() {
+		return "", fmt.Errorf("%w：%q（僅接受 approve|reject，不接受空白與大小寫變體）",
+			ErrUnknownDecision, raw)
+	}
+	return d, nil
+}
 
 // 刪除終態的顯示名佔位規則（用戶批準於 R2-005）：DEL_<UTC 日期>_<原顯示名>。
 //

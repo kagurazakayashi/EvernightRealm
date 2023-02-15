@@ -17,6 +17,7 @@ import (
 
 	"github.com/kagurazakayashi/EvernightRealm/internal/account"
 	"github.com/kagurazakayashi/EvernightRealm/internal/acctpolicy"
+	"github.com/kagurazakayashi/EvernightRealm/internal/acctreview"
 	"github.com/kagurazakayashi/EvernightRealm/internal/adminacct"
 	"github.com/kagurazakayashi/EvernightRealm/internal/audit"
 	"github.com/kagurazakayashi/EvernightRealm/internal/auth"
@@ -638,6 +639,25 @@ func run(ctx context.Context, releaseSignals func(), args []string, out io.Write
 		lg.Error("自註冊用例組裝失敗", "err", err)
 		return err
 	}
+	// 註冊申請的審批用例（待審批名冊＋批准與拒絕那一跳）。
+	// 帳戶、授予與審計倉儲沿用上面同一批實例：「批准留下的人是誰」只有 root_audit 一個出口，
+	// 「他有沒有被授予過管理權」只有 internal/grant 一個權威，換一份實例就會出現兩套真相。
+	// 刻意不注入策略、會話與憑據三個依賴（見 internal/acctreview 的套件頭注）：
+	// 審批不問准入策略（模式只管新提交，Root 事後改成 closed 也不該讓等待中的申請消失）、
+	// 不動任何會話（待審批的人今日沒有任何會話，他能不能登入由他自己交口令那條既有通路決定）、
+	// 也不碰任何一枚口令。少了這個用例，approval 模式就只是策略上一個收得進申請
+	// 卻沒有一條通路能把決定做出來的值——申請會永久掛在中間。
+	registrationReviewService, err := acctreview.New(acctreview.Deps{
+		DB:       db,
+		Accounts: accountsStore,
+		Grants:   grantsStore,
+		Audits:   auditStore,
+		Log:      lg.Logger,
+	})
+	if err != nil {
+		lg.Error("審批註冊申請用例組裝失敗", "err", err)
+		return err
+	}
 	srv := httpapi.New(&cfg, Version, httpapi.Deps{
 		Ready:    readinessCheck(db, space),
 		Clock:    timeutil.System(),
@@ -655,6 +675,9 @@ func run(ctx context.Context, releaseSignals func(), args []string, out io.Write
 		// 匿名自註冊：准入（策略現讀＋模式校驗）、頻率封頂與派生併發封頂都由
 		// internal/selfregister 在自己的交易裡做，傳輸層只把三個欄位與實際連線來源遞進去。
 		SelfRegister: selfRegisterService,
+		// 註冊申請的審批：授權邊界（NeedServerAdmin）、目標此刻的形態核實與那一跳決定
+		// 都由 internal/acctreview 在自己的交易裡做，傳輸層只把受信主體、標識與一個決定值遞進去。
+		RegistrationReview: registrationReviewService,
 		// Root 初始化狀態的只讀來源：只查組態檔本身，不開任何寫入通路
 		// （初始化仍然只有 evernight-server init-root 這一條路）。
 		InitStatus: initStatusSource(cfg),

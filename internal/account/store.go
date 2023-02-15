@@ -317,6 +317,64 @@ func (s *Store) SetStatus(ctx context.Context, q database.Querier, id idgen.ID,
 	return n > 0, nil
 }
 
+// DecideApplication 以一條 UPDATE 對一筆待審批申請做出決定：把 status 落成這個決定對應的
+// 狀態，並在同一個語句裡把決定時刻寫進 reviewed_at；守衛是「他此刻還在等著被決定」
+// （WHERE status = 'pending'），不是呼叫端交來的依據值。
+//
+// 為什麼必須是一條專門的語句而不是借用 SetStatus（用戶批准的取向）：
+//   - SetStatus 的 CAS 硬鎖 active|disabled 兩側，那是「登入能力的開關」這條語意，
+//     把 pending 塞進去等於讓目錄那顆「恢復」按鈕替你批准一個人；
+//   - 批准與拒絕都必須同時留下決定時刻，而 SetStatus 的 SET 清單裡根本沒有 reviewed_at 那格。
+//     拆成兩條語句就會出現「已經 active 卻查不出他是走審批進來的」那種半成品——
+//     申請人查狀態那條通路分辨 approved 的依據恰恰就是這一欄。
+//
+// 為什麼守衛不採呼叫端交來的「我看見的是 pending」：審核者手上有誠實的依據值嗎？沒有——
+// 一個還未被決定的行，其現值就是「pending」這個詞本身，把它放進本體只會多出一個
+// 「填錯就注定落敗」的格子，而真正的併發控制本來就在這道 WHERE 上。與 MarkDeleted 同一取向
+// （那條也是用可觀測的事實當守衛，而不是湊一個依據值）。兩個審核者同時按下時，
+// SQLite 的單寫入者把兩次提交串行化，後到的那一條命中零行，回 changed=false：
+// 一個字都沒寫、先前那個決定也不會被蓋掉。
+//
+// 時刻的唯一來源是注入時鐘：呼叫端無法代填「何時定的」（與 Create 的 created_at、
+// SetStatus 的 disabled_at 同一取向）。reviewed_at >= created_at 這條單調規則由遷移 0009 的
+// CHECK 在落庫時把最後一道——時鐘被往回撥過的部署會看到一條約束錯誤而不是靜默寫出一個
+// 比申請還早的決定。
+//
+// 這隻語句不碰的欄位同樣是要害：password_hash、must_change_password、disabled_at、deleted_at、
+// display_name、login_name、account_type 都不在 SET 裡。「批准不替他改口令、不清掉任何既有義務、
+// 不解除任何獨立停用、不順手改頭換面」因此成立在 SQL 形狀上而不是自律上：
+// 一個曾被批准此後被停用的人，approval 通路對他沒有任何可做的事（他早離開 pending 了）。
+//
+// 目標不存在與「已不再等待決定」收斂為同一個 changed=false：呼叫端通常已在同一交易讀回
+// 實體並核實過形態，走到 false 只剩併發的另一次決定或程式缺陷，兩者都該讓交易回滾而不是
+// 把「一個字沒寫」報成審批成功。
+func (s *Store) DecideApplication(ctx context.Context, q database.Querier, id idgen.ID,
+	decision Decision) (bool, error) {
+	if q == nil {
+		return false, errors.New("account: 需要可用的資料庫連線或交易")
+	}
+	if id.IsNil() {
+		return false, errors.New("account: 做出審批決定必須帶目標標識")
+	}
+	if _, err := ParseDecision(string(decision)); err != nil {
+		// 復核走 ParseDecision 那唯一的入口：這裡不另寫一份「哪些詞算決定」的清單，
+		// 兩處各記一套時，總有一處會先被忘了改。
+		return false, err
+	}
+	res, err := q.ExecContext(ctx,
+		"UPDATE accounts SET status = ?, reviewed_at = ? WHERE id = ? AND status = ?",
+		string(decision.result()), timeutil.ToMillis(s.clock.Now()),
+		id.String(), string(StatusPending))
+	if err != nil {
+		return false, fmt.Errorf("account: 寫入審批決定失敗: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("account: 讀取審批決定結果失敗: %w", err)
+	}
+	return n > 0, nil
+}
+
 // MarkDeleted 以一條 UPDATE 讓帳戶進入刪除終態：status 落為 deleted、deleted_at 取注入時鐘、
 // display_name 換成匿名化佔位值。
 //

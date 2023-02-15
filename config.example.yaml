@@ -92,6 +92,10 @@ security:
   # 想在檔案裡預設它，等於讓「改檔」與「介面保存」兩個來源各說各話。
   # 端點：GET／PUT /root/account-policy（只有 Root）；登入前可見的對外答案只有一個匿名
   # 唯讀端點 GET /auth/capabilities，內容是兩個布林，而且「策略放開」不等於「通路已實作」。
+  # 誰的申請被批准或拒絕，也不在這個檔案裡，而且不需要任何組態欄位：那是
+  # GET /admin/registrations 與 PUT /admin/registrations/{account_id}/decision 兩條路徑，
+  # 由 NeedServerAdmin 判定、目标範圍由 internal/acctreview 現讀帳戶現值。審批從不回讀本策略：
+  # 模式只管新的提交，Root 事後改成 closed 也不會讓誰的待審批申請消失或變得無法處理。
 
   # 登入失敗控制與限流（純記憶體狀態：服務重啟即清空，不寫入資料庫）。
   # 計量主軸是「來源位址 × 登入目標」配對：某個帳戶被擋只冷卻「這個位址對這個帳戶」，

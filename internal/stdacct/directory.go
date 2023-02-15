@@ -150,8 +150,8 @@ func (s *Service) Directory(ctx context.Context, principal identity.Principal,
 	//   - 留他在頁上，下一跳就會把「恢復」按到他頭上——那條通路的 CAS 原語
 	//     （account.Store.SetStatus）硬鎖 active|disabled 兩側，按下去必然失敗，
 	//     做出來的正是一個「列得到、點得下去、必然回錯」的入口；
-	//   - 審批看的不是這一頁。待審批名冊屬下一步的審批通路（它的授權邊界與本目錄相同，
-	//     但回答的是另一句話），本步不拿這頁冒充那頁。
+	//   - 審批看的不是這一頁。待審批名冊是 internal/acctreview 那本獨立的書（它的授權邊界
+	//     與本目錄相同，回答的卻是另一句話），本步不把這頁的 WHERE 改寬去冒充那一頁。
 	// 排除用的是狀態而不是「有沒有審核時刻」：前者是一句可讀的範圍規則，後者會把
 	// 「曾被批准、後來被停用」的人一起藏掉——那個人仍然屬於名冊。
 	where := []string{"a.status NOT IN (?, ?, ?)", "NOT EXISTS (SELECT 1 FROM account_server_roles r" +

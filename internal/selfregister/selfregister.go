@@ -294,7 +294,9 @@ func statusForMode(mode acctpolicy.Mode) (account.Status, bool) {
 // ApplicationOutcome 是申請人查本人狀態時能得到的結果。
 //
 // 三個取值就是那個人需要知道的三種結局，沒有第四種：這裡不回答「審核排到第幾位」「還有人嗎」
-// 「誰在審」「為什麼拒」——那些屬伺服器的內部狀態，而且其中「為什麼拒」屬尚未落地的審批步驟。
+// 「誰在審」「為什麼拒」——前兩者屬伺服器的內部狀態；「誰在審」屬 root_audit 的事實
+// （帳戶表沒有一格放審核人，見 internal/acctreview）；而「為什麼拒」今日根本不存在：
+// 用戶批准的形態是內部備註與可公開理由都不落庫，所以這條通路也沒有東西可以藏。
 type ApplicationOutcome string
 
 const (
@@ -357,7 +359,8 @@ type ApplicationStatus struct {
 //
 // 這條通路不問帳戶建立策略：用戶批准的語意是「模式只管新提交，歷史申請原地保留」。
 // Root 把 approval 改成 closed 或 open，都不能替任何一份已經交上來的申請做決定，
-// 所以那些申請此刻照樣查得到——查得到不等於放行，放行屬下一步的審批動作。
+// 所以那些申請此刻照樣查得到——查得到不等於放行，放行屬 internal/acctreview 那條
+// 需要已認證管理者的通路，與這條驗憑據的匿名通路是兩道獨立證明。
 func (s *Service) ApplicationStatus(ctx context.Context, in ApplicationStatusInput,
 	requestID, sourceIP string) (ApplicationStatus, error) {
 	target := guardTarget(in.LoginName)
