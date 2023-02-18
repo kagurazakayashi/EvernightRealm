@@ -204,6 +204,12 @@ var errorMessages = map[ErrorCode]map[string]string{
 		LocaleEnUS: "This registration has already been decided, so your review did not take effect. Reload the application roster: approved accounts are managed in the standard account directory, and rejected ones cannot be reversed.",
 		LocaleJaJP: "この登録申請はすでに判定済みため、今回の承認操作は反映されませんでした。申請一覧を再読み込みしてください。承認済みのアカウントは一般アカウント一覧で、却下された申請は元に戻せません。",
 	},
+	CodeInviteAlreadyRevoked: {
+		LocaleZhCN: "这枚邀请码已经被撤销，本次撤销没有生效。撤销是单向的终点：请重新读取邀请码名册，已撤销的码不会重新生效，也不能再被核销，重按一次不会改写先前那次撤销。",
+		LocaleZhTW: "這枚邀請碼已經被撤銷，本次撤銷沒有生效。撤銷是單向的終點：請重新讀取邀請碼名冊，已撤銷的碼不會重新生效，也不能再被核銷，重按一次不會改寫先前那次撤銷。",
+		LocaleEnUS: "This invite code has already been revoked, so this revocation did not take effect. Revocation is one-way: reload the invite-code roster. A revoked code cannot be reactivated or redeemed again, and pressing once more will not rewrite the earlier revocation.",
+		LocaleJaJP: "この招待コードはすでに失効済みで、今回の失効操作は反映されませんでした。失効は元に戻せません。招待コード一覧を再読み込みしてください。失効済みのコードを再有効化したり再度利用したりすることはできず、もう一度押しても以前の失効は書き換わりません。",
+	},
 }
 
 // messageFor 取得錯誤碼在指定語言的使用者訊息；語言未支援或訊息為空時回退 defaultLocale。

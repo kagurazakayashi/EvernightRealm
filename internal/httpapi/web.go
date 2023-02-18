@@ -76,7 +76,13 @@ func (s *Server) apiRoutes() []apiRoute {
 	// 它落在已被普通帳戶端點帶入 API 首段的 /admin 之下，不新增首段、只多兩條路徑。
 	// 與上一行刻意分開注入——「門外的人查自己的結局」與「管理者替別人做決定」
 	// 是兩套准入邊界，不該共用一個有開關。
-	return append(routes, s.registrationReviewEndpoints()...)
+	routes = append(routes, s.registrationReviewEndpoints()...)
+	// Root 管理伺服器級註冊邀請碼（POST／GET／HEAD /root/invite-codes 與
+	// DELETE /root/invite-codes/{code_id}）由自己那個依賴決定有無：它落在已被 Root 開設管理端點
+	// 帶入 API 首段的 /root 之下，不新增首段、只多掛兩條路徑。與審批名冊刻意分開注入——
+	// 「管理員替別人做准入決定」與「Root 管理伺服器級准入憑證」是兩套授權邊界（NeedServerAdmin
+	// 對 NeedRoot），不該共用一個開關。
+	return append(routes, s.inviteCodeEndpoints()...)
 }
 
 // apiFirstSegments 從登記清單導出各端點的路徑首段集合。

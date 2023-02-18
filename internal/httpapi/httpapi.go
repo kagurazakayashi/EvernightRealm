@@ -87,6 +87,15 @@ type Deps struct {
 	// （NeedServerAdmin、不碰任何憑據）。兩套准入邊界各是各的，裝配了誰就服務誰，
 	// 傳輸層不拿一方猜另一方，更不讓一方缺注入時另一方默默變成可利用的入口。
 	RegistrationReview RegistrationReviewUseCase
+	// InviteCodes 為「服務器級註冊邀請碼管理」用例的入口（internal/app 注入 *invitecode.Service）。
+	// 為 nil 表示本執行檔不開放這組端點：路徑、回退清單與錯誤面都和未掛載時逐字相同，
+	// 少掉的是三個端點（簽發、名冊、撤銷），不會留下一條能被人探測的半成品寫入口。
+	// 它與 RegistrationReview 是兩個依賴而不是同一個：那一個認的是「管理員讀待審批名冊並替別人做決定」
+	// （NeedServerAdmin、動的是帳戶行的狀態），這一個認的是「Root 簽發／撤銷服務器級准入憑證」
+	// （NeedRoot、根本不碰任何帳戶）。兩套准入邊界各是各的，裝配了誰就服務誰。
+	// 注意簽發一枚碼不等於把自注冊模式切成 invite：那條通路仍未落地（見 internal/acctpolicy），
+	// 本執行檔沒有任何入口能把一枚碼兌換成帳戶。
+	InviteCodes InviteCodeUseCase
 }
 
 // Server 為 HTTP 服務層。
@@ -132,6 +141,10 @@ type Server struct {
 	// 回空清單，/admin/registrations 這條路徑根本不掛（/admin 首段仍因普通帳戶端點屬 API，
 	// 回退行為不受影響）。
 	regReview RegistrationReviewUseCase
+	// inviteCodes 為「伺服器級註冊邀請碼管理」用例入口（簽發、名冊、撤銷；可為 nil）；nil 時
+	// inviteCodeEndpoints 回空清單，/root/invite-codes 這條路徑根本不掛（/root 首段仍因 Root
+	// 開設管理端點屬 API，回退行為不受影響）。
+	inviteCodes InviteCodeUseCase
 }
 
 // New 以組態、版本字串與外部依賴建立 HTTP 服務層。
@@ -172,6 +185,9 @@ func New(cfg *config.Config, version string, deps Deps) *Server {
 		// 審批用例為 nil 時一個端點都不掛（見 registrationReviewEndpoints）：
 		// 「裝配了什麼就服務什麼」在這一層沒有分支。
 		regReview: deps.RegistrationReview,
+		// 邀請碼管理用例為 nil 時一個端點都不掛（見 inviteCodeEndpoints）：
+		// 「裝配了什麼就服務什麼」在這一層沒有分支。
+		inviteCodes: deps.InviteCodes,
 	}
 	s.httpSrv = &http.Server{
 		Addr:    cfg.Server.Listen,

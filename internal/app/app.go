@@ -27,6 +27,7 @@ import (
 	"github.com/kagurazakayashi/EvernightRealm/internal/disk"
 	"github.com/kagurazakayashi/EvernightRealm/internal/grant"
 	"github.com/kagurazakayashi/EvernightRealm/internal/httpapi"
+	"github.com/kagurazakayashi/EvernightRealm/internal/invitecode"
 	"github.com/kagurazakayashi/EvernightRealm/internal/runlog"
 	"github.com/kagurazakayashi/EvernightRealm/internal/selfregister"
 	"github.com/kagurazakayashi/EvernightRealm/internal/session"
@@ -658,6 +659,24 @@ func run(ctx context.Context, releaseSignals func(), args []string, out io.Write
 		lg.Error("審批註冊申請用例組裝失敗", "err", err)
 		return err
 	}
+	// 伺服器級註冊邀請碼管理用例（簽發＋名冊＋撤銷）。倉儲與用例共用同一份注入時鐘：
+	// 「一枚碼簽發於何時」與「名冊讀到它此刻算不算過期」必須同源，否則一張名冊裡的到期判定會漂移。
+	// 審計倉儲沿用上面同一批實例（「Root 域留痕只有一個出口」在裝配層也成立）。
+	// 刻意不注入策略、會話與憑據三個依賴（見 internal/invitecode 的套件頭注）：簽發一枚准入憑證
+	// 不等於把自註冊模式切成 invite（那是 Root 在策略端點上單獨做的另一條決定，本步不借道開放）、
+	// 邀請碼換不出任何會話、也不碰任何一枚口令。少了這個用例，invite 就仍是策略上一個谁也签不出码的空名。
+	inviteStore := invitecode.NewStore(timeutil.System())
+	inviteCodeService, err := invitecode.New(invitecode.Deps{
+		DB:     db,
+		Store:  inviteStore,
+		Clock:  timeutil.System(),
+		Audits: auditStore,
+		Log:    lg.Logger,
+	})
+	if err != nil {
+		lg.Error("伺服器級註冊邀請碼用例組裝失敗", "err", err)
+		return err
+	}
 	srv := httpapi.New(&cfg, Version, httpapi.Deps{
 		Ready:    readinessCheck(db, space),
 		Clock:    timeutil.System(),
@@ -678,6 +697,9 @@ func run(ctx context.Context, releaseSignals func(), args []string, out io.Write
 		// 註冊申請的審批：授權邊界（NeedServerAdmin）、目標此刻的形態核實與那一跳決定
 		// 都由 internal/acctreview 在自己的交易裡做，傳輸層只把受信主體、標識與一個決定值遞進去。
 		RegistrationReview: registrationReviewService,
+		// 伺服器級註冊邀請碼管理：授權邊界（NeedRoot）、明文與驗證材料的分工與那一躍撤銷的落庫
+		// 都由 internal/invitecode 在自己的交易裡做，傳輸層只把受信主體、一個簽發輸入或一枚標識遞進去。
+		InviteCodes: inviteCodeService,
 		// Root 初始化狀態的只讀來源：只查組態檔本身，不開任何寫入通路
 		// （初始化仍然只有 evernight-server init-root 這一條路）。
 		InitStatus: initStatusSource(cfg),
