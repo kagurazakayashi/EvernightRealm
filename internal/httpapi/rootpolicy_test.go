@@ -436,31 +436,53 @@ func TestAccountPolicyRejectsMalformedBodies(t *testing.T) {
 	}
 }
 
-// TestAccountPolicyRejectsUnapprovedModes 驗證通路尚未落地的模式（現在只剩 invite）
-// 得到屬於自己的那句結論（2016），而已落地的 approval 寫得進去。
+// TestAccountPolicyAcceptsLandedModes 驗證已批准且通路已落地的模式都寫得進去，而每個模式在對外
+// 入口那張表上帶回各自正確的那一組布林。
 //
-// 這是最容易被寫錯的一條：把「尚未開放」降級成 1004，界面就會告訴 Root「你打錯字」，
-// 而那個名字是被批准的；反過來把它當成成功，策略就會記下一種伺服器自己執行不了的模式。
-// approval 移到「寫得進」這一側（R2-012）：它現在對應的事實是「收待審批的申請」，
-// 而那句話有端點、有資料層形態、有本人查狀態的通路接得住，所以 200 才是誠實的回答。
-func TestAccountPolicyRejectsUnapprovedModes(t *testing.T) {
+// 已批准但通路未落地、因此回 2016 的那一類，如今在四個合法名字裡沒有對象（open／approval／invite
+// 三條准入通路都已翻真）：2016 這枚碼仍保留給「策略記了一種本執行檔不服務的模式」那類裝配缺陷，
+// 而「打錯字走另一句、拒絕零副作用」由 TestAccountPolicyRejectsBadBodies 與 TestUnknownModeRejected 釘住。
+// approval 對應的事實是「收待審批的申請」，invite 對應的是「拿一枚有效碼換一筆可立即登入的普通帳戶」——
+// 兩句話都有端點、有資料層形態、有通路接得住，所以 200 才是誠實的回答。
+// invite 那一側另要釘住 entry 同時點亮 invite_code_required（門要帶碼），而模式名字本身仍不出口。
+func TestAccountPolicyAcceptsLandedModes(t *testing.T) {
 	env := newPolicyEnv(t)
 	cookie := env.rootCookie(t)
 	auditsBefore := env.auditCount(t)
 
-	for _, mode := range []string{"invite"} {
-		resp := env.putPolicy(t, policyBody(true, mode, true), cookie, env.ts.URL, nil)
-		assertCode(t, "模式 "+mode, resp, CodeAccountPolicyModeUnavailable, http.StatusBadRequest)
+	// open：門開、不要碼。
+	openResp := env.putPolicy(t, policyBody(true, "open", true), cookie, env.ts.URL, nil)
+	if openResp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(openResp.Body)
+		t.Fatalf("open 寫得進去：%d %s", openResp.StatusCode, body)
 	}
-	if admin, mode, guest, updatedAt := env.readPolicyRow(t); admin != 0 || mode != "closed" ||
-		guest != 0 || updatedAt != 0 {
-		t.Errorf("被拒的模式寫入不應改動出廠值，實際 %d/%q/%d/%d", admin, mode, guest, updatedAt)
-	}
-	if got := env.auditCount(t); got != auditsBefore {
-		t.Errorf("被拒的寫入不應追加審計，實際 %d 筆", got)
+	if entry := entryOf(t, decodeJSONBody(t, openResp)); entry["sign_up_open"] != true ||
+		entry["invite_code_required"] != false {
+		t.Errorf("open 應 sign_up_open 真、invite_code_required 假，實際 %#v", entry)
 	}
 
-	// approval 寫得進，而且對外入口的答案隨之翻真（門推得開，但不是「進去就能登入」）。
+	// invite：門開、要碼，而且回應不回顯模式名字以外的東西。
+	inviteResp := env.putPolicy(t, policyBody(true, "invite", true), cookie, env.ts.URL, nil)
+	if inviteResp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(inviteResp.Body)
+		t.Fatalf("invite 現在該寫得進去：%d %s", inviteResp.StatusCode, body)
+	}
+	inviteBody := decodeJSONBody(t, inviteResp)
+	if inviteBody["self_register_mode"] != "invite" {
+		t.Errorf("回應應帶著落庫後的現值 invite，實際 %#v", inviteBody["self_register_mode"])
+	}
+	if entry := entryOf(t, inviteBody); entry["sign_up_open"] != true ||
+		entry["invite_code_required"] != true {
+		t.Errorf("invite 應 sign_up_open 真、invite_code_required 真，實際 %#v", entry)
+	}
+	if _, leaked := inviteBody["mode"]; leaked {
+		t.Error("回應不該另開一個 mode 別名欄位")
+	}
+	if got := env.auditCount(t); got != auditsBefore+2 {
+		t.Errorf("兩次成功寫入各追加一筆審計，實際 %d→%d", auditsBefore, got)
+	}
+
+	// approval 寫得進，而且對外入口的答案是「門推得開、不要碼」。
 	write := env.putPolicy(t, policyBody(true, "approval", false), cookie, env.ts.URL, nil)
 	if write.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(write.Body)
@@ -470,28 +492,38 @@ func TestAccountPolicyRejectsUnapprovedModes(t *testing.T) {
 	if saved["self_register_mode"] != "approval" {
 		t.Errorf("回應應帶著落庫後的現值，實際 %#v", saved["self_register_mode"])
 	}
-	entry, _ := saved["entry"].(map[string]any)
-	if entry == nil || entry["sign_up_open"] != true {
-		t.Errorf("approval 已落地，entry.sign_up_open 應為 true，實際 %#v", saved["entry"])
-	}
-	if _, leaked := saved["mode"]; leaked {
-		t.Error("回應不該另開一個 mode 別名欄位")
+	if entry := entryOf(t, saved); entry["sign_up_open"] != true || entry["invite_code_required"] != false {
+		t.Errorf("approval 已落地，entry 應 sign_up_open 真、invite_code_required 假，實際 %#v", entry)
 	}
 
-	// 四語言都要有這句：缺任何一語，訊息會靜默退回英文。
+	// 四語言都要有這幾句：缺任何一語，訊息會靜默退回英文。
 	for _, locale := range []string{LocaleZhCN, LocaleZhTW, LocaleEnUS, LocaleJaJP} {
 		if messageFor(CodeAccountPolicyModeUnavailable, locale) == "" {
 			t.Errorf("機器碼 2016 缺少 %s 的文案", locale)
 		}
+		if messageFor(CodeInviteRejected, locale) == "" {
+			t.Errorf("機器碼 2023 缺少 %s 的文案", locale)
+		}
 	}
 }
 
-// TestEntryCapabilitiesAreMinimalAndClosed 驗證對外入口端點：匿名可讀、只有三個鍵，
+// entryOf 從已解碼的 Root 策略回應裡取出 entry 子物件，缺欄即判測試現場失敗。
+func entryOf(t *testing.T, body map[string]any) map[string]any {
+	t.Helper()
+	entry, _ := body["entry"].(map[string]any)
+	if entry == nil {
+		t.Fatalf("策略回應缺少 entry 子物件：%#v", body)
+	}
+	return entry
+}
+
+// TestEntryCapabilitiesAreMinimalAndClosed 驗證對外入口端點：匿名可讀、只有四個鍵，
 // 而且「策略值不等於能力」在放開策略後仍逐條成立。
 //
 // 這一條同時管兩件事：揭露的面要小到不能再用（不得出現模式名字、時刻、建號開關、
-// 任何帳戶或閾值資料），以及兩個布林各自是「策略 ∧ 這條通路已實作」的合成結果——
-// 自註冊通路已落地，故 Root 把模式改到 open 後 sign_up_open 隨之放開；
+// 任何帳戶或閾值資料），以及三個布林各自是「策略 ∧ 這條通路已實作」的合成結果——
+// 自註冊通路已落地，故 Root 把模式改到 open 後 sign_up_open 隨之放開，而 invite_code_required 仍關
+// （開放模式不要碼）；改到 invite 後两者皆放（門開且要帶碼），這一句不泄露模式名字本身；
 // 訪客通路尚未落地，故即便 guest_enabled 被設成 true，guest_open 仍必須是關。
 // 後者正是「策略值不等於能力」不能只寫在注釋裡的證據：一個開、一個關，
 // 界面因此不會把一條還不存在的通路冒充可用。
@@ -510,19 +542,19 @@ func TestEntryCapabilitiesAreMinimalAndClosed(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
 		t.Fatalf("解析回應失敗：%v", err)
 	}
-	if len(raw) != 3 {
-		t.Errorf("回應應恰好三個欄位（兩個布林＋關聯 ID），實際 %v", raw)
+	if len(raw) != 4 {
+		t.Errorf("回應應恰好四個欄位（三個布林＋關聯 ID），實際 %v", raw)
 	}
-	for _, key := range []string{"sign_up_open", "guest_open", "request_id"} {
+	for _, key := range []string{"sign_up_open", "invite_code_required", "guest_open", "request_id"} {
 		if _, ok := raw[key]; !ok {
 			t.Errorf("回應應含 %q，實際 %v", key, raw)
 		}
 	}
-	if raw["sign_up_open"] != false || raw["guest_open"] != false {
+	if raw["sign_up_open"] != false || raw["invite_code_required"] != false || raw["guest_open"] != false {
 		t.Errorf("出廠默認為 closed 模式，對外入口答案應全為關，實際 %v", raw)
 	}
 
-	// Root 把模式改到 open 後：自註冊通路已落地，sign_up_open 應隨策略放開；
+	// Root 把模式改到 open 後：自註冊通路已落地，sign_up_open 應隨策略放開，invite_code_required 仍關；
 	// 訪客通路尚未落地，guest_open 即使 guest_enabled=true 也必須仍是關。
 	// 這一組「一開一關」正是「能力登記」真的在逐條把關、而不是跟著策略值一起翻的證據。
 	cookie := env.rootCookie(t)
@@ -534,6 +566,9 @@ func TestEntryCapabilitiesAreMinimalAndClosed(t *testing.T) {
 	afterBody := decodeJSONBody(t, after)
 	if afterBody["sign_up_open"] != true {
 		t.Errorf("自註冊通路已落地且策略已 open，對外應放開註冊入口，實際 %v", afterBody)
+	}
+	if afterBody["invite_code_required"] != false {
+		t.Errorf("open 模式不要邀請碼，invite_code_required 應仍為關，實際 %v", afterBody)
 	}
 	if afterBody["guest_open"] != false {
 		t.Errorf("訪客通路未落地，對外不得放開訪客入口，實際 %v", afterBody)
@@ -554,6 +589,21 @@ func TestEntryCapabilitiesAreMinimalAndClosed(t *testing.T) {
 				t.Errorf("回應洩漏了 %q：%s", word, text)
 			}
 		}
+	}
+
+	// 改成 invite：門開且要帶碼——invite_code_required 是唯一因模式而點亮的第三顆布林，
+	// 它讓共享的匿名註冊表單知道要顯示邀請碼欄位，而模式名字本身仍舊不出口。
+	// 放在最後，是為了不打亂上面「Root 現讀應看到 open」那一記斷言的現場。
+	if put := env.putPolicy(t, policyBody(true, "invite", false), cookie, env.ts.URL, nil); put.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(put.Body)
+		t.Fatalf("Root 切到 invite 應成功：%d %s", put.StatusCode, body)
+	}
+	inviteCaps := decodeJSONBody(t, getAuth(t, env.ts, "/auth/capabilities", "", "", ""))
+	if inviteCaps["sign_up_open"] != true || inviteCaps["invite_code_required"] != true {
+		t.Errorf("invite 模式對外應 sign_up_open 真且 invite_code_required 真，實際 %v", inviteCaps)
+	}
+	if len(inviteCaps) != 4 {
+		t.Errorf("invite 模式的對外答案仍只該有四個欄位，實際 %v", inviteCaps)
 	}
 }
 

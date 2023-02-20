@@ -31,6 +31,7 @@ import (
 	"github.com/kagurazakayashi/EvernightRealm/internal/database/migrate"
 	"github.com/kagurazakayashi/EvernightRealm/internal/devkit"
 	"github.com/kagurazakayashi/EvernightRealm/internal/grant"
+	"github.com/kagurazakayashi/EvernightRealm/internal/invitecode"
 	"github.com/kagurazakayashi/EvernightRealm/internal/selfregister"
 	"github.com/kagurazakayashi/EvernightRealm/internal/session"
 	"github.com/kagurazakayashi/EvernightRealm/internal/stdacct"
@@ -126,7 +127,8 @@ func newReviewEnv(t *testing.T) *reviewEnv {
 		t.Fatalf("建立普通帳戶用例失敗：%v", err)
 	}
 	registerService, err := selfregister.New(selfregister.Deps{
-		DB: db, Accounts: accountsStore, Policy: policyStore, Audits: auditStore,
+		DB: db, Accounts: accountsStore, Policy: policyStore,
+		Invites: invitecode.NewStore(clock), Audits: auditStore,
 		Guard: registerGuard, CredentialGuard: loginGuard,
 		Hashing: credential.TestParams, HashConcurrency: 2,
 	})

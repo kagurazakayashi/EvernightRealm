@@ -29,6 +29,7 @@ import (
 	"github.com/kagurazakayashi/EvernightRealm/internal/database/migrate"
 	"github.com/kagurazakayashi/EvernightRealm/internal/devkit"
 	"github.com/kagurazakayashi/EvernightRealm/internal/grant"
+	"github.com/kagurazakayashi/EvernightRealm/internal/invitecode"
 	"github.com/kagurazakayashi/EvernightRealm/internal/session"
 	"github.com/kagurazakayashi/EvernightRealm/internal/timeutil"
 )
@@ -53,6 +54,7 @@ type env struct {
 	logs     *bytes.Buffer
 	policy   *acctpolicy.Store
 	accounts *account.Store
+	invites  *invitecode.Store
 	service  *Service
 }
 
@@ -125,10 +127,14 @@ func newEnvWithGuards(t *testing.T, registerGuard, credentialGuardCfg auth.Guard
 	if err != nil {
 		t.Fatalf("建立憑據守衛失敗：%v", err)
 	}
+	// 邀請碼倉儲與自註冊用例共用同一份注入時鐘：核銷判定「這一刻能不能佔用額度」要與鋪設碼的
+	// 過期時刻同源，否則測試裡「過期」這件事會随两处时钟漂移。
+	invitesStore := invitecode.NewStore(clock)
 	service, err := New(Deps{
 		DB:              db,
 		Accounts:        accountsStore,
 		Policy:          policyStore,
+		Invites:         invitesStore,
 		Audits:          audit.NewStore(clock),
 		Guard:           loginGuard,
 		CredentialGuard: credentialGuard,
@@ -140,7 +146,7 @@ func newEnvWithGuards(t *testing.T, registerGuard, credentialGuardCfg auth.Guard
 		t.Fatalf("建立自註冊用例失敗：%v", err)
 	}
 	return &env{db: db, clock: clock, logs: &logs, policy: policyStore,
-		accounts: accountsStore, service: service}
+		accounts: accountsStore, invites: invitesStore, service: service}
 }
 
 // setSelfRegisterMode 經策略倉儲（與生產同一個寫入點）翻動 self_register_mode，
@@ -307,27 +313,27 @@ func TestPolicyJudgedAtWriteTime(t *testing.T) {
 	}
 }
 
-// TestNonOpenModeIsUnsupported 策略放行但本版本服務不動的模式（現在只剩 invite）：
-// 必須回可判別的模式未開放結論，而且一個帳戶都不建、一條審計都不寫。
+// TestInviteModeRejectsCodelessRegistration 封堵「不帶邀請碼就繞過 invite 模式」這條路：
+// 策略開的是 invite，而請求沒帶碼（InviteCode 為空）——整筆必須被拒為不泄露細節的
+// ErrInviteRejected（映射 2023），而且一個帳戶都不建、一條審計都不寫、一枚名額都不耗。
 //
-// 這一條把「AllowsSelfRegister 對任何有效非 closed 模式都回 true」這半句話堵死在用例裡：
-// 用例不能因為策略說「放行」就默默按 open 建號——那等於替尚未實作的准入流程冒充可用。
-// approval 不在這一組了：它的准入（收申請＋本人查狀態）已隨 R2-012 落地，
-// 由本檔案的 approval 一組測試釘住它落成的是待審批而不是 active。
-func TestNonOpenModeIsUnsupported(t *testing.T) {
-	for _, mode := range []acctpolicy.Mode{acctpolicy.ModeInvite} {
-		e := newEnv(t)
-		e.setSelfRegisterMode(t, mode)
-		ctx := context.Background()
-		if _, err := e.service.RegisterAccount(ctx, RegisterInput{
-			LoginName: "mode." + mode.String(), DisplayName: "模式未上線", Password: testPassword,
-		}, "req-mode", "203.0.113.12"); !errors.Is(err, ErrRegisterModeUnsupported) {
-			t.Errorf("%s 模式應被拒為「准入流程尚未上線」，實際 %v", mode, err)
-		}
-		for _, table := range []string{"accounts", "root_audit"} {
-			if n := countRows(t, e.db, table); n != 0 {
-				t.Errorf("被模式擋下的註冊不得留下任何寫入（%s 有 %d 行）", table, n)
-			}
+// 這一條把「前端先查到 SignUpOpen 就直接按開放那套提交」的幻想堵死在用例裡：准入判定的門不在前端，
+// 也不在 /auth/capabilities 那個匿名答案，而在寫入那一刻的現讀策略＋invite 分支的核銷要求。
+// 換名字、改寫法、重新整理都換不來放行；要等的是發碼的人給一枚有效碼（见邀请码核销一組測試）。
+// 昔日本用例斷言的是 invite→ErrRegisterModeUnsupported（准入未落地）；invite 现已翻真，
+// 那一格留給「不認識的模式值／裝配缺陷」，正常用戶路徑上不再出现，故改釘這條繞過封堵。
+func TestInviteModeRejectsCodelessRegistration(t *testing.T) {
+	e := newEnv(t)
+	e.setSelfRegisterMode(t, acctpolicy.ModeInvite)
+	ctx := context.Background()
+	if _, err := e.service.RegisterAccount(ctx, RegisterInput{
+		LoginName: "invite.codeless", DisplayName: "不帶碼繞過", Password: testPassword,
+	}, "req-mode", "203.0.113.12"); !errors.Is(err, ErrInviteRejected) {
+		t.Errorf("invite 模式下不帶碼的註冊應被拒為 ErrInviteRejected，實際 %v", err)
+	}
+	for _, table := range []string{"accounts", "root_audit", "registration_invite_codes"} {
+		if n := countRows(t, e.db, table); n != 0 {
+			t.Errorf("被邀碼擋下的註冊不得留下任何寫入（%s 有 %d 行）", table, n)
 		}
 	}
 }
@@ -529,7 +535,8 @@ func TestHashConcurrencySerializesWithoutLoss(t *testing.T) {
 	}
 	service, err := New(Deps{
 		DB: db, Accounts: account.NewStore(clock), Policy: policyStore,
-		Audits: audit.NewStore(clock), Guard: guard, CredentialGuard: guard,
+		Invites: invitecode.NewStore(clock),
+		Audits:  audit.NewStore(clock), Guard: guard, CredentialGuard: guard,
 		Hashing: credential.TestParams, HashConcurrency: 1,
 	})
 	if err != nil {
@@ -714,13 +721,15 @@ func TestNewRejectsMissingDeps(t *testing.T) {
 	}
 	valid := Deps{
 		DB: e.db, Accounts: account.NewStore(e.clock), Policy: e.policy,
-		Audits: audit.NewStore(e.clock), Guard: guard, CredentialGuard: guard,
+		Invites: invitecode.NewStore(e.clock),
+		Audits:  audit.NewStore(e.clock), Guard: guard, CredentialGuard: guard,
 		Hashing: credential.TestParams, HashConcurrency: 2,
 	}
 	for _, mutate := range []func(*Deps){
 		func(d *Deps) { d.DB = nil },
 		func(d *Deps) { d.Accounts = nil },
 		func(d *Deps) { d.Policy = nil },
+		func(d *Deps) { d.Invites = nil },
 		func(d *Deps) { d.Audits = nil },
 		func(d *Deps) { d.Guard = nil },
 		func(d *Deps) { d.CredentialGuard = nil },

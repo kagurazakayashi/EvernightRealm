@@ -74,6 +74,14 @@ var (
 	// 另一個是「別再對同一枚已撤銷的碼按第二次」（它就在眼前這一頁，只是已經沒有第二顆按鈕）。
 	// 重複操作與併發落敗收斂到同一個結論，不謊報成功，也不會把先前那次撤銷改寫成別的樣子。
 	ErrAlreadyRevoked = errors.New("invitecode: 該邀請碼已被撤銷")
+	// ErrNotConsumable 表示一枚碼在這一刻佔用不了額度：查無此行、已被撤銷、已過期、額度用滿，
+	// 或併發下被另一筆交易搶先耗盡（那一刻的 UPDATE 命中零行）。
+	//
+	// 這四種原因（外加「不存在」）收斂成同一個結論是刻意的：核銷通路（internal/selfregister）把它們
+	// 一律換成對外同一枚不泄露細節的碼，呼叫端據此無法分辨「這枚碼存在但已過期」與「這枚碼根本沒出現過」，
+	// 於是這條准入通路不會變成一部「逐枚探測碼有效性」的探測器。正確性來自那條帶四重 WHERE 的
+	// 單向 UPDATE，不來自讀與寫之間那個窗口（併發安全已由 Store.Consume 在真交易多 goroutine 下取證）。
+	ErrNotConsumable = errors.New("invitecode: 該邀請碼此刻不可核銷")
 	// ErrInvalidLabel 表示標籤不滿足領域規則（空、過長、含控制或格式字元）。屬請求本體的寫法問題，
 	// 走 1004 點名 label 欄位。
 	ErrInvalidLabel = errors.New("invitecode: 邀請碼標籤不合法")

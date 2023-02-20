@@ -201,6 +201,54 @@ func (s *Store) Consume(ctx context.Context, q database.Querier, id idgen.ID) (b
 	return n > 0, nil
 }
 
+// ByCodeHash 按驗證材料（明文碼的 SHA-256 十六進位）讀回一枚邀請碼；不存在時回傳 ErrNotFound。
+//
+// q 讓呼叫端把「查碼」與「建號＋記審計」放進同一筆交易。這是核銷那條通路唯一的按碼查法：
+// 呼叫端交來的是明文，倉儲不從明文派生哈希（哈希派生只在 Redeem 經 hashCode 這一個寫法發生），
+// 也不接受呼叫端代填哈希，否則任何一環都能拿一枚哈希去查別人那枚碼的額度形態。查無此行與
+// 形状不合對外的處置相同（都換成不泄露細節的准入拒絕），因此這裡只忠實回 ErrNotFound。
+func (s *Store) ByCodeHash(ctx context.Context, q database.Querier, codeHash string) (InviteCode, error) {
+	if q == nil {
+		return InviteCode{}, errors.New("invitecode: 需要可用的數據庫連接或交易")
+	}
+	if len(codeHash) != codeHashLen {
+		return InviteCode{}, ErrNotFound
+	}
+	return scanCode(q.QueryRowContext(ctx, inviteCodeSelectSQL+" WHERE code_hash = ?", codeHash))
+}
+
+// Redeem 是准入通路（internal/selfregister）在自己的交易裡呼叫的核銷原語：把一枚明文邀請碼
+// 換成「一次已佔用的額度」，成功回該枚碼的現值，佔用不到就回可判別的結論錯誤。
+//
+// 它把「明文→正規形態→驗證材料→查得到嗎→此刻佔用得到嗎」這一整串收在一個寫法裡，正是
+// 套件頭注要的那個唯一入口：哈希派生只經 hashCode 這一處發生，形状校驗只經 ParseCode 這一處發生，
+// 免得核銷那一步各拼一份、總有一份與簽發那一次對不上。呼叫端把自家的 *database.Tx 交來當 q，
+// 於是「佔用額度」與「建一筆帳戶」同生同滅——建號失败時整筆交易回滾，used_count 一起退回，
+// 一個名額也不會被一次沒有結果的註冊吃掉。
+//
+// 三類結論都對外部收斂成同一句不泄露細節的拒絕（呼叫端負責映射），內部則各自成句好記日誌：
+//   - ErrInvalidCode：明文碼形状不合格（含空字串），不送進哈希、不查庫；
+//   - ErrNotFound：這臺伺服器從未簽過這枚碼（跨部署、或代填哈希都落在這裡）；
+//   - ErrNotConsumable：查得到但此刻佔用不到——已撤銷、已過期、額度用滿，或併發下被另一筆交易搶先耗盡。
+func (s *Store) Redeem(ctx context.Context, q database.Querier, plaintext string) (InviteCode, error) {
+	code, err := ParseCode(plaintext)
+	if err != nil {
+		return InviteCode{}, err
+	}
+	found, err := s.ByCodeHash(ctx, q, hashCode(code))
+	if err != nil {
+		return InviteCode{}, err
+	}
+	consumed, err := s.Consume(ctx, q, found.ID)
+	if err != nil {
+		return InviteCode{}, err
+	}
+	if !consumed {
+		return InviteCode{}, ErrNotConsumable
+	}
+	return found, nil
+}
+
 // scanCode 收攏 QueryRow 的取行與錯誤映射，並做一次入庫後的形態複核。
 //
 // 標識讀不回來、定寬哈希讀壞、或某個時刻把「0 = 無此事實」和真實時刻混起來時一律報錯：

@@ -212,6 +212,59 @@ func TestRegisterRejectsSelfClaimedRoleFields(t *testing.T) {
 	}
 }
 
+// TestRegisterInviteCodeFieldIsDecodedAndNotEchoed 釘住協定層對邀請碼欄位的三件事：
+//  1. invite_code 是白名單裡的「已知欄位」——帶著它提交不會被 DisallowUnknownFields 拒成 1004，
+//     而是如實進到用例的 RegisterInput.InviteCode（要不要看它、怎麼核銷由用例依模式判，不在這裡）；
+//  2. 沒帶 invite_code 也照樣到達用例（開放／核准模式不需要它）：准入判定不靠協定層預留一個必填格子，
+//     靠的是寫入那一刻現讀策略，於是「不帶碼想繞過 invite」會在用例裡被擋，不會在協定層被誤放行；
+//  3. 明文碼既不在成功回應、也不在失敗回應、更不回顯：它只在請求本體裡進、只在記憶體裡停留一瞬。
+func TestRegisterInviteCodeFieldIsDecodedAndNotEchoed(t *testing.T) {
+	const plaintext = "AbCdEfGhIjKlMnOpQrStUv" // 一枚形状合法的測試碼明文（非任何環境的真實憑據）。
+
+	t.Run("带码提交进用例且成功不回显", func(t *testing.T) {
+		fake := &fakeSelfRegister{result: successResult(t)}
+		ts := registerTestServer(t, fake, nil)
+		raw, _ := json.Marshal(map[string]string{
+			"login_name": "inv.it.ee", "display_name": "受邀者", "password": "selfregister-自選口令",
+			"invite_code": plaintext,
+		})
+		resp := postJSON(t, ts, "/auth/register", string(raw), "", nil)
+		if resp.StatusCode != http.StatusCreated {
+			t.Fatalf("带邀请码提交应能到达用例并成功（201），实际 %d", resp.StatusCode)
+		}
+		if fake.calls != 1 {
+			t.Fatalf("invite_code 是已知欄位，不應被協定層拒殺；用例應被呼叫一次，實際 %d", fake.calls)
+		}
+		if fake.lastIn.InviteCode != plaintext {
+			t.Errorf("明文碼應原樣遞進用例的 RegisterInput.InviteCode，實際 %q", fake.lastIn.InviteCode)
+		}
+		body := decodeJSONBody(t, resp)
+		if text, _ := json.Marshal(body); strings.Contains(string(text), plaintext) {
+			t.Errorf("成功回應不得回顯邀請碼明文：%#v", body)
+		}
+		for _, forbidden := range []string{"invite_code", "code", "code_hash", "invite"} {
+			if _, ok := body[forbidden]; ok {
+				t.Errorf("成功回應不得出現邀請碼相關欄位 %q：%#v", forbidden, body)
+			}
+		}
+	})
+
+	t.Run("不带码也到达用例", func(t *testing.T) {
+		fake := &fakeSelfRegister{err: selfregister.ErrInviteRejected}
+		ts := registerTestServer(t, fake, nil)
+		resp := postJSON(t, ts, "/auth/register",
+			registerBody("no.code", "受邀者", "selfregister-自選口令"), "", nil)
+		if fake.calls != 1 {
+			t.Fatalf("未帶 invite_code 仍應到達用例（由寫入那一刻現讀策略判 invite 缺碼），實際 calls=%d", fake.calls)
+		}
+		if fake.lastIn.InviteCode != "" {
+			t.Errorf("缺席的邀請碼應是空字串進用例，實際 %q", fake.lastIn.InviteCode)
+		}
+		// 用例回 invite 缺碼 → 對外 2023，不洩漏是哪一半、也不得把明文碼放進回應。
+		assertRegisterCode(t, resp, 2023, http.StatusForbidden)
+	})
+}
+
 // TestRegisterErrorMappings 逐條釘住用例結論到機器碼的對映，各自對應不同的處置、不互相冒充。
 func TestRegisterErrorMappings(t *testing.T) {
 	cases := []struct {
@@ -225,6 +278,7 @@ func TestRegisterErrorMappings(t *testing.T) {
 		{"duplicate", selfregister.ErrDuplicateLogin, 2019, http.StatusConflict, ""},
 		{"disabled", selfregister.ErrRegisterDisabled, 2017, http.StatusForbidden, ""},
 		{"mode_unsupported", selfregister.ErrRegisterModeUnsupported, 2016, http.StatusBadRequest, ""},
+		{"invite_rejected", selfregister.ErrInviteRejected, 2023, http.StatusForbidden, ""},
 		{"no_policy_row", acctpolicy.ErrNoPolicyRow, 1000, http.StatusInternalServerError, ""},
 		{"invalid_password", selfregister.ErrInvalidPassword, 1004, http.StatusBadRequest, "password"},
 		{"invalid_login", account.ErrInvalidLogin, 1004, http.StatusBadRequest, "login_name"},

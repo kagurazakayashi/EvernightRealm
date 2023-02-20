@@ -285,30 +285,78 @@ func TestRepeatedSaveIsAnotherConfirmation(t *testing.T) {
 	}
 }
 
-// TestUnapprovedModeRejected 驗證已批准但通路未落地的模式寫不進去，且零副作用。
+// TestInviteModeIsWritable 驗證 invite 現在寫得進去，而且落地後合成把「要帶一枚有效碼」如實說。
 //
-// 這一組現在只剩 invite：approval 的申請與本人查狀態已經落地（R2-012），
-// 它從「名字批准了但執行不了」搬到「寫得進去」那一側，由下一個測試釘住。
-// 留在這裡的斷言對象沒變——一個本版本執行不了的模式不該被記成伺服器的現值，
-// 而且拒絕不留下任何痕跡（既不改策略也不追加審計）。
-func TestUnapprovedModeRejected(t *testing.T) {
+// 這一條取代了原先「已批准但通路未落地」的拒絕測試（TestUnapprovedModeRejected）：邀請碼的
+// 簽發／撤銷（internal/invitecode）與「拿一枚有效碼在自己的交易裡原子核銷、換出一筆可立即登入的
+// 普通帳戶」（internal/selfregister 的 invite 分支）都已落地，那個「尚未開放」的例子如今沒有對象；
+// 「打錯字仍走另一句結論、拒絕零副作用」的Invariant 由 TestUnknownModeRejected 繼續釘住。
+// 留在這裡要釘的是兩側同時對：
+//   - Root 能把模式設成 invite，同交易追加一筆審計（前後值都是被批准的那個名字）；
+//   - 讀回的策略 AllowsSelfRegister 帶出 invite，EntryOf 的 SignUpOpen 為真、InviteCodeRequired 也為真——
+//     門外的人不但看得到那扇門，還被告知「這一趟要帶碼」，而模式名字本身仍不出口；
+//   - 同一份策略下 AllowsGuest 照舊為假（訪客通路與本步無關，不順手翻真）。
+//
+// 「拿一枚有效碼換出帳戶」的真核銷與併發語意由 internal/selfregister 的測試承接，這條只管策略與合成。
+func TestInviteModeIsWritable(t *testing.T) {
 	e := newEnv(t)
-	beforeAdmin, beforeMode, beforeGuest, beforeUpdatedAt := readRow(t, e.db)
 	auditBefore := len(auditRows(t, e.db))
 
-	for _, mode := range []string{"invite"} {
-		_, err := e.service.UpdatePolicy(context.Background(), root(t), inputOf(true, mode, true), "req")
-		if !errors.Is(err, ErrModeUnavailable) {
-			t.Errorf("模式 %q 應被拒（ErrModeUnavailable），實際 %v", mode, err)
-		}
+	updated, err := e.service.UpdatePolicy(context.Background(), root(t),
+		inputOf(false, "invite", false), "req")
+	if err != nil {
+		t.Fatalf("invite 現在寫得進去，實際失敗：%v", err)
 	}
-	admin, m2, guest, updatedAt := readRow(t, e.db)
-	if admin != beforeAdmin || m2 != beforeMode || guest != beforeGuest || updatedAt != beforeUpdatedAt {
-		t.Errorf("被拒的寫入不應改動策略，實際 %d/%q/%d/%d", admin, m2, guest, updatedAt)
+	if updated.SelfRegisterMode != ModeInvite {
+		t.Errorf("回傳應是重讀後的現值 invite，實際 %q", updated.SelfRegisterMode)
 	}
-	if got := len(auditRows(t, e.db)); got != auditBefore {
-		t.Errorf("被拒的寫入不應追加審計，實際從 %d 筆變成 %d 筆", auditBefore, got)
+	if _, m2, _, _ := readRow(t, e.db); m2 != "invite" {
+		t.Errorf("落庫現值應為 invite，實際 %q", m2)
 	}
+	if got := len(auditRows(t, e.db)); got != auditBefore+1 {
+		t.Errorf("成功的策略變更應追加一筆審計，實際 %d→%d", auditBefore, got)
+	}
+
+	policy, err := e.service.Policy(context.Background(), root(t))
+	if err != nil {
+		t.Fatalf("現讀策略失敗：%v", err)
+	}
+	if ok, mode := policy.AllowsSelfRegister(); !ok || mode != ModeInvite {
+		t.Errorf("AllowsSelfRegister 應放行並帶出 invite，實際 %v/%q", ok, mode)
+	}
+	entry := policy.EntryOf()
+	if !entry.SignUpOpen {
+		t.Error("invite 已落地，SignUpOpen 應隨之為真（那扇門推得開）")
+	}
+	if !entry.InviteCodeRequired {
+		t.Error("invite 模式下註冊需要一枚有效碼，InviteCodeRequired 應為真")
+	}
+	if entry.GuestOpen {
+		t.Error("訪客通路未落地，GuestOpen 必須仍為關")
+	}
+	// InviteCodeRequired 只由生效模式確為 invite 點亮：open 與 approval 都推得開、都不要碼。
+	openEntry := switchModeEntry(t, e, "open")
+	if !openEntry.SignUpOpen || openEntry.InviteCodeRequired {
+		t.Errorf("open 應 SignUpOpen 真而 InviteCodeRequired 假，實際 %+v", openEntry)
+	}
+	approvalEntry := switchModeEntry(t, e, "approval")
+	if !approvalEntry.SignUpOpen || approvalEntry.InviteCodeRequired {
+		t.Errorf("approval 應 SignUpOpen 真而 InviteCodeRequired 假，實際 %+v", approvalEntry)
+	}
+}
+
+// switchModeEntry 把策略暫時改成指定模式後現讀並換成對外入口答案，供 InviteCodeRequired 跨模式對照。
+func switchModeEntry(t *testing.T, e *env, mode string) EntryCapabilities {
+	t.Helper()
+	if _, err := e.service.UpdatePolicy(context.Background(), root(t),
+		inputOf(false, mode, false), "req"); err != nil {
+		t.Fatalf("切到模式 %q 失敗：%v", mode, err)
+	}
+	policy, err := e.service.Policy(context.Background(), root(t))
+	if err != nil {
+		t.Fatalf("現讀策略失敗：%v", err)
+	}
+	return policy.EntryOf()
 }
 
 // TestApprovalModeIsWritable 驗證 approval 現在寫得進去，而且落地後合成把「待審批」如實說。
@@ -361,8 +409,13 @@ func TestApprovalModeIsWritable(t *testing.T) {
 	if !ModeServed(ModeApproval) {
 		t.Error("通路登記未翻真時 ModeServed 不該回報已落地")
 	}
-	if ModeServed(ModeInvite) || ModeServed(ModeClosed) {
-		t.Error("ModeServed 只回答「提交服務得動」：invite 尚未落地，closed 不是一種提交方式")
+	// invite 的核銷換號本步已落地，ModeServed 現在也該回報已服務得動（不再只有 approval）。
+	if !ModeServed(ModeInvite) {
+		t.Error("邀請碼准入通路已落地，ModeServed(invite) 該為真")
+	}
+	// closed 不是一種提交方式（它是不提交），ModeServed 恆為假。
+	if ModeServed(ModeClosed) {
+		t.Error("ModeServed 只回答「提交服務得動」：closed 不是一種提交方式")
 	}
 }
 

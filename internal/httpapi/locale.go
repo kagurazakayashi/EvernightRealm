@@ -210,6 +210,12 @@ var errorMessages = map[ErrorCode]map[string]string{
 		LocaleEnUS: "This invite code has already been revoked, so this revocation did not take effect. Revocation is one-way: reload the invite-code roster. A revoked code cannot be reactivated or redeemed again, and pressing once more will not rewrite the earlier revocation.",
 		LocaleJaJP: "この招待コードはすでに失効済みで、今回の失効操作は反映されませんでした。失効は元に戻せません。招待コード一覧を再読み込みしてください。失効済みのコードを再有効化したり再度利用したりすることはできず、もう一度押しても以前の失効は書き換わりません。",
 	},
+	CodeInviteRejected: {
+		LocaleZhCN: "这台服务器当前要求凭有效邀请码注册，而你这次用的邀请码换不出一个账户——可能是没有填写、写得不完整、已经过期或被撤销、名额已用完，或恰好被另一次注册抢先使用。出于安全，服务器不指出具体是哪一种。请向发放邀请码的人索取一枚新的有效码后再提交；换一个登录名、改写这一栏或重新登录都不会改变这件事。",
+		LocaleZhTW: "這臺伺服器目前要求憑有效邀請碼註冊，而你這一次用的邀請碼換不出一個帳戶——可能是沒有填寫、寫得不完整、已經過期或被撤銷、名額已用完，或恰好被另一次註冊搶先使用。出於安全，伺服器不指出具體是哪一種。請向發放邀請碼的人索取一枚新的有效碼後再提交；換一個登入名、改寫這一欄或重新登入都不會改變這件事。",
+		LocaleEnUS: "This server currently requires a valid invite code to sign up, and the code you used this time cannot create an account — it may be missing, malformed, expired or revoked, fully used, or just consumed by another sign-up. For safety the server does not say which. Ask whoever issues invite codes for a fresh valid one and submit again; choosing another login name, rewording this field, or signing in again will not change that.",
+		LocaleJaJP: "このサーバーは現在、有効な招待コードによる登録を要求していますが、今回使用した招待コードではアカウントを作成できません。記入漏れ、形式が不完全、期限切れまたは失効、枠を使い切り、あるいは別の登録に先に使用された可能性があります。セキュリティ上、サーバーはどれに該当するかは示しません。招待コードを発行した人に新しい有効なコードを依頼してから再度送信してください。ログイン名を変えても、この欄を書き直しても、再ログインしても状況は変わりません。",
+	},
 }
 
 // messageFor 取得錯誤碼在指定語言的使用者訊息；語言未支援或訊息為空時回退 defaultLocale。

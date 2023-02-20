@@ -22,9 +22,12 @@
 //     背地裡策略已關卻仍建成」的窗口。前端依 /auth/capabilities 顯示入口只是體驗，
 //     不是准入——真正的閘門永遠在這裡、在交易內。
 //   - 服務模式與落成的狀態一起看：open 落成 active（口令本人自選、選完就能登入），
-//     approval 落成 pending（同一個口令、同一形態的普通帳戶，只是還沒有人批准過他）；
-//     尚未落地的模式（invite）一律回 ErrRegisterModeUnsupported（2016）而不是默默按 open 建號
-//     ——那等於替尚未實作的准入流程冒充可用。待審批不等於已激活這句話不是靠措辭成立的：
+//     approval 落成 pending（同一個口令、同一形態的普通帳戶，只是還沒有人批准過他），
+//     invite 落成 active（同一個口令、同一形態的普通帳戶，差別只在准入依據換成一枚被原子核銷的
+//     邀請碼——它與 open 在「建完就能登入」這一句完全一致，多的一道核銷不改登入行為）；
+//     尚未落地的模式（本版本三條准入通路 open／approval／invite 都已翻真，故只剩不認識的值）
+//     一律回 ErrRegisterModeUnsupported（2016）而不是默默按 open 建號——那等於替尚未實作的
+//     准入流程冒充可用。待審批不等於已激活這句話不是靠措辭成立的：
 //     它落在 accounts.status 上，而登入、主體成形、會話簽發與解析都寫成「不是 active 就拒絕」。
 //   - 待審批的申請人不取得任何登入能力，也拿不到一枚會話。他查本人狀態的那條通路
 //     （ApplicationStatus）每次都要重新出示憑據、成功也不寫 Set-Cookie、不回任何會話材料：
@@ -67,6 +70,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/kagurazakayashi/EvernightRealm/internal/account"
@@ -76,6 +80,7 @@ import (
 	"github.com/kagurazakayashi/EvernightRealm/internal/credential"
 	"github.com/kagurazakayashi/EvernightRealm/internal/database"
 	"github.com/kagurazakayashi/EvernightRealm/internal/idgen"
+	"github.com/kagurazakayashi/EvernightRealm/internal/invitecode"
 )
 
 // 對外可判別的結論錯誤：傳輸層據此分流回應，內部故障一律不進這些型別。
@@ -94,13 +99,23 @@ var (
 	// 誤導人「換個身分或重登就有效」。
 	ErrRegisterDisabled = errors.New("selfregister: 開放自註冊此刻未啟用")
 	// ErrRegisterModeUnsupported 表示策略放開了自註冊，但生效的模式是本版本服務不動的那一種
-	// （邀請碼：產生與核銷兩側都還沒落地）。
+	// （通路登記尚未翻真，或送來一個不認識的模式值）。
 	//
 	// 與 ErrRegisterDisabled 分開，是因為這兩句話對操作者的意義不同：一個是「伺服器沒開這條路」，
 	// 另一個是「這條路開著、但它要求的准入功能還沒上線」。回 2016（模式尚未開放）而不是 2017，
 	// 也和 internal/acctpolicy 對「策略值不等於能力」的同款區分對齊。
-	// approval 現在不在這一格——申請落地與本人查狀態都已就緒，提交會真的收成一筆待審批帳戶。
+	// open、approval 與 invite 三種准入通路現都已翻真，這一格今日留給「不認識的模式值」與
+	// 裝配缺陷（策略記了一個本執行檔不服務的模式），不再是用戶路徑上會遇到的結論。
 	ErrRegisterModeUnsupported = errors.New("selfregister: 該自註冊模式對應的准入流程尚未上線")
+	// ErrInviteRejected 是 invite 模式下「這一枚碼這一次換不出一筆帳戶」的對外結論。
+	//
+	// 它把 internal/invitecode 的三類內部原因（形状不合格、查無此碼、此刻不可核銷——後者又含
+	// 撤銷／過期／用盡／併發落敗）以及「完全沒帶碼」一律收斂成同一句話：呼叫端據此無法分辨一枚碼
+	// 是拼錯、被撤銷、用完了、還是這臺伺服器根本沒簽過它，於是這條准入通路不會淪為逐枚探測碼
+	// 有效性的探測器。批量防護交給與 open 同一條緊限流（來源×登入名）與併發封頂，而非把回應整形。
+	// 它是策略放開 invite 之後、這個請求缺的那一味准入憑證——換名字、改寫法、重新整理都換不來結果，
+	// 要等的是發碼的人再給一枚有效碼，所以它自有一枚可判別碼（對映 2023），不與 1004／2016／2017 混。
+	ErrInviteRejected = errors.New("selfregister: 邀請碼無效或此路徑未帶邀請碼")
 	// ErrDuplicateLogin 表示登入名的正規化鍵已被佔用。
 	//
 	// 對外用可判別的 2019（建號重名），與需要已認證主體的 2012 分開：2012 的既有合同寫明
@@ -155,6 +170,11 @@ type RegisterInput struct {
 	// Password 為申請人自選的口令明文。它只在本次調用期間短暫停留：派生成雜湊後即不再被引用，
 	// 不進回應、日誌、審計或任何錯誤訊息。
 	Password string
+	// InviteCode 為申請人帶來的邀請碼明文，只在 invite 模式被讀取：其他模式一概不看它、不核銷它，
+	// 於是一支碼在 open／approval 那一側永遠不會被順手吃掉，也不會有「多塞一格就把准入改成另一種」的格子。
+	// 它屬短暫停留的秘密：不進回應、日誌、審計、任何錯誤訊息，也不進 URL；正規化為「正規形態」與派生
+	// 驗證材料都由 internal/invitecode 那一個寫法負責（ParseCode＋哈希），本用例不自己拼一份。
+	InviteCode string
 }
 
 // RegisteredAccount 是一次成功註冊的結果，全部為可展示的事實（不含任何憑據材料）。
@@ -190,6 +210,12 @@ type Deps struct {
 	// Policy 是帳戶建立策略倉儲。准入放不放行、按哪種模式放行問的是 acctpolicy，
 	// 不自己查那張表——策略的解讀規則（含「策略值不等於能力」的合成）必須只有那一個來源。
 	Policy *acctpolicy.Store
+	// Invites 是邀請碼倉儲，只在 invite 模式的交易內被呼叫一次 Redeem 做原子核銷：
+	// 它接受本用例交來的 *database.Tx，於是「佔用一次額度」與「建一筆帳戶＋記審計」同生同滅。
+	// 依賴方向單向（selfregister → invitecode）：本套件認得「核銷一枚准入憑證」這一步，
+	// internal/invitecode 卻不認得註冊／帳戶／會話（簽發一枚碼不等於把它兌成帳戶，那句話在兩側都成立）。
+	// 只取倉儲、不取簽發／撤銷那半個 Service：本用例永不簽碼、永不撤碼、也不回顯任何一枚碼。
+	Invites *invitecode.Store
 	// Audits 是 Root 域審計倉儲。匿名建號的痕跡與其餘伺服器級動作落在同一張表。
 	Audits *audit.Store
 	// Guard 是「提交註冊」這條通路專屬的頻率守衛。它是獨立於登入守衛的另一個 auth.LoginGuard
@@ -215,6 +241,7 @@ type Service struct {
 	db              *database.DB
 	accounts        *account.Store
 	policy          *acctpolicy.Store
+	invites         *invitecode.Store
 	audits          *audit.Store
 	guard           *auth.LoginGuard
 	credentialGuard *auth.LoginGuard
@@ -231,9 +258,9 @@ type Service struct {
 // 查狀態用登入那份實例），但兩者都不能是 nil——少它就是少一道口令暴力防護。
 // HashConcurrency 不在 1..上限內同樣中斷啟動——訊號量容量是防線本身，裝錯一個數量級不該帶著上路。
 func New(deps Deps) (*Service, error) {
-	if deps.DB == nil || deps.Accounts == nil || deps.Policy == nil ||
+	if deps.DB == nil || deps.Accounts == nil || deps.Policy == nil || deps.Invites == nil ||
 		deps.Audits == nil || deps.Guard == nil || deps.CredentialGuard == nil {
-		return nil, errors.New("selfregister: 用例缺少必要依賴（db/accounts/policy/audits/guard/credential_guard）")
+		return nil, errors.New("selfregister: 用例缺少必要依賴（db/accounts/policy/invites/audits/guard/credential_guard）")
 	}
 	if err := deps.Hashing.Validate(); err != nil {
 		return nil, fmt.Errorf("selfregister: 憑據雜湊參數檔不合格: %w", err)
@@ -249,6 +276,7 @@ func New(deps Deps) (*Service, error) {
 		db:       deps.DB,
 		accounts: deps.Accounts,
 		policy:   deps.Policy,
+		invites:  deps.Invites,
 		audits:   deps.Audits,
 		guard:    deps.Guard,
 		// 兩個守衛欄位存的都只是呼叫端交來的實例：本步的裝配層讓 Guard 指向註冊專屬那一份、
@@ -274,12 +302,14 @@ const guardTargetMaxRunes = 200
 // 第二個回傳值是「這個模式在本版本服務不服務得動」——它經 acctpolicy.ModeServed 問通路登記，
 // 不在這裡另寫一份模式名單：同一條「策略值不等於能力」的規則有兩處實作時，總有一處會被忘了改。
 //
-//   - open → active：開放自註冊的既定語意就是「選完口令立刻能用」；
+//   - open／invite → active：開放自註冊的既定語意就是「選完口令立刻能用」，invite 只是准入依據
+//     換成一枚被原子核銷的碼，建成之後的登入行為與 open 完全一致（都是 active、都能立即登入、
+//     都不在註冊這一步簽會話）；
 //   - approval → pending：同一個口令、同一類主體，差別只在還沒有人批准過他。
 //     待審批不是「半可用的 active」，而是一個自己的狀態，理由寫在 internal/account 的 Status 頭注：
 //     現行所有登入能力閘門都寫成「status 不是 active 就拒絕」，把待審批做成一個 status 取值，
 //     那些閘門一個字都不用改就自動把他擋在門外；
-//   - 其餘（含 invite 與不認識的值）→ false：呼叫端據此回 ErrRegisterModeUnsupported，
+//   - 其餘（不認識的值，或某條通路登記被撤下）→ false：呼叫端據此回 ErrRegisterModeUnsupported，
 //     不默默按 open 建號。
 func statusForMode(mode acctpolicy.Mode) (account.Status, bool) {
 	if !acctpolicy.ModeServed(mode) {
@@ -527,9 +557,10 @@ func (s *Service) credentialGuardSuccess(source, target string) {
 //     放進交易等於讓單寫入鎖在整個派生期間被佔住；臨界區只包住派生這一步，算完立即釋放額度。
 //     取額度時尊重 ctx：等待期被取消（客戶端斷線或請求逾時）就原樣返回，不產生任何寫入。
 //  5. 交易內現讀策略並校驗模式：判定依據必須是「寫入那一刻」的現值。closed／不認識值／通路未落地
-//     → ErrRegisterDisabled（2017）；名字對但本版本服務不動的模式（invite）
-//     → ErrRegisterModeUnsupported（2016）。放行後依模式決定落成的狀態
-//     （open→active，approval→pending），再依序寫入帳戶與 Root 域審計，任何一跳失敗整筆回滾。
+//     → ErrRegisterDisabled（2017）；策略對但本版本服務不動的模式（今日三條都已翻真，故只剩裝配缺陷）
+//     → ErrRegisterModeUnsupported（2016）。放行後依模式決定落成的狀態（open／invite→active，
+//     approval→pending）；invite 那一側還要在同一筆交易內把一枚有效碼的額度原子核銷掉，
+//     核銷不到就整筆回滾、不建號也不記審計，回 ErrInviteRejected（2023，不泄露是差哪一半）。
 //  6. 重複提交與併發在同一個地方收口：登入名的正規化鍵上有 UNIQUE 索引，後到的那筆拿到
 //     ErrDuplicateLogin（2019）。本用例因此不需要（也不該）先查再插。
 //
@@ -591,6 +622,17 @@ func (s *Service) RegisterAccount(ctx context.Context, in RegisterInput, request
 		initialStatus, served := statusForMode(mode)
 		if !served {
 			return ErrRegisterModeUnsupported
+		}
+		// invite 模式在這一筆交易裡多佔一道准入憑證：把一枚碼的額度原子扣掉，扣不到（缺碼、形状不合、
+		// 查無、撤銷、過期、用滿、併發落敗）就讓整筆回滾——帳戶一個也不多、審計一筆也不記、
+		// 名額一個也不誤耗（used_count 的加一隨回滾一起退回）。這正是「註冊失敗不誤耗名額」與
+		// 「一次性碼併發只一個有效」能同時成立的落點：核銷與建號共用同一個 *database.Tx，
+		// BEGIN IMMEDIATE 讓併發的註冊整體串行化，落敗者取到的是對手已扣減後的新快照。
+		// open／approval 一個字都不看這格，一支碼因此絕不會在非 invite 那一側被順手吃掉。
+		if mode == acctpolicy.ModeInvite {
+			if _, err := s.invites.Redeem(tctx, tx, strings.TrimSpace(in.InviteCode)); err != nil {
+				return fmt.Errorf("%w（%v）", ErrInviteRejected, err)
+			}
 		}
 		a, err := s.accounts.Create(tctx, tx, account.NewInput{
 			LoginName:          in.LoginName,
@@ -664,6 +706,14 @@ func (s *Service) classifyFailure(err error, source, target, requestID string) e
 	case errors.Is(err, ErrRegisterModeUnsupported):
 		s.log.Warn("自註冊被拒：該模式對應的准入流程尚未上線", "request_id", requestID)
 		return ErrRegisterModeUnsupported
+	case errors.Is(err, ErrInviteRejected):
+		// invite 模式下這一枚碼換不出一筆帳戶（缺碼、形状不合、查無、撤銷、過期、用滿、併發落敗）：
+		// 可歸因於呼叫端帶來的那一味准入憑證，所以記一次守衛失敗（撞一枚固定失效碼試名額正是探測用法，
+		// 來源×名字與來源級上限都要能因它而觸發）。對外是單一不泄露細節的結論（映射 2023），
+		// 內部那句原始原因只進日誌、不回傳——探測者據回應分辨不出自己差的是哪一半。
+		s.guardFailure(source, target)
+		s.log.Warn("自註冊被拒：邀請碼無效或未帶邀請碼", "request_id", requestID, "err", err)
+		return ErrInviteRejected
 	case errors.Is(err, account.ErrDuplicateLogin):
 		// 業務衝突：不是故障、不寫審計，但記一次守衛失敗——反復撞同一個存在名字的來源
 		// 正是探測器的主用法，配對上限與來源級上限都要能因它而觸發。
@@ -706,6 +756,9 @@ func (s *Service) auditRecord(a account.Account, mode acctpolicy.Mode, requestID
 	if a.Status == account.StatusPending {
 		reason = "匿名提交自註冊申請（策略於交易內現讀放行，模式 approval），落成待審批帳戶：" +
 			"申請人自此持有穩定標識與自己選的口令，但在有人批准之前沒有任何登入能力"
+	} else if mode == acctpolicy.ModeInvite {
+		reason = "匿名持有效邀請碼自註冊（策略於交易內現讀放行，模式 invite），在同一筆交易內原子核銷該碼的一次額度並建立普通帳戶，" +
+			"口令為本人自選故首次登入不必改密；邀請碼不攜帶任何權限，建出的仍是普通帳戶"
 	}
 	return audit.Record{
 		Scope:  audit.ScopeRoot,

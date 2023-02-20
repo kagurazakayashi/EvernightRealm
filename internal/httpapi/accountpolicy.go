@@ -63,9 +63,15 @@ type updateAccountPolicyRequest struct {
 }
 
 // entryCapabilitiesBody 是對外入口答案的本體（Root 端與匿名端共用同一個形狀）。
+//
+// invite_code_required 是「這一趟自行註冊需不需要一枚邀請碼」這一個最小事實，由策略現讀合成
+// （只在生效模式確為 invite 且通路已落地時為 true）；它不是模式名字，closed／open／approval
+// 一律回 false，因此仍守住 R2-006「模式內部計畫不出口」那條界線。界面據它決定要不要顯示邀請碼欄位，
+// 但它只是顯示依據、不是准入：寫入那一刻由 internal/selfregister 現讀策略重判，前端瞞不過那道檢查。
 type entryCapabilitiesBody struct {
-	SignUpOpen bool `json:"sign_up_open"`
-	GuestOpen  bool `json:"guest_open"`
+	SignUpOpen         bool `json:"sign_up_open"`
+	InviteCodeRequired bool `json:"invite_code_required"`
+	GuestOpen          bool `json:"guest_open"`
 }
 
 // accountPolicyResponse 是 GET／PUT /root/account-policy 的回應本體。
@@ -86,11 +92,14 @@ type accountPolicyResponse struct {
 
 // entryCapabilitiesResponse 是 GET／HEAD /auth/capabilities 的回應本體。
 //
-// 兩個布林加 request_id，沒有別的：這是「還站在門外的人」唯一需要知道的事。
+// 三個布林加 request_id，沒有別的：這是「還站在門外的人」唯一需要知道的事——能不能自行註冊、
+// 這一趟要不要帶一枚邀請碼、能不能開訪客。模式名字、最後修改時刻、管理員建號開關、任何帳戶資料
+// 與任何閾值都不在這裡（見檔案頭注：它們不改變「現在能不能自行建立帳戶」這個答案，卻會多泄露准入計畫）。
 type entryCapabilitiesResponse struct {
-	SignUpOpen bool   `json:"sign_up_open"`
-	GuestOpen  bool   `json:"guest_open"`
-	RequestID  string `json:"request_id"`
+	SignUpOpen         bool   `json:"sign_up_open"`
+	InviteCodeRequired bool   `json:"invite_code_required"`
+	GuestOpen          bool   `json:"guest_open"`
+	RequestID          string `json:"request_id"`
 }
 
 // accountPolicyEndpoints 回傳帳戶建立策略端點的登記清單；未注入用例時為空清單。
@@ -180,9 +189,10 @@ func (s *Server) handleEntryCapabilities(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	writeJSON(w, http.StatusOK, entryCapabilitiesResponse{
-		SignUpOpen: entry.SignUpOpen,
-		GuestOpen:  entry.GuestOpen,
-		RequestID:  requestIDFromRequest(r),
+		SignUpOpen:         entry.SignUpOpen,
+		InviteCodeRequired: entry.InviteCodeRequired,
+		GuestOpen:          entry.GuestOpen,
+		RequestID:          requestIDFromRequest(r),
 	})
 }
 
@@ -205,7 +215,11 @@ func policyResponse(policy acctpolicy.Policy, requestID string) accountPolicyRes
 
 // entryBody 把領域的入口答案換成回應形狀（唯一的換算點，兩條路徑共用）。
 func entryBody(entry acctpolicy.EntryCapabilities) entryCapabilitiesBody {
-	return entryCapabilitiesBody{SignUpOpen: entry.SignUpOpen, GuestOpen: entry.GuestOpen}
+	return entryCapabilitiesBody{
+		SignUpOpen:         entry.SignUpOpen,
+		InviteCodeRequired: entry.InviteCodeRequired,
+		GuestOpen:          entry.GuestOpen,
+	}
 }
 
 // writeAccountPolicyFailure 把策略用例的錯誤對映為對外回應。

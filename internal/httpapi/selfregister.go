@@ -4,17 +4,18 @@
 // 這個檔案刻意只做協定層該做的四件事，一條領域規則都不寫在這裡：
 //  1. 來源（CSRF）判定——逐字複用 allowRequestOrigin 那條共用鏈（這是一條有副作用的
 //     匿名寫入，瀏覽器跨站請求必須先被來源擋下），與登入端點同一條防線；
-//  2. 請求本體的形態——白名單只有 login_name／display_name／password 三個欄位，
+//  2. 請求本體的形態——白名單只有 login_name／display_name／password／invite_code 四個欄位，
 //     未知欄位（role／account_type／status／subject_kind／must_change_password／
 //     activity_id 這類「自報身分或企圖覆蓋隱藏欄位」的嘗試）由 decodeJSON 的
 //     DisallowUnknownFields 當場拒殺（1004）：「建的是哪一類主體」由「打的哪個端點」
 //     決定，不是由請求內容決定，協定層因此沒有一個格子能把自註冊昇格成管理員；
+//     invite_code 只在策略為 invite 時被用例核銷，其他模式不看它；
 //  3. 來源位址的取得——只交 remoteHost（實際連線），轉發標頭一概不傳進用例：
 //     本專案沒有已批准的可信代理約定，把標頭值當來源等於把限流鍵交給請求方隨意填寫；
 //  4. 結論對映——把用例回傳的可判別錯誤一一映射到機器碼，其餘一律 500 且細節只進日誌。
 //     這組端點用到的碼：1004（改寫法，點名是哪個欄位）、2006（來源被限流、附 Retry-After）、
 //     2016（該自註冊模式對應的准入流程尚未上線）、2017（策略此刻不開放自註冊）、
-//     2019（那個名字是別人的）。
+//     2019（那個名字是別人的）、2023（invite 模式下這枚邀請碼換不出一筆帳戶，不泄露差的是哪一半）。
 //
 // 與 /auth/login 的分工：兩者都是匿名、都先過來源判定、都不預讀策略，但落地完全不同——
 // 登入是「拿已有憑據換一枚會話」，自註冊是「在策略放開時新建一筆普通帳戶」。
@@ -66,13 +67,17 @@ type SelfRegisterUseCase interface {
 		requestID, sourceIP string) (selfregister.ApplicationStatus, error)
 }
 
-// registerRequest 是自註冊請求的本體。只有這三個欄位可用：
+// registerRequest 是自註冊請求的本體。只有這四個欄位可用：
 // 「角色」「帳戶類型」「審批狀態」「首次改密」「活動標識」之類的宣稱會被未知欄位規則當場拒殺
 // （回 1004），因此「把自己註冊成管理員」在協定層就沒有一個可以填的格子。
+// invite_code 只在策略為 invite 時被用例讀取與核銷；其他模式下用例不看它，於是一支碼不會被
+// 順手吃掉。它是短暫停留的秘密：協定層不把它寫進日誌、回應或任何可傳播的位置（含 URL 查詢串——
+// 它只走 POST 本體），其有效性判定與哈希派生全在用例與 internal/invitecode 裡做，傳輸層不預判。
 type registerRequest struct {
 	LoginName   string `json:"login_name"`
 	DisplayName string `json:"display_name"`
 	Password    string `json:"password"`
+	InviteCode  string `json:"invite_code"`
 }
 
 // registeredAccountResponse 是自註冊成功的回應本體。
@@ -130,6 +135,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		LoginName:   in.LoginName,
 		DisplayName: in.DisplayName,
 		Password:    in.Password,
+		InviteCode:  in.InviteCode,
 	}, requestIDFromRequest(r), remoteHost(r))
 	if err != nil {
 		s.writeRegisterFailure(w, r, err)
@@ -159,8 +165,12 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 //     （與需要已認證主體的 2012 分開：那枚碼的合同寫明只在 Root 建號入口出現）；
 //   - 2017：策略此刻不開放自註冊。它不是權限問題、也不是寫法問題——要等的是 Root 把模式
 //     打開，換名字、重新整理都不是處置；
-//   - 2016：策略開著、但生效模式是本版本服務不動的那一種（現在只剩 invite）。
-//     與 2017 分開是因為處置不同：一個是「沒開這條路」，另一個是「開著但功能還沒上線」；
+//   - 2016：策略開著、但生效模式對應的准入流程尚未上線（今日 open／approval／invite 三條都已落地，
+//     這一格留給不認識的模式值或裝配缺陷，正常用戶路徑上不會遇到）；
+//   - 2023：策略開的是 invite，而這一枚邀請碼換不出一筆帳戶——缺碼、形状不合、查無、已撤銷、
+//     已過期、額度用滿、或併發下被另一筆註冊搶先耗盡，全部收斂成這一句（HTTP 403，准入被拒）。
+//     它刻意不區分「差哪一半」，也不降級成 1004（改寫法對一枚本就無效的碼換不來結果）或 2019
+//     （那是名字的問題，會把「碼有沒有效」與「名字有沒有被占」兩件事混成可互相探測的信號）；
 //   - 500：其餘（策略行缺失、派生故障這類非拒絕錯誤），細節只進日誌。
 func (s *Server) writeRegisterFailure(w http.ResponseWriter, r *http.Request, err error) {
 	var throttled *selfregister.ThrottledError
@@ -181,6 +191,11 @@ func (s *Server) writeRegisterFailure(w http.ResponseWriter, r *http.Request, er
 		writeError(w, r, CodeAccountCreationDisabled, http.StatusForbidden)
 	case errors.Is(err, selfregister.ErrRegisterModeUnsupported):
 		writeError(w, r, CodeAccountPolicyModeUnavailable, http.StatusBadRequest)
+	case errors.Is(err, selfregister.ErrInviteRejected):
+		// invite 模式下這枚碼換不出一筆帳戶：准入被拒（403），與 2017 同側（都是「伺服器不給你進」），
+		// 但各成一句：2017 是「這條路沒開」，2023 是「路開著、你帶的這一味准入憑證不對」。
+		// 不點名差的是缺碼／撤銷／過期／用滿／併發中的哪一半——細節只進日誌，不回傳。
+		writeError(w, r, CodeInviteRejected, http.StatusForbidden)
 	case errors.Is(err, selfregister.ErrInvalidPassword):
 		writeErrorDetails(w, r, CodeInvalidBody, http.StatusBadRequest,
 			map[string]any{"invalid_field": "password"})

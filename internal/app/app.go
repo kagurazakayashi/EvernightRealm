@@ -619,12 +619,20 @@ func run(ctx context.Context, releaseSignals func(), args []string, out io.Write
 		lg.Error("自註冊守衛組裝失敗", "err", err)
 		return err
 	}
+	// 邀請碼倉儲：先建這一份，供下面的自註冊用例在 invite 模式的交易內做原子核銷，
+	// 也供再下面的管理通路（簽發／名冊／撤銷）復用——兩處必須同源於同一個倉儲與同一份注入時鐘。
+	inviteStore := invitecode.NewStore(timeutil.System())
 	selfRegisterService, err := selfregister.New(selfregister.Deps{
 		DB:       db,
 		Accounts: accountsStore,
 		Policy:   policyStore,
-		Audits:   auditStore,
-		Guard:    registerGuard,
+		// 邀請碼倉儲在 invite 模式的交易內被呼叫一次 Redeem 做原子核銷（見 internal/selfregister）：
+		// 與下面簽發／名冊／撤銷那條管理通路共用同一個倉儲實例與同一份注入時鐘，
+		// 「一枚碼此刻算不算過期」在两处必须同源。本用例只取倉儲、不取管理用的 Service：
+		// 自註冊永不簽碼、永不撤碼、也不回顯任何一枚碼。
+		Invites: inviteStore,
+		Audits:  auditStore,
+		Guard:   registerGuard,
 		// 查本人申請狀態用的是登入那一份守衛（同一個實例、同一份記憶體）：
 		// 那條通路做的事與登入相同——拿一枚口令對一個名字。給它另立一條分账的預算，
 		// 等於讓同一個來源對同一個名字多拿一份猜口令的機會；與上面那條刻意相反，
@@ -659,13 +667,14 @@ func run(ctx context.Context, releaseSignals func(), args []string, out io.Write
 		lg.Error("審批註冊申請用例組裝失敗", "err", err)
 		return err
 	}
-	// 伺服器級註冊邀請碼管理用例（簽發＋名冊＋撤銷）。倉儲與用例共用同一份注入時鐘：
-	// 「一枚碼簽發於何時」與「名冊讀到它此刻算不算過期」必須同源，否則一張名冊裡的到期判定會漂移。
+	// 伺服器級註冊邀請碼管理用例（簽發＋名冊＋撤銷）。倉儲實例 inviteStore 已在上面的自註冊
+	// 用例之前建立（invite 模式的核銷要復用它），這裡只把管理通路包成 Service 並沿用同一個實例：
+	// 「一枚碼簽發於何時」與「名冊讀到它此刻算不算過期」與「核銷判定這一刻能不能佔用額度」
+	// 必須同源於同一份注入時鐘與同一個倉儲，否則三處各讀各的會把到期判定讀漂移。
 	// 審計倉儲沿用上面同一批實例（「Root 域留痕只有一個出口」在裝配層也成立）。
 	// 刻意不注入策略、會話與憑據三個依賴（見 internal/invitecode 的套件頭注）：簽發一枚准入憑證
 	// 不等於把自註冊模式切成 invite（那是 Root 在策略端點上單獨做的另一條決定，本步不借道開放）、
 	// 邀請碼換不出任何會話、也不碰任何一枚口令。少了這個用例，invite 就仍是策略上一個谁也签不出码的空名。
-	inviteStore := invitecode.NewStore(timeutil.System())
 	inviteCodeService, err := invitecode.New(invitecode.Deps{
 		DB:     db,
 		Store:  inviteStore,
