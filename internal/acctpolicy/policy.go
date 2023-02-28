@@ -208,6 +208,10 @@ type Capabilities struct {
 	// 只在前者就翻真會造出一個「能簽碼、切得模式、卻核銷不了」的假可用入口。
 	SelfRegisterInvite bool
 	// Guest 是「訪客（臨時）帳戶建立」的通路是否存在。
+	//
+	// 它與 SelfRegisterApproval／SelfRegisterInvite 同為「端點在不在」之外的事實：
+	// 訪客通路打的是一條與自註冊不同的端點（POST /auth/guest），而且建出的主體形態不同
+	// （無憑據、零授予）。它獨立登記，策略開關才有一個可以翻真的地方。
 	Guest bool
 }
 
@@ -219,19 +223,22 @@ type Capabilities struct {
 // 匿名自註冊的用例與端點已落地（見 internal/selfregister），因此 Root 把模式設成
 // open 時這個入口才真的能按下去成功。SelfRegisterApproval 已翻真——
 // approval 模式下提交會落成一個待審批帳戶、申請人也能查到本人的申請結果。
-// SelfRegisterInvite 本步翻真——邀請碼的簽發／撤銷（internal/invitecode）與「拿一枚有效碼
+// SelfRegisterInvite 已翻真——邀請碼的簽發／撤銷（internal/invitecode）與「拿一枚有效碼
 // 在自己的交易裡原子核銷、換出一筆可立即登入的普通帳戶」（internal/selfregister 的 invite 分支）
 // 都已就緒，Root 把模式設成 invite 得到的事實就是「持有效碼者可自行註冊並立即登入」。
-// Guest 仍然為 false，而且這不是妥協：訪客帳戶通路還沒實作，先把它寫成 true，
-// 界面就會出現一個按下去必然失敗的入口，或讓一個不存在端點被當成可用——
-// 那正是「未開發的模組冒充可用」。反過來，策略值可以由 Root 先設定成放開：
-// 那份意圖是真的，只是還沒有執行它的東西，下面的合成會把兩者如實算成「仍不放行」。
+// Guest 本步翻真——訪客進入的用例與端點已落地（見 internal/guestacct）：
+// 「策略亮著時，門外的人主動按就能換得一個無憑據、零授予的臨時身分與一枚照常受撤銷與
+// 到期約束的會話」這一句現在是真的。翻真之前它長年為 false，那不是妥協而是必須：
+// 一個還沒實作的入口在界面上看起來能按，比開關關著更壞。
+// 反過來，策略值可以由 Root 先設定成放開：那份意圖是真的，而兩側的合成
+// （AllowsGuest 與 EntryOf）現在如實算出「亮著就放行、關著就不放行」。
 func capabilities() Capabilities {
 	return Capabilities{
 		AdminCreateStandard:  true,
 		SelfRegister:         true,
 		SelfRegisterApproval: true,
 		SelfRegisterInvite:   true,
+		Guest:                true,
 	}
 }
 
@@ -266,6 +273,11 @@ func (p Policy) AllowsAdminCreateStandard() bool {
 }
 
 // AllowsGuest 回報「此刻可否建立訪客（臨時）帳戶」：策略開關與通路存在與否。
+//
+// 進入通路（internal/guestacct）在交易內現讀策略後問的就是這一句。
+// 通路已落地，因此本版本起這個答案等於策略開關本身——但合成仍然留在這裡做，
+// 不讓呼叫端自己查表：同一個合成規則有兩處實作時，總有一處會被忘了改。
+// 與 AllowsSelfRegister 不同的是它不帶模式：訪客只有一個開關，沒有「哪一種訪客」的計畫。
 func (p Policy) AllowsGuest() bool {
 	return p.GuestEnabled && capabilities().Guest
 }
@@ -287,9 +299,9 @@ func (p Policy) AllowsSelfRegister() (bool, Mode) {
 	return true, p.SelfRegisterMode
 }
 
-// EntryCapabilities 是登入前界面需要的最小對外事實：兩個入口開還是關。
+// EntryCapabilities 是登入前界面需要的最小對外事實：幾個入口開還是關。
 //
-// 欄位就只有這兩個，是刻意的：普通帳戶由誰建立對還站在門外的人毫無意義；
+// 欄位只有這幾個，是刻意的：普通帳戶由誰建立對還站在門外的人毫無意義；
 // 模式名字（closed 還是 approval 還是 invite）也不出去——它不改變「現在能不能自行提交」
 // 這個答案，卻屬「這臺伺服器打算怎麼做准入」的內部計畫。
 // 因此這個入口也不回答「提交之後立刻能用還是要等審批」：那一句由提交成功的回應裡
@@ -308,6 +320,10 @@ type EntryCapabilities struct {
 	// 前端就算拿到舊的 false 也繞不過一道「invite 模式缺碼即拒」的寫入檢查。
 	InviteCodeRequired bool
 	// GuestOpen 是訪客（臨時帳戶）入口對外是否開放。
+	//
+	// 它與 SignUpOpen 同一個性質：只驱动界面顯示，不是准入。真正的判定仍在
+	// internal/guestacct 的交易內現讀策略重做，所以界面拿到舊值也繞不過
+	// 「開關已關即 2017」那道寫入檢查。通路已落地，本版本起這個布林等於策略開關本身。
 	GuestOpen bool
 }
 
@@ -319,6 +335,8 @@ type EntryCapabilities struct {
 // 也讓尚未實作的入口不可能被一個策略開關變成可點擊的假象。
 // approval 回 true 且 InviteCodeRequired 為 false——提交會落成一個待審批帳戶，而那一句
 // 由提交回應裡的 status 各自說；invite 回 true 且 InviteCodeRequired 為 true——這一趟要帶碼。
+// GuestOpen 走同一條合成的另一支（AllowsGuest）：訪客只有一個開關、沒有模式，
+// 通路已落地，因此它現在如實跟著 guest_enabled 走。
 func (p Policy) EntryOf() EntryCapabilities {
 	allowed, mode := p.AllowsSelfRegister()
 	served := allowed && ModeServed(mode)

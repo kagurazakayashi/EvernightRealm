@@ -118,6 +118,14 @@ type rootLoginRequest struct {
 type loginResponse struct {
 	SubjectKind string `json:"subject_kind"`
 	AccountID   string `json:"account_id,omitempty"`
+	// AccountType 是帳戶主體的類型（standard|guest）；Root 與匿名主體欄位缺席。
+	//
+	// 它是只增不刪的相容演進，存在的意義與 Roles 同族——「客戶端不必猜自己是哪一類人」：
+	// subject_kind 只分 account／root（會話形態），而「這一趟是不是臨時受限身分」
+	// 由這一欄給出，界面據此決定摘要卡講「訪客（臨時身分）」還是講「普通帳戶」。
+	// 它不是權限的依據（每一次判定的真相仍在 internal/identity.Authorize），
+	// 也不受會話簽發時的快照束縛：它是解析階段的現讀帳戶事實（見 sessionResponse 同名欄位）。
+	AccountType string `json:"account_type,omitempty"`
 	DeviceID    string `json:"device_id"`
 	ExpiresAt   string `json:"expires_at"`
 	// MustChangePassword 是帳戶旗標的現讀值（只增不刪的合同演進）：為 true 時
@@ -142,8 +150,12 @@ type loginResponse struct {
 // 是第幾代」與伺服器的權威事實對上一次，於是一次丟失的輪換回應可以被查出來，
 // 而不是讓客戶端只能靠猜。
 type sessionResponse struct {
-	SubjectKind  string `json:"subject_kind"`
-	AccountID    string `json:"account_id,omitempty"`
+	SubjectKind string `json:"subject_kind"`
+	AccountID   string `json:"account_id,omitempty"`
+	// AccountType 同 loginResponse：帳戶主體的類型（standard|guest），非帳戶主體缺席。
+	// 這一端點是「刷新與重開之後界面還認不認得自己是訪客」的唯一依據，
+	// 少了它，恢復過來的會話會被唸成普通帳戶——那是一句不準確的話。
+	AccountType  string `json:"account_type,omitempty"`
 	DeviceID     string `json:"device_id"`
 	RotationSeq  int64  `json:"rotation_seq"`
 	CreatedAt    string `json:"created_at"`
@@ -250,6 +262,7 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 	}
 	body := sessionResponse{
 		SubjectKind:  subjectKindOf(resolved.Principal),
+		AccountType:  accountTypeOf(resolved.Principal),
 		DeviceID:     resolved.Session.DeviceID.String(),
 		RotationSeq:  resolved.Session.RotationSeq,
 		CreatedAt:    timeutil.FormatUTC(resolved.Session.CreatedAt),
@@ -783,6 +796,7 @@ func (s *Server) writeLoginFailure(w http.ResponseWriter, r *http.Request, err e
 func (s *Server) loginResponseFor(outcome auth.Outcome) loginResponse {
 	body := loginResponse{
 		SubjectKind:        subjectKindOf(outcome.Principal),
+		AccountType:        accountTypeOf(outcome.Principal),
 		DeviceID:           outcome.Session.DeviceID.String(),
 		ExpiresAt:          timeutil.FormatUTC(outcome.Session.ExpiresAt),
 		MustChangePassword: outcome.MustChangePassword,
@@ -823,6 +837,18 @@ func subjectKindOf(p identity.Principal) string {
 	default:
 		return string(identity.KindAnonymous)
 	}
+}
+
+// accountTypeOf 把帳戶主體的類型換成對外表示；非帳戶主體（Root、系統、匿名）回空字串，
+// 欄位因此缺席而不是拿空值冒充一類帳戶。
+//
+// 值來自構造主體時凍結的帳戶事實（identity.Principal.AccountType，來源是 accounts 表現讀那一行），
+// 不是請求裡任何可自報的欄位：呼叫端改不動它，正如他改不動 roles。
+func accountTypeOf(p identity.Principal) string {
+	if p.Kind() != identity.KindAccount {
+		return ""
+	}
+	return p.AccountType().String()
 }
 
 // noStore 禁止認證回應被快取：登入與當前會話的內容都是「此刻的主體狀態」，

@@ -82,7 +82,12 @@ func (s *Server) apiRoutes() []apiRoute {
 	// 帶入 API 首段的 /root 之下，不新增首段、只多掛兩條路徑。與審批名冊刻意分開注入——
 	// 「管理員替別人做准入決定」與「Root 管理伺服器級准入憑證」是兩套授權邊界（NeedServerAdmin
 	// 對 NeedRoot），不該共用一個開關。
-	return append(routes, s.inviteCodeEndpoints()...)
+	routes = append(routes, s.inviteCodeEndpoints()...)
+	// 訪客進入（POST /auth/guest）由自己那個依賴決定有無：它落在已被登入端點帶入 API 首段的
+	// /auth 之下，不新增首段、只多掛一條路徑。與自註冊刻意分開注入——兩條都讓門外的人自行取得
+	// 主體，但建出的主體形態（有憑據的普通帳戶／無憑據的訪客）與准入依據（自註冊模式／訪客開關）
+	// 都不同，少一邊不該讓另一邊看起來也壞了。
+	return append(routes, s.guestEndpoints()...)
 }
 
 // apiFirstSegments 從登記清單導出各端點的路徑首段集合。

@@ -96,13 +96,14 @@ func TestSwitchesAreIndependent(t *testing.T) {
 
 // TestEntryOfKeepsEachSideGated 把「對外答案 = 策略 ∧ 通路 ∧ 可服務的模式」釘死。
 //
-// 訪客通路仍未實作：無論策略怎麼設，GuestOpen 恆為關（把開關當能力會讓自己沒有的入口冒充可用）。
+// 訪客通路已落地（見 internal/guestacct）：GuestOpen 現在等於策略開關本身，
+// 而合成仍走 AllowsGuest——把開關當能力的那條紀律沒被取消，只是這一格的能力位翻真了。
 // 自註冊那一側現在問的是 ModeServed（本版本服務得動 open 與 approval 兩種）：
 //   - open：提交即成一個可登入的帳戶，入口自然放；
 //   - approval：提交收成一筆待審批申請，而那個「等」字有資料層與本人查狀態的通路接得住，
 //     所以門也放——注意它放的是「這扇門推得開」，不是「進去就有帳號用」，
 //     那句由提交成功的回應裡 status 各自說（匿名入口不透露模式名字，用戶批准於 R2-006／R2-012）；
-//   - invite：邀請碼的簽發＋核銷已落地（本步），門也放，且 InviteCodeRequired 為 true——
+//   - invite：邀請碼的簽發＋核銷已落地，門也放，且 InviteCodeRequired 為 true——
 //     這一趟要帶一枚有效碼。它只講「要不要帶碼」這一件可執行的小事，仍不回模式名字本身。
 //
 // InviteCodeRequired 只在生效模式確為 invite 時為 true，open／approval／closed 一律 false，
@@ -132,12 +133,20 @@ func TestEntryOfKeepsEachSideGated(t *testing.T) {
 		if entry.InviteCodeRequired != tc.wantInviteCodeRequired {
 			t.Errorf("%s：InviteCodeRequired 應為 %v，實際 %v", tc.name, tc.wantInviteCodeRequired, entry.InviteCodeRequired)
 		}
-		// 訪客通路未實作：策略開關再怎麼放，對外都是關。
-		if entry.GuestOpen {
-			t.Errorf("%s：GuestOpen 在通路未落地時必須恆為關，實際 true", tc.name)
+		// 訪客通路已落地：策略開關為真時對外即放，而且它與自註冊的模式無關
+		// （五個模式取值下都該是開——訪客只有一個開關，不借用模式那一格）。
+		if !entry.GuestOpen {
+			t.Errorf("%s：訪客開關為真且通路已落地，GuestOpen 應為真", tc.name)
 		}
-		if p.AllowsGuest() {
-			t.Errorf("%s：訪客通路未實作，Allows 應為假", tc.name)
+		if !p.AllowsGuest() {
+			t.Errorf("%s：訪客通路已落地而開關為真，Allows 應為真", tc.name)
+		}
+		// 關掉時必須立刻收回：這一格是「策略 ∧ 通路」裡策略那一側的證據，
+		// 也是 Root 唯一能让訪客入口消失的動作。
+		off := p
+		off.GuestEnabled = false
+		if off.EntryOf().GuestOpen || off.AllowsGuest() {
+			t.Errorf("%s：訪客開關關掉後對外與准入都應立即收回", tc.name)
 		}
 		// 建號通路已落地：Allows 恰等於策略開關（對門外永不揭露，與 EntryOf 無關）。
 		if !p.AllowsAdminCreateStandard() {
@@ -182,7 +191,7 @@ func TestAllowsSelfRegisterKeepsMode(t *testing.T) {
 // 而那正是「做了功能但沒上線」最難查的形態；這條斷言會把他導向那個唯一的登記點。
 // 管理員建號（internal/stdacct）、匿名自註冊（internal/selfregister）與邀請碼准入
 // （簽發／撤銷見 internal/invitecode、核銷換號見 internal/selfregister 的 invite 分支）都已落地而翻真，
-// 訪客通路仍未實作，該位必須是假。
+// 訪客通路（internal/guestacct）也已落地，四位全真。
 func TestCapabilitiesReflectThisBuild(t *testing.T) {
 	caps := capabilities()
 	if !caps.AdminCreateStandard {
@@ -197,7 +206,7 @@ func TestCapabilitiesReflectThisBuild(t *testing.T) {
 	if !caps.SelfRegisterInvite {
 		t.Error("邀請碼准入的簽發／撤銷與核銷換號已落地，能力登記該位必須為真")
 	}
-	if caps.Guest {
-		t.Errorf("訪客通路仍未實作，能力登記該位應為假，實際 %+v", caps)
+	if !caps.Guest {
+		t.Errorf("訪客進入的用例與端點已落地，能力登記該位必須為真，實際 %+v", caps)
 	}
 }

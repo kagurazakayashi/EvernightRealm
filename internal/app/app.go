@@ -26,6 +26,7 @@ import (
 	"github.com/kagurazakayashi/EvernightRealm/internal/database/migrate"
 	"github.com/kagurazakayashi/EvernightRealm/internal/disk"
 	"github.com/kagurazakayashi/EvernightRealm/internal/grant"
+	"github.com/kagurazakayashi/EvernightRealm/internal/guestacct"
 	"github.com/kagurazakayashi/EvernightRealm/internal/httpapi"
 	"github.com/kagurazakayashi/EvernightRealm/internal/invitecode"
 	"github.com/kagurazakayashi/EvernightRealm/internal/runlog"
@@ -686,6 +687,39 @@ func run(ctx context.Context, releaseSignals func(), args []string, out io.Write
 		lg.Error("伺服器級註冊邀請碼用例組裝失敗", "err", err)
 		return err
 	}
+	// 訪客進入用例（匿名的人主動換得一個臨時受限身分與一枚照常受撤銷與到期約束的會話）。
+	// 頻率守衛是第三個 auth.LoginGuard 實例（與登入、自註冊各自一份記憶體），閾值沿用
+	// security.register_guard：三個匿名入口各有各的預算，但同一套「匿名寫入要多緊」
+	// 由同一份組態決定，部署者不必為第三條路再記一組數字。
+	// 這條通路的計量單位是「嘗試」而不是「失敗」（見 internal/guestacct 的 guardAttempt），
+	// 因為它沒有自註冊那側「登入名唯一」的天然自限——每一次成功都實實在在多出一筆帳戶、
+	// 一枚會話、一筆審計，只有把成功也算進帳，刷訪客才燒不出無上限的寫入。
+	// 帳戶、策略、會話與審計倉儲沿用上面同一批實例：會話只有一個簽發點、Root 域留痕只有
+	// 一個出口；少了它，guest_enabled 就仍是策略上一個寫得進卻沒有一條通路去執行的開關。
+	guestGuard, err := auth.NewLoginGuard(auth.GuardConfig{
+		FailLimit:       cfg.Security.RegisterGuard.FailLimit,
+		Window:          time.Duration(cfg.Security.RegisterGuard.WindowMinutes) * time.Minute,
+		Cooldown:        time.Duration(cfg.Security.RegisterGuard.CooldownMinutes) * time.Minute,
+		SourceFailLimit: cfg.Security.RegisterGuard.SourceFailLimit,
+		MaxEntries:      cfg.Security.RegisterGuard.MaxEntries,
+	}, timeutil.System())
+	if err != nil {
+		lg.Error("訪客入口守衛組裝失敗", "err", err)
+		return err
+	}
+	guestService, err := guestacct.New(guestacct.Deps{
+		DB:       db,
+		Accounts: accountsStore,
+		Policy:   policyStore,
+		Sessions: sessionStore,
+		Audits:   auditStore,
+		Guard:    guestGuard,
+		Log:      lg.Logger,
+	})
+	if err != nil {
+		lg.Error("訪客進入用例組裝失敗", "err", err)
+		return err
+	}
 	srv := httpapi.New(&cfg, Version, httpapi.Deps{
 		Ready:    readinessCheck(db, space),
 		Clock:    timeutil.System(),
@@ -709,6 +743,9 @@ func run(ctx context.Context, releaseSignals func(), args []string, out io.Write
 		// 伺服器級註冊邀請碼管理：授權邊界（NeedRoot）、明文與驗證材料的分工與那一躍撤銷的落庫
 		// 都由 internal/invitecode 在自己的交易裡做，傳輸層只把受信主體、一個簽發輸入或一枚標識遞進去。
 		InviteCodes: inviteCodeService,
+		// 訪客進入：准入（策略現讀）、嘗試計量、登入名產生、主體構造與會話簽發
+		// 都由 internal/guestacct 在自己的交易裡做，傳輸層只把暱稱與實際連線來源遞進去。
+		Guest: guestService,
 		// Root 初始化狀態的只讀來源：只查組態檔本身，不開任何寫入通路
 		// （初始化仍然只有 evernight-server init-root 這一條路）。
 		InitStatus: initStatusSource(cfg),

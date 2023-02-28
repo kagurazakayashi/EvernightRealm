@@ -295,7 +295,8 @@ func TestRepeatedSaveIsAnotherConfirmation(t *testing.T) {
 //   - Root 能把模式設成 invite，同交易追加一筆審計（前後值都是被批准的那個名字）；
 //   - 讀回的策略 AllowsSelfRegister 帶出 invite，EntryOf 的 SignUpOpen 為真、InviteCodeRequired 也為真——
 //     門外的人不但看得到那扇門，還被告知「這一趟要帶碼」，而模式名字本身仍不出口；
-//   - 同一份策略下 AllowsGuest 照舊為假（訪客通路與本步無關，不順手翻真）。
+//   - 同一份策略下 AllowsGuest 為假，因為這次交的訪客格是 false（策略那一側關著；
+//     通路本身已落地，兩側各自算數）。
 //
 // 「拿一枚有效碼換出帳戶」的真核銷與併發語意由 internal/selfregister 的測試承接，這條只管策略與合成。
 func TestInviteModeIsWritable(t *testing.T) {
@@ -331,8 +332,10 @@ func TestInviteModeIsWritable(t *testing.T) {
 	if !entry.InviteCodeRequired {
 		t.Error("invite 模式下註冊需要一枚有效碼，InviteCodeRequired 應為真")
 	}
+	// 這次寫入交的訪客格是 false，所以 GuestOpen 必須是關——而且它是被策略那一側關掉的
+	// （通路本身已落地，見 TestCapabilitiesReflectThisBuild）：兩側合成没有因為多一條通路就鬆掉。
 	if entry.GuestOpen {
-		t.Error("訪客通路未落地，GuestOpen 必須仍為關")
+		t.Error("訪客開關這次交的是 false，GuestOpen 必須仍為關")
 	}
 	// InviteCodeRequired 只由生效模式確為 invite 點亮：open 與 approval 都推得開、都不要碼。
 	openEntry := switchModeEntry(t, e, "open")
@@ -365,7 +368,8 @@ func switchModeEntry(t *testing.T, e *env, mode string) EntryCapabilities {
 //   - Root 能把模式設成 approval，同交易追加一筆審計（前後值都是被批准的那個名字）；
 //   - 讀回的策略 AllowsSelfRegister 帶出 approval，而 EntryOf 的 SignUpOpen 為真——
 //     門外的人看得到那扇門，因為門後面確實有一條收申請的通路；
-//   - 同一份策略下 AllowsGuest 照舊為假（訪客通路與本步無關，不順手翻真）。
+//   - 同一份策略下 AllowsGuest 為假，因為這次交的訪客格是 false（策略那一側關著；
+//     通路本身已落地，兩側各自算數）。
 func TestApprovalModeIsWritable(t *testing.T) {
 	e := newEnv(t)
 	beforeMode := ""
@@ -403,8 +407,9 @@ func TestApprovalModeIsWritable(t *testing.T) {
 	if !entry.SignUpOpen {
 		t.Error("approval 已落地，SignUpOpen 應隨之為真（那扇門推得開）")
 	}
+	// 同上：訪客那一格這次交的是 false，關的是策略側，不是通路側。
 	if entry.GuestOpen {
-		t.Error("訪客通路未落地，GuestOpen 必須仍為關")
+		t.Error("訪客開關這次交的是 false，GuestOpen 必須仍為關")
 	}
 	if !ModeServed(ModeApproval) {
 		t.Error("通路登記未翻真時 ModeServed 不該回報已落地")
@@ -515,8 +520,7 @@ func TestEntryNeedsNoPrincipalButNeverGuesses(t *testing.T) {
 		t.Errorf("出廠狀態（closed）的答案應全為關，實際 %+v", entry)
 	}
 
-	// Root 把自註冊設成 open：通路已落地、模式可服務，SignUpOpen 才翻成 true；
-	// 訪客通路仍未實作，GuestEnabled 開關再放，GuestOpen 也必須是關（策略值不等於能力）。
+	// Root 把自註冊設成 open、訪客開關設成放：兩側都齊，兩個入口才都翻成 true。
 	if _, err := e.service.UpdatePolicy(ctx, root(t), inputOf(true, "open", true), "req"); err != nil {
 		t.Fatalf("變更失敗：%v", err)
 	}
@@ -527,8 +531,24 @@ func TestEntryNeedsNoPrincipalButNeverGuesses(t *testing.T) {
 	if !entry.SignUpOpen {
 		t.Errorf("通路已落地且模式=open 時 SignUpOpen 應為 true，實際 %+v", entry)
 	}
+	if !entry.GuestOpen {
+		t.Errorf("通路已落地且訪客開關為真時 GuestOpen 應為 true，實際 %+v", entry)
+	}
+
+	// 三個開關彼此獨立：只關掉訪客，自註冊那側一個字都不動。這一格釘的是
+	// 「策略值不等於能力」翻面後的形態——通路在，但部署者不給，對外就得收回。
+	if _, err := e.service.UpdatePolicy(ctx, root(t), inputOf(true, "open", false), "req"); err != nil {
+		t.Fatalf("關掉訪客失敗：%v", err)
+	}
+	entry, err = e.service.Entry(ctx)
+	if err != nil {
+		t.Fatalf("關掉訪客後現讀對外答案應成功：%v", err)
+	}
 	if entry.GuestOpen {
-		t.Errorf("訪客通路未實作，GuestOpen 應仍為關，實際 %+v", entry)
+		t.Errorf("訪客開關關掉後 GuestOpen 必須收回，實際 %+v", entry)
+	}
+	if !entry.SignUpOpen {
+		t.Errorf("關訪客不該順手动自註冊那一側，SignUpOpen 應仍為 true，實際 %+v", entry)
 	}
 
 	// 單例行被外部工具拿掉：必須回報失敗。降級成一組布林（不管全開或全關）

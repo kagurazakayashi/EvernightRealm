@@ -554,9 +554,10 @@ func TestEntryCapabilitiesAreMinimalAndClosed(t *testing.T) {
 		t.Errorf("出廠默認為 closed 模式，對外入口答案應全為關，實際 %v", raw)
 	}
 
-	// Root 把模式改到 open 後：自註冊通路已落地，sign_up_open 應隨策略放開，invite_code_required 仍關；
-	// 訪客通路尚未落地，guest_open 即使 guest_enabled=true 也必須仍是關。
-	// 這一組「一開一關」正是「能力登記」真的在逐條把關、而不是跟著策略值一起翻的證據。
+	// Root 把模式改到 open、訪客開關放開後：三條通路的登記位如今都已翻真，
+	// sign_up_open 與 guest_open 都隨策略放開，而 invite_code_required 仍關（open 模式不要碼）。
+	// 「策略放開的两格開、策略沒要求的那一格關」同時釘住兩件事：合成讀的是策略現值，
+	// 而 guest_open 不再是那個「開關亮著但沒有通路」的假入口（訪客通路已落地，見 internal/guestacct）。
 	cookie := env.rootCookie(t)
 	if put := env.putPolicy(t, policyBody(true, "open", true), cookie, env.ts.URL, nil); put.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(put.Body)
@@ -570,14 +571,23 @@ func TestEntryCapabilitiesAreMinimalAndClosed(t *testing.T) {
 	if afterBody["invite_code_required"] != false {
 		t.Errorf("open 模式不要邀請碼，invite_code_required 應仍為關，實際 %v", afterBody)
 	}
-	if afterBody["guest_open"] != false {
-		t.Errorf("訪客通路未落地，對外不得放開訪客入口，實際 %v", afterBody)
+	if afterBody["guest_open"] != true {
+		t.Errorf("訪客通路已落地且策略已放開，對外應放開訪客入口，實際 %v", afterBody)
 	}
 
 	// Root 端的回應裡看得到那份意圖（策略值與對外答案要能同時被核對）。
 	policy := decodeJSONBody(t, env.getPolicy(t, cookie))
 	if policy["self_register_mode"] != "open" || policy["guest_enabled"] != true {
 		t.Errorf("Root 現讀應看到剛保存的值，實際 %v", policy)
+	}
+	if entry := policy["entry"]; entry != nil {
+		body, ok := entry.(map[string]any)
+		if !ok {
+			t.Fatalf("Root 現讀的 entry 應是物件，實際 %T", entry)
+		}
+		if body["guest_open"] != true || body["sign_up_open"] != true {
+			t.Errorf("Root 那張卡的入口答案應與匿名端同值，實際 %v", body)
+		}
 	}
 
 	// 兩張回應都不該出現的東西：憑據材料、帳戶資料、內部閾值、策略的其餘形態。
@@ -591,9 +601,10 @@ func TestEntryCapabilitiesAreMinimalAndClosed(t *testing.T) {
 		}
 	}
 
-	// 改成 invite：門開且要帶碼——invite_code_required 是唯一因模式而點亮的第三顆布林，
+	// 改成 invite、同時把訪客開關關掉：門開且要帶碼——invite_code_required 是唯一因模式而點亮的第三顆布林，
 	// 它讓共享的匿名註冊表單知道要顯示邀請碼欄位，而模式名字本身仍舊不出口。
-	// 放在最後，是為了不打亂上面「Root 現讀應看到 open」那一記斷言的現場。
+	// 訪客那一格在這裡關掉，順帶釘住「開關真的是准入」：guest_open 當場收回，而自註冊那側一個字都不動
+	// （放在最後，是為了不打亂上面「Root 現讀應看到 open」那一記斷言的現場）。
 	if put := env.putPolicy(t, policyBody(true, "invite", false), cookie, env.ts.URL, nil); put.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(put.Body)
 		t.Fatalf("Root 切到 invite 應成功：%d %s", put.StatusCode, body)
@@ -601,6 +612,9 @@ func TestEntryCapabilitiesAreMinimalAndClosed(t *testing.T) {
 	inviteCaps := decodeJSONBody(t, getAuth(t, env.ts, "/auth/capabilities", "", "", ""))
 	if inviteCaps["sign_up_open"] != true || inviteCaps["invite_code_required"] != true {
 		t.Errorf("invite 模式對外應 sign_up_open 真且 invite_code_required 真，實際 %v", inviteCaps)
+	}
+	if inviteCaps["guest_open"] != false {
+		t.Errorf("訪客開關關掉後對外必須收回訪客入口，實際 %v", inviteCaps)
 	}
 	if len(inviteCaps) != 4 {
 		t.Errorf("invite 模式的對外答案仍只該有四個欄位，實際 %v", inviteCaps)

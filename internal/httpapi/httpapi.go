@@ -96,6 +96,14 @@ type Deps struct {
 	// 注意簽發一枚碼不等於把自注冊模式切成 invite：那條通路仍未落地（見 internal/acctpolicy），
 	// 本執行檔沒有任何入口能把一枚碼兌換成帳戶。
 	InviteCodes InviteCodeUseCase
+	// Guest 為「訪客以臨時受限身分進入」用例的入口（internal/app 注入 *guestacct.Service）。
+	// 為 nil 表示本執行檔不開放這條通路：路徑、回退清單與錯誤面都和未掛載時逐字相同。
+	// 它與 SelfRegister 是兩個依賴而不是同一個：兩者都讓門外的人自行換得一個主體，
+	// 但建的形態不同（普通帳戶帶本人自選的口令、之後用口令登入；訪客無憑據、
+	// 存在只綁在这一枚會話上），准入依據也不同（自註冊模式對訪客開關），
+	// 而「隨後怎麼拿到會話」正好相反——自註冊刻意不簽發、訪客必須在此刻簽發。
+	// 少注入誰就少那一組端點，不會留下一條半能用的通路。
+	Guest GuestUseCase
 }
 
 // Server 為 HTTP 服務層。
@@ -145,6 +153,9 @@ type Server struct {
 	// inviteCodeEndpoints 回空清單，/root/invite-codes 這條路徑根本不掛（/root 首段仍因 Root
 	// 開設管理端點屬 API，回退行為不受影響）。
 	inviteCodes InviteCodeUseCase
+	// guest 為「訪客以臨時受限身分進入」用例入口（可為 nil）；nil 時 guestEndpoints 回空清單，
+	// /auth/guest 這條路徑根本不掛（/auth 首段仍因登入端點屬 API，回退行為不受影響）。
+	guest GuestUseCase
 }
 
 // New 以組態、版本字串與外部依賴建立 HTTP 服務層。
@@ -188,6 +199,9 @@ func New(cfg *config.Config, version string, deps Deps) *Server {
 		// 邀請碼管理用例為 nil 時一個端點都不掛（見 inviteCodeEndpoints）：
 		// 「裝配了什麼就服務什麼」在這一層沒有分支。
 		inviteCodes: deps.InviteCodes,
+		// 訪客用例為 nil 時一個端點都不掛（見 guestEndpoints）：
+		// 「裝配了什麼就服務什麼」在這一層沒有分支。
+		guest: deps.Guest,
 	}
 	s.httpSrv = &http.Server{
 		Addr:    cfg.Server.Listen,
