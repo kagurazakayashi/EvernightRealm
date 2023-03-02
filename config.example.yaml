@@ -104,6 +104,13 @@ security:
   # 沒有任何特殊 Cookie），同時落下 Root 域審計 account.guest_enter。訪客不帶任何伺服器級授予，
   # 管理端與 Root 端對他一律回 2011；他也沒有「凭暱稱找回」那條路——會話一旦到期、登出或換裝置，
   # 這一趟臨時身分就結束，要處置由管理員在普通帳戶目錄（本就把訪客列進去）核實後另行決定。
+  # 其中一種處置現在存在了：PUT /admin/accounts/{account_id}/upgrade 是一條管理員專屬的
+  # 「就地升級」通路（NeedServerAdmin；訪客本人敲它只會拿到 2011，不能自我提升）。本體白名單只有
+  # login_name 與 password 兩欄，升級給他一檔正式登入名與一次性憑據、must_change_password 落 1，
+  # 且帳戶標識、建立時刻、顯示名與既有審計参照全部原樣保留（審計只追加 account.guest_upgrade，
+  # 不改寫歷史）。他名下舊訪戶會話與升級在同一筆交易裡全部撤銷，本人必須用新憑據重新登入並先改密；
+  # 「綁定到另一個既有正式帳戶」是另一條尚未存在的通路。三個建立開關不約束這條通路：
+  # 開關管「准不准多出一筆」，而升級動的是一筆已存在帳戶的形態。
   # 誰的申請被批准或拒絕，也不在這個檔案裡，而且不需要任何組態欄位：那是
   # GET /admin/registrations 與 PUT /admin/registrations/{account_id}/decision 兩條路徑，
   # 由 NeedServerAdmin 判定、目标範圍由 internal/acctreview 現讀帳戶現值。審批從不回讀本策略：

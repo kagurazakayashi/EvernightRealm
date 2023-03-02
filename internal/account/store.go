@@ -226,6 +226,65 @@ func (s *Store) SetPassword(ctx context.Context, q database.Querier, id idgen.ID
 	return n > 0, nil
 }
 
+// UpgradeGuestToStandard 以一條 UPDATE 把一個可用狀態的訪戶原地升級成普通帳戶：
+// login_name 與它的正規化鍵換成正式登入名、account_type 落為 standard、
+// password_hash 換成呼叫端派生好的雜湊、must_change_password 強制寫成 1。
+//
+// 這裡動的是「同一個穩定身份的分類與憑據」，不是新建一筆再刪舊一筆：
+// SET 清單裡刻意沒有 id、created_at、display_name、status、last_login_at 與任何
+// 刪除／審核時刻——「升級不改穩定標識、不改顯示名、不順手啟用或停用、
+// 不重寫歷史時刻」因此成立在 SQL 語句的形狀上而不是呼叫端自律上。
+// 舊行與舊標識原樣保留，既有審計與其他實際存在的參照繼續指回同一個人。
+//
+// 五欄必須同一條 UPDATE（與 MarkDeleted 三欄同形、與 SetStatus 兩欄同形的理由一致）：
+// 「分類轉正、憑據落地、首次改密義務生效」是同一次升級的三面。拆開寫就會出現
+// 遷移 0003 跨欄 CHECK 直接拒收的半成品（standard 卻無雜湊），或更糟的
+// 「已是普通帳戶卻沒有任何口令」——那個形態連登入都進不去，卻在目錄裡像個正常人。
+//
+// 守衛是「他此刻確實是活著的訪戶」（WHERE account_type='guest' AND status='active'），
+// 不是呼叫端交來的依據值：升級的發起人（管理員）拿不出「現行分類」這類誠實的錨點——
+// 那一欄的現值就是分支本身要改的東西；而「訪戶且可用」是目錄詳情本来就读得到的事實，
+// 把它放進 WHERE 就足以讓「對已轉正者的重複升級」「對已停用者的升級」都命中零行。
+// 使用例會在同一個交易裡先讀回實體做範圍核實，走到 changed=false 只剩併發的另一次
+// 寫入或程式缺陷，兩者都該讓交易回滾而不是報升級成功。
+//
+// 兩個域閘前置在寫入之前：LoginKey（與建立、登入比對同一個唯一鍵來源，因此
+// 「正式登入名合不合規」「和誰撞鍵」都不抄第二套規則）與 validatePasswordHash
+// （與入庫同一道形狀閘）。登入名撞唯一索引映射為 ErrDuplicateLogin，與 Create 同口徑：
+// 正確性來自資料庫約束，不來自查插之間的時間窗。
+func (s *Store) UpgradeGuestToStandard(ctx context.Context, q database.Querier, id idgen.ID,
+	loginName, passwordHash string) (bool, error) {
+	if q == nil {
+		return false, errors.New("account: 需要可用的資料庫連線或交易")
+	}
+	if id.IsNil() {
+		return false, errors.New("account: 升級訪戶必須帶目標標識")
+	}
+	key, err := LoginKey(loginName)
+	if err != nil {
+		return false, err
+	}
+	if err := validatePasswordHash(passwordHash); err != nil {
+		return false, err
+	}
+	res, err := q.ExecContext(ctx,
+		`UPDATE accounts SET login_name = ?, login_name_key = ?, account_type = ?,
+			password_hash = ?, must_change_password = 1
+		WHERE id = ? AND account_type = 'guest' AND status = 'active'`,
+		trimSpaces(loginName), key, string(TypeStandard), passwordHash, id.String())
+	if err != nil {
+		if isUniqueLoginKeyError(err) {
+			return false, ErrDuplicateLogin
+		}
+		return false, fmt.Errorf("account: 升級訪戶帳戶失敗: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("account: 讀取升級結果失敗: %w", err)
+	}
+	return n > 0, nil
+}
+
 // UpdateDisplayName 以比較-and-set 更換帳戶顯示名：只有 display_name 仍逐字等於
 // expectedDisplayName 時，才把它換成新值。
 //

@@ -216,6 +216,12 @@ var errorMessages = map[ErrorCode]map[string]string{
 		LocaleEnUS: "This server currently requires a valid invite code to sign up, and the code you used this time cannot create an account — it may be missing, malformed, expired or revoked, fully used, or just consumed by another sign-up. For safety the server does not say which. Ask whoever issues invite codes for a fresh valid one and submit again; choosing another login name, rewording this field, or signing in again will not change that.",
 		LocaleJaJP: "このサーバーは現在、有効な招待コードによる登録を要求していますが、今回使用した招待コードではアカウントを作成できません。記入漏れ、形式が不完全、期限切れまたは失効、枠を使い切り、あるいは別の登録に先に使用された可能性があります。セキュリティ上、サーバーはどれに該当するかは示しません。招待コードを発行した人に新しい有効なコードを依頼してから再度送信してください。ログイン名を変えても、この欄を書き直しても、再ログインしても状況は変わりません。",
 	},
+	CodeGuestNotUpgradable: {
+		LocaleZhCN: "这名成员此刻不是一个可升级的访客：他要么已经是正式账户（不需要再升级），要么登录能力已被停用（请先恢复他的登录，再决定是否升级）。本次升级没有执行——身份没改、凭据没落地、会话没撤销、审计没记。请重新读取这一笔的服务端现值；换一个身份或改写口令都不会改变这件事。",
+		LocaleZhTW: "這名成員此刻不是一個可升級的訪戶：他要嘛已經是正式帳戶（不需要再升級），要嘛登入能力已被停用（請先恢復他的登入，再決定是否升級）。本次升級沒有執行——身分沒改、憑據沒落地、會話沒撤銷、審計沒記。請重新讀取這一筆的伺服器端現值；換一個身分或改寫口令都不會改變這件事。",
+		LocaleEnUS: "This member is not an upgradable guest right now: either they are already a standard account (no upgrade needed), or their sign-in capability is disabled (restore it first, then decide whether to upgrade). This upgrade did not run — the identity was not changed, no credential was stored, no session was revoked, and no audit entry was written. Reload this record's server-side values; switching identities or rewording the password will not change that.",
+		LocaleJaJP: "このメンバーは現在、昇格可能なゲストではありません。すでに通常アカウントか（昇格の必要はありません）、ログイン機能が停止されています（まず再開してから昇格するかどうか決めてください）。今回の昇格は実行されていません。身份は変更されず、認証情報は保存されず、セッションも失効せず、監査記録も残されていません。サーバー側の最新値を再読み込みしてください。別の身份にしたりパスワードの書き方を変えたりしても状況は変わりません。",
+	},
 }
 
 // messageFor 取得錯誤碼在指定語言的使用者訊息；語言未支援或訊息為空時回退 defaultLocale。

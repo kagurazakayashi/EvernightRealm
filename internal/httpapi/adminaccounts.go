@@ -12,6 +12,7 @@
 //  3. 請求本體與查詢參數的形態——建立只有 login_name／display_name／password，
 //     編輯只有 display_name 與它所依據的現值，
 //     狀態只有 status 與它所依據的現狀，重置只有 password 一欄，
+//     升級只有 login_name 與 password 兩欄，
 //     目錄只認 page／page_size／status／type／q 五個查詢參數；
 //     未知欄位（含 role、account_type、status、subject_kind、must_change_password
 //     這類「自報身分或企圖覆蓋隱藏欄位」的嘗試）由 decodeJSON 的 DisallowUnknownFields
@@ -21,9 +22,10 @@
 //  4. 結論對映——把用例回傳的可判別錯誤一一映射到機器碼，其餘一律 500 且細節只進日誌。
 //     這組端點用到的碼：1001（不在這本目錄裡）、1004（改寫法）、2011（換身分也沒用）、
 //     2012（那個名字是別人的）、2013（你看見的現值已過期）、2014（他的可用性已不是你確認時那樣）、
-//     2017（策略此刻不放開這條建號通路）、2018（他是訪戶，沒有可重置的憑據）。
-//     其中只有 2018 是本步新發布的一枚：它說的是「要等後續那條明確的訪戶升級通路」，
-//     與改寫法（1004）、換目標（1001）、換身分（2011）都不是同一處置。
+//     2017（策略此刻不放開這條建號通路）、2018（他是訪戶，沒有可重置的憑據）、
+//     2024（他此刻不是可升級的訪戶）。
+//     2018 與 2024 說的是相反方向的兩句話：前者擋「用重置口令順帶完成升級」，
+//     後者擋「對已轉正或已停用者再次發起升級」。
 //
 // 與 /root/admins 的分工是一條邊界而不是一個目錄慣例：那組端點管的是「持有伺服器級
 // 角色的主體」，經 NeedRoot 判定、不受三個建立開關約束；這組端點管的是「不帶任何
@@ -101,6 +103,14 @@ type StdAccountUseCase interface {
 	// 那樣的併發結論——重複提交是又做了一次完整重置，見 internal/stdacct/resetpassword.go。
 	ResetStandardAccountPassword(ctx context.Context, principal identity.Principal,
 		accountID idgen.ID, newPassword, requestID string) (stdacct.StandardPasswordReset, error)
+	// UpgradeGuestToStandard 把一名目錄內可登入的訪戶帳戶原地升級成普通帳戶：
+	// 保留穩定標識與既有歷史引用，正式登入名、憑據與首次改密義務同一條 UPDATE 落地，
+	// 舊會話同交易全部撤銷（用戶批准的 R2-017 決定：撿到舊臨時憑據的人不自動獲得正式權限）。
+	// 目標已是普通帳戶或已被停用时回 stdacct.ErrNotUpgradeableGuest，
+	// 見 internal/stdacct/upgrade.go。
+	UpgradeGuestToStandard(ctx context.Context, principal identity.Principal,
+		accountID idgen.ID, in stdacct.UpgradeInput,
+		requestID string) (stdacct.GuestUpgrade, error)
 }
 
 // createStandardAccountRequest 是建立請求的本體。只有這三個欄位可用：
@@ -136,6 +146,17 @@ type updateStandardAccountStatusRequest struct {
 // 它也絕不是「自報身分」的格子：account_id 在路徑上、roles 與 activity_id 不認。
 type resetStandardAccountPasswordRequest struct {
 	Password string `json:"password"`
+}
+
+// upgradeGuestAccountRequest 是訪戶原地升級請求的本體。白名單只有正式登入名與
+// 一次性初始口令兩欄，與「管理員建號」那張表的分別只在沒有 display_name（升級不改顯示名，
+// 那是另一條白名單通路的句子）。account_type、roles、status、must_change_password
+// 之類的宣稱會被未知欄位規則當場拒殺（1004）：升級出來的形態恆為
+// 「standard＋active＋首次必改密」，由端點與用例決定，不由請求內容決定——
+// 「把訪客升成管理員」在協定層就沒有一個可以填的格子。
+type upgradeGuestAccountRequest struct {
+	LoginName string `json:"login_name"`
+	Password  string `json:"password"`
 }
 
 // createdStandardAccountResponse 是建立成功的回應本體。
@@ -221,6 +242,21 @@ type standardAccountPasswordResetResponse struct {
 	RequestID       string              `json:"request_id"`
 }
 
+// standardAccountUpgradeResponse 是 PUT /admin/accounts/{account_id}/upgrade 的回應本體。
+//
+// account 是「升級之後的資料庫現值」：account_type 已是 standard、
+// must_change_password 恆為 true（界面要把「這個口令只用一次、首次登入必須改掉」
+// 講給操作者聽），login_name 是正式登入名的服務端落庫寫法。
+// revoked_sessions 與停用、重置回應同一理由：界面要能如實說出「這次讓 N 臺裝置
+// 必須用新憑據重新登入」，0 是事實（那一趟訪客可能早已到期）而不是失敗。
+// 回應裡絕對不會有的東西：初始口令的任何回顯（連同前綴或長度）、任一側的雜湊、
+// 會話材料——口令只在請求本體裡出現一次；舊訪戶的會話秘密也不在回應內（本來就無讀法）。
+type standardAccountUpgradeResponse struct {
+	Account         standardAccountItem `json:"account"`
+	RevokedSessions int                 `json:"revoked_sessions"`
+	RequestID       string              `json:"request_id"`
+}
+
 // standardAccountEndpoints 回傳普通帳戶端點的登記清單；未注入用例時為空。
 //
 // 登記與否只這一處來源，深連結回退用的 API 首段清單（/admin）因此自動同步。
@@ -236,6 +272,9 @@ type standardAccountPasswordResetResponse struct {
 // 憑據走 /password 子資源（與 /root/admins/{account_id}/password 同形）：憑據與狀態同屬
 // 安全欄位，但兩條白名單、兩套確認語意、兩個審計動作各是各的——
 // 「重置不是解除停用、停用不是重置」在路由形狀上就分開。
+// 升級走 /upgrade 子資源：它動的是「這個帳戶是哪一類主體」，比憑據與狀態更高一層——
+// 與 /password 分成兩條路徑，正是為了讓「重置口令」永遠不可能順帶完成一次身份升級
+// （那條 PUT 的本體連登入名的格子都沒有）。
 // 普通帳戶今日沒有刪除通路，所以父路徑上只有 GET／HEAD／PUT（Root 那側的 DELETE
 // 不在这裡複製一份）。
 func (s *Server) standardAccountEndpoints() []apiRoute {
@@ -251,7 +290,49 @@ func (s *Server) standardAccountEndpoints() []apiRoute {
 			http.MethodPut)},
 		{"/admin/accounts/{account_id}/password", s.allowMethods(s.handleAdminAccountPassword,
 			http.MethodPut)},
+		{"/admin/accounts/{account_id}/upgrade", s.allowMethods(s.handleAdminAccountUpgrade,
+			http.MethodPut)},
 	}
+}
+
+// handleAdminAccountUpgrade 處理 PUT /admin/accounts/{account_id}/upgrade：
+// 訪戶原地升級為普通帳戶（保留穩定標識與既有歷史引用）。
+//
+// 這條子路徑只有 PUT 一個方法：「動身分」在協定層就只有一個入口，讀現值本來就在
+// 父路徑上，不在這裡開第二份讀法。前置鏈與父路徑逐字相同（consolePrincipal：
+// 來源判定 → 憑據解析 → 首次改密門閂），授權、目標範圍、「是不是可升級的訪戶」
+// 都由用例判，傳輸層不先判一次——尤其不為「看起來像管理員的人」放行任何一格：
+// 訪戶本人帶著自己那枚零授予會話敲這條端點，得到的就是既有的 2011。
+//
+// 標識非法與「查無此人／他是管理員／他已刪除」同樣是 1001；登入名與口令的形狀
+// 不合格由帳戶域與 credential 那兩道既有的閘判定（1004 點名欄位），
+// 「已是正式帳戶或已被停用」是 2024，重名是 2012——這裡不抄寫第二份規則。
+func (s *Server) handleAdminAccountUpgrade(w http.ResponseWriter, r *http.Request) {
+	principal, ok := s.consolePrincipal(w, r)
+	if !ok {
+		return
+	}
+	id, err := idgen.Parse(r.PathValue("account_id"))
+	if err != nil {
+		writeError(w, r, CodeNotFound, http.StatusNotFound)
+		return
+	}
+	var in upgradeGuestAccountRequest
+	if !decodeJSON(w, r, &in) {
+		return
+	}
+	upgraded, err := s.stdAccounts.UpgradeGuestToStandard(r.Context(), principal, id,
+		stdacct.UpgradeInput{LoginName: in.LoginName, InitialPassword: in.Password},
+		requestIDFromRequest(r))
+	if err != nil {
+		s.writeUpgradeGuestAccountFailure(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, standardAccountUpgradeResponse{
+		Account:         profileItemOf(upgraded.Profile),
+		RevokedSessions: upgraded.RevokedSessions,
+		RequestID:       requestIDFromRequest(r),
+	})
 }
 
 // handleAdminAccountPassword 處理 PUT /admin/accounts/{account_id}/password：重置登入憑據。
@@ -659,6 +740,39 @@ func (s *Server) writeResetStandardAccountPasswordFailure(w http.ResponseWriter,
 		writeError(w, r, CodePermissionDenied, http.StatusForbidden)
 	default:
 		s.logger.Error("重置普通帳戶憑據失敗", "request_id", requestIDFromRequest(r), "err", err)
+		writeError(w, r, CodeUnknown, http.StatusInternalServerError)
+	}
+}
+
+// writeUpgradeGuestAccountFailure 把升級用例的錯誤對映為對外回應。
+//
+// 處置各歸各，一句不併：1004 要人改登入名或口令的寫法、2012 說「那個名字是別人的，
+// 要換的是名字」（訪戶一欄都沒被改）、2024 說「他此刻不是可升級的訪戶」、
+// 2014 兜併發尾巴（重讀現狀再決定）、1001 是目標不在目錄、2011 是主體不對——
+// 訪戶本人敲這條端點拿到的就是最後這一句（零授予過不了 NeedServerAdmin，
+// 「Guest 不能給自己提升權限」是既有授權矩陣的事實，不是本步新造的規則）。
+// 其餘細節只進日誌。
+func (s *Server) writeUpgradeGuestAccountFailure(w http.ResponseWriter,
+	r *http.Request, err error) {
+	switch {
+	case errors.Is(err, account.ErrInvalidLogin):
+		writeErrorDetails(w, r, CodeInvalidBody, http.StatusBadRequest,
+			map[string]any{"invalid_field": "login_name"})
+	case errors.Is(err, stdacct.ErrInvalidUpgradePassword):
+		writeErrorDetails(w, r, CodeInvalidBody, http.StatusBadRequest,
+			map[string]any{"invalid_field": "password"})
+	case errors.Is(err, stdacct.ErrDuplicateLogin):
+		writeError(w, r, CodeLoginNameTaken, http.StatusConflict)
+	case errors.Is(err, stdacct.ErrNotUpgradeableGuest):
+		writeError(w, r, CodeGuestNotUpgradable, http.StatusConflict)
+	case errors.Is(err, stdacct.ErrUpgradeConflict):
+		writeError(w, r, CodeAdminStatusConflict, http.StatusConflict)
+	case errors.Is(err, stdacct.ErrAccountNotFound):
+		writeError(w, r, CodeNotFound, http.StatusNotFound)
+	case errors.Is(err, identity.ErrPermissionDenied):
+		writeError(w, r, CodePermissionDenied, http.StatusForbidden)
+	default:
+		s.logger.Error("升級訪戶帳戶失敗", "request_id", requestIDFromRequest(r), "err", err)
 		writeError(w, r, CodeUnknown, http.StatusInternalServerError)
 	}
 }
