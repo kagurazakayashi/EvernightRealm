@@ -202,6 +202,15 @@ func NewServerGrantsFromStrings(values ...string) (ServerGrants, error) {
 	return ServerGrants{roles: roles}, nil
 }
 
+// Count 回報這份授予載體攜帶的角色數量；零值回 0，語意是「沒有任何角色」。
+//
+// 它存在的理由只有一件事：有用例要問「這個帳戶到底有沒有持有授予」這個總量問題
+// （訪戶綁定預檢：訪戶按定義应為零授予，查得有任一授予即資料形態缺陷，直接阻止），
+// 而 HasRole 只能問「有沒有某一個角色」——對封閉集合逐個探問等於假設角色清單永不增長。
+// 欄位 roles 不匯出，計數因此也只能由本載體自己回答：授予的讀法仍只有
+// internal/grant 一個來源，這裡不提供繞過它拼裝角色的任何通路。
+func (g ServerGrants) Count() int { return len(g.roles) }
+
 // NewAccountPrincipal 構造帳戶主體。
 //
 // 拒絕清單都是「讓自報身分無處藏身」的具體形態：零值標識（查不到是誰）、

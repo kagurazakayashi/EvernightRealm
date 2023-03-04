@@ -3,7 +3,11 @@
 // /admin/accounts/{account_id} 一個路徑做兩件事（GET／HEAD 單筆詳情、PUT 編輯非安全資料），
 // /admin/accounts/{account_id}/status 一條路徑做一件事（PUT 停用或恢復登入能力），
 // /admin/accounts/{account_id}/password 一條路徑做一件事（PUT 重置登入憑據，
-// 唯一白名單欄位是新口令）。
+// 唯一白名單欄位是新口令），
+// /admin/accounts/{account_id}/upgrade 一條路徑做一件事（PUT 訪戶原地升級，
+// 白名單是 login_name 與 password 兩欄），
+// /admin/accounts/{account_id}/bind-preflight 一條路徑做一件事（POST 綁定預檢：
+// 純只讀的衝突預覽，唯一白名單欄位是 target_account_id，不執行任何綁定）。
 //
 // 這個檔案刻意只做協定層該做的四件事，一條領域規則都不寫在這裡：
 //  1. 來源（CSRF）判定與憑據解析——逐字複用 consolePrincipal 那條共用鏈，
@@ -13,6 +17,7 @@
 //     編輯只有 display_name 與它所依據的現值，
 //     狀態只有 status 與它所依據的現狀，重置只有 password 一欄，
 //     升級只有 login_name 與 password 兩欄，
+//     綁定預檢只有 target_account_id 一欄，
 //     目錄只認 page／page_size／status／type／q 五個查詢參數；
 //     未知欄位（含 role、account_type、status、subject_kind、must_change_password
 //     這類「自報身分或企圖覆蓋隱藏欄位」的嘗試）由 decodeJSON 的 DisallowUnknownFields
@@ -26,6 +31,9 @@
 //     2024（他此刻不是可升級的訪戶）。
 //     2018 與 2024 說的是相反方向的兩句話：前者擋「用重置口令順帶完成升級」，
 //     後者擋「對已轉正或已停用者再次發起升級」。
+//     綁定預檢一個新碼都不加：「此刻不可綁定」不是錯誤而是 200 預覽本體裡的
+//     穩定原因記號（見 internal/stdacct/bindpreflight.go）；請求級拒絕複用上表——
+//     1001 對來源與目標各自生效且同一句不可分辨，預覽不是新的枚舉面。
 //
 // 與 /root/admins 的分工是一條邊界而不是一個目錄慣例：那組端點管的是「持有伺服器級
 // 角色的主體」，經 NeedRoot 判定、不受三個建立開關約束；這組端點管的是「不帶任何
@@ -111,6 +119,14 @@ type StdAccountUseCase interface {
 	UpgradeGuestToStandard(ctx context.Context, principal identity.Principal,
 		accountID idgen.ID, in stdacct.UpgradeInput,
 		requestID string) (stdacct.GuestUpgrade, error)
+	// PreflightGuestBind 對一對（來源, 目標）帳戶標識做只讀的綁定預檢與衝突預覽，
+	// 一個字都不寫（用戶批准的 R2-018 決定：純只讀、零寫入，被預覽為不可行也不記審計）。
+	// 「此刻不可綁定」不是錯誤：它帶著穩定原因記號在 200 預覽本體裡回來——
+	// 這是本組端點裡唯一一條「失敗也成功」的通路，原因見 internal/stdacct/bindpreflight.go。
+	// 兩側任一方不在普通帳戶目錄（不存在／幽靈／管理員／已刪除／待審批鏈）時
+	// 收斂成不可分辨的 stdacct.ErrAccountNotFound，與詳情端點同句。
+	PreflightGuestBind(ctx context.Context, principal identity.Principal,
+		sourceID, targetID idgen.ID, requestID string) (stdacct.GuestBindPreflight, error)
 }
 
 // createStandardAccountRequest 是建立請求的本體。只有這三個欄位可用：
@@ -157,6 +173,16 @@ type resetStandardAccountPasswordRequest struct {
 type upgradeGuestAccountRequest struct {
 	LoginName string `json:"login_name"`
 	Password  string `json:"password"`
+}
+
+// guestBindPreflightRequest 是綁定預檢請求的本體。白名單只有目標帳戶標識一格：
+// 這是一對（來源, 目標）的評估，來源在路徑上、目標在本體裡，兩個標識都是待驗證
+// 輸入而不是身分宣稱。沒有口令、沒有角色、也沒有 expected_* 依據值欄位——
+// 純只讀預覽沒有可寫對象，比較-and-set 的錨點是将来執行通路的職責，
+// 在這裡放一格依據值只會誘導人把預覽誤當成一場已開始的寫入。
+// account_type、roles 之類的未知欄位由 decodeJSON 當場拒殺（1004）。
+type guestBindPreflightRequest struct {
+	TargetAccountID string `json:"target_account_id"`
 }
 
 // createdStandardAccountResponse 是建立成功的回應本體。
@@ -257,6 +283,33 @@ type standardAccountUpgradeResponse struct {
 	RequestID       string              `json:"request_id"`
 }
 
+// standardAccountBindPreflightResponse 是綁定預檢成功的回應本體。
+//
+// source 與 target 復用 standardAccountItem：預覽不披露這本目錄本來看不見的欄位，
+// 憑據材料從形狀上就放不進來。executable 是「預覽可執行」的結論，不是綁定的憑據或
+// 許可——這條通路沒有生效物。blockers 與 impacts 恆為數組（空是 []，不缺席也不 null）：
+// 值是穩定機器記號（見 internal/stdacct/bindpreflight.go 的枚舉），四語言句子在界面側，
+// 後端不在這裡產散文——與錯誤信封的本地化分工不同，這是資料。
+// source_open_sessions 是「綁定執行時會讓幾臺裝置重新登入」的同一把尺
+// （RevokeAccount 的唯讀對照），0 是事實不是失敗。
+// schema_version 說出這份預覽按哪一版資料庫跑：引用登記表的覆蓋面隨版本變，
+// 預覽天生是會過期的快照，執行步必須重讀版本與全部事實再判定。
+// consent_mode 恆為 target_self_initiated：綁定的同意只能由目標帳戶持有人以自己的
+// 會話發起，管理員在這條通路上拿到的永遠只是預覽——這句話寫進合同而不是只寫在界面。
+// 回應裡絕對不會有的東西：會話材料、口令、雜湊、未接入登記表的表名（只進執行日誌）、
+// 以及任何可以被拿去「證明綁定已被批准」的憑據欄位。
+type standardAccountBindPreflightResponse struct {
+	Source             standardAccountItem `json:"source"`
+	Target             standardAccountItem `json:"target"`
+	Executable         bool                `json:"executable"`
+	Blockers           []string            `json:"blockers"`
+	Impacts            []string            `json:"impacts"`
+	SourceOpenSessions int                 `json:"source_open_sessions"`
+	SchemaVersion      int                 `json:"schema_version"`
+	ConsentMode        string              `json:"consent_mode"`
+	RequestID          string              `json:"request_id"`
+}
+
 // standardAccountEndpoints 回傳普通帳戶端點的登記清單；未注入用例時為空。
 //
 // 登記與否只這一處來源，深連結回退用的 API 首段清單（/admin）因此自動同步。
@@ -275,6 +328,11 @@ type standardAccountUpgradeResponse struct {
 // 升級走 /upgrade 子資源：它動的是「這個帳戶是哪一類主體」，比憑據與狀態更高一層——
 // 與 /password 分成兩條路徑，正是為了讓「重置口令」永遠不可能順帶完成一次身份升級
 // （那條 PUT 的本體連登入名的格子都沒有）。
+// 綁定預檢走 /bind-preflight 子資源（POST）：它是一條純只讀的評估通路——「綁定」今日
+// 沒有執行入口（用戶批准的方向：執行動詞屬於目標持有人自己的會話，屬後續步驟），
+// 這裡只有預覽。它掛在來源（訪戶）那一側的子資源上，目標標識從本體進來：
+// 一次請求只評估一對（來源, 目標），不存在「替這個訪戶列出可綁定目標」的讀法——
+// 請求形態本身就是反枚舉邊界，不靠界面藏按钮維持。
 // 普通帳戶今日沒有刪除通路，所以父路徑上只有 GET／HEAD／PUT（Root 那側的 DELETE
 // 不在这裡複製一份）。
 func (s *Server) standardAccountEndpoints() []apiRoute {
@@ -292,6 +350,8 @@ func (s *Server) standardAccountEndpoints() []apiRoute {
 			http.MethodPut)},
 		{"/admin/accounts/{account_id}/upgrade", s.allowMethods(s.handleAdminAccountUpgrade,
 			http.MethodPut)},
+		{"/admin/accounts/{account_id}/bind-preflight", s.allowMethods(s.handleAdminAccountBindPreflight,
+			http.MethodPost)},
 	}
 }
 
@@ -333,6 +393,77 @@ func (s *Server) handleAdminAccountUpgrade(w http.ResponseWriter, r *http.Reques
 		RevokedSessions: upgraded.RevokedSessions,
 		RequestID:       requestIDFromRequest(r),
 	})
+}
+
+// handleAdminAccountBindPreflight 處理 POST /admin/accounts/{account_id}/bind-preflight：
+// 訪戶綁定的只讀預檢與衝突預覽，一個寫入都不發生。
+//
+// 為什麼是 POST 而不是 GET：目標帳戶標識是被評估的輸入，不是資源地址——放進查詢串
+// 就成了一條可書籤、可快取、可被訪問日誌按目標撈出來的「尋人」請求；放進本體，
+// 一次請求就是這一对（來源, 目標）的一次性評估。它仍是純讀取：noStore、無副作用、
+// 不落審計（用戶批准的 R2-018 決定），POST 在這裡表達的是「評估需要一對輸入」，
+// 不是「這會寫東西」——與 /auth/registration-status 匿名受限查詢同一先例。
+// 前置鏈與父路徑逐字相同（consolePrincipal：來源判定 → 憑據解析 → 首次改密門閂），
+// 授權與兩側範圍都由用例判，傳輸層不先判一次——訪戶本人敲這條端點拿到的是既有 2011。
+//
+// 路徑上的來源標識非法、以及來源或目標「不在這本目錄」（不存在／幽靈／他是管理員／
+// 已刪除／待審批鏈）同樣是 1001：預覽不是新的枚舉面，這句話在詳情端點本來就只有一個答案。
+// 本體裡的目標標識缺失或不成形是請求寫法問題，1004 點名 target_account_id——
+// 「成形但不在目錄」走 1001，「改寫法就有用」走 1004，兩句處置不同不互換。
+// 可執行性本身不是錯誤：不可綁定的組合以 200 帶穩定原因記號回來（見用例頭注），
+// 本檔案因此一個新碼都不加。
+func (s *Server) handleAdminAccountBindPreflight(w http.ResponseWriter, r *http.Request) {
+	principal, ok := s.consolePrincipal(w, r)
+	if !ok {
+		return
+	}
+	sourceID, err := idgen.Parse(r.PathValue("account_id"))
+	if err != nil {
+		writeError(w, r, CodeNotFound, http.StatusNotFound)
+		return
+	}
+	var in guestBindPreflightRequest
+	if !decodeJSON(w, r, &in) {
+		return
+	}
+	targetID, err := idgen.Parse(in.TargetAccountID)
+	if err != nil {
+		writeErrorDetails(w, r, CodeInvalidBody, http.StatusBadRequest,
+			map[string]any{"invalid_field": "target_account_id"})
+		return
+	}
+	pre, err := s.stdAccounts.PreflightGuestBind(r.Context(), principal, sourceID, targetID,
+		requestIDFromRequest(r))
+	if err != nil {
+		s.writeGuestBindPreflightFailure(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, bindPreflightResponseOf(pre, requestIDFromRequest(r)))
+}
+
+// bindPreflightResponseOf 把用例結論投影成回應本體。blockers 與 impacts 恆為數組
+// （空是 [] 而不是缺席）；枚舉到字串的降格只在這一個函式發生，線上的記號字面值
+// 由 internal/stdacct 的常數定死，這裡不抄寫第二份字面值。
+func bindPreflightResponseOf(pre stdacct.GuestBindPreflight, requestID string) standardAccountBindPreflightResponse {
+	blockers := make([]string, 0, len(pre.Blockers))
+	for _, b := range pre.Blockers {
+		blockers = append(blockers, b.String())
+	}
+	impacts := make([]string, 0, len(pre.Impacts))
+	for _, i := range pre.Impacts {
+		impacts = append(impacts, i.String())
+	}
+	return standardAccountBindPreflightResponse{
+		Source:             profileItemOf(pre.Source),
+		Target:             profileItemOf(pre.Target),
+		Executable:         pre.Executable,
+		Blockers:           blockers,
+		Impacts:            impacts,
+		SourceOpenSessions: pre.SourceOpenSessions,
+		SchemaVersion:      pre.SchemaVersion,
+		ConsentMode:        pre.ConsentMode,
+		RequestID:          requestID,
+	}
 }
 
 // handleAdminAccountPassword 處理 PUT /admin/accounts/{account_id}/password：重置登入憑據。
@@ -773,6 +904,34 @@ func (s *Server) writeUpgradeGuestAccountFailure(w http.ResponseWriter,
 		writeError(w, r, CodePermissionDenied, http.StatusForbidden)
 	default:
 		s.logger.Error("升級訪戶帳戶失敗", "request_id", requestIDFromRequest(r), "err", err)
+		writeError(w, r, CodeUnknown, http.StatusInternalServerError)
+	}
+}
+
+// writeGuestBindPreflightFailure 把綁定預檢用例的錯誤對映為對外回應。
+//
+// 這組對映短得反常，而且是刻意的：「此刻不可綁定」根本不走錯誤通路——它是 200
+// 預覽本體裡的 blockers。剩下的只有請求級拒絕，一句不併：1001 說「兩側有一方
+// 不在這本目錄裡」（不存在／管理員／已刪除／待審批收斂成同一句不可分辨的話，
+// 預檢因此不是比詳情更亮的探照燈）、2011 說「這個主體做不了這份預覽」——
+// 訪戶本人敲這條端點拿到的就是這句（零授予過不了 NeedServerAdmin，與升級同形）。
+// 1004 已在傳輸層就地判掉（目標標識不成形），不經用例、不進這裡。
+// 其餘一律 500 且細節只進日誌。
+func (s *Server) writeGuestBindPreflightFailure(w http.ResponseWriter, r *http.Request,
+	err error) {
+	switch {
+	case errors.Is(err, stdacct.ErrAccountNotFound):
+		writeError(w, r, CodeNotFound, http.StatusNotFound)
+	case errors.Is(err, identity.ErrPermissionDenied):
+		// 403：憑據有效，缺的是權限；不發刪除指令——那枚 Cookie 此刻仍換得出同一個主體。
+		writeError(w, r, CodePermissionDenied, http.StatusForbidden)
+	case errors.Is(err, identity.ErrNotAuthenticated), errors.Is(err, identity.ErrInvalidPrincipal):
+		// 與建號同口徑：帶著有效會話卻換不出可信主體是服務端缺陷，報 500 讓它被查，
+		// 不報成 2011 讓操作者以為自己沒登入。
+		s.logger.Error("綁定預檢的主體不合法", "request_id", requestIDFromRequest(r), "err", err)
+		writeError(w, r, CodeUnknown, http.StatusInternalServerError)
+	default:
+		s.logger.Error("綁定預檢處理失敗", "request_id", requestIDFromRequest(r), "err", err)
 		writeError(w, r, CodeUnknown, http.StatusInternalServerError)
 	}
 }

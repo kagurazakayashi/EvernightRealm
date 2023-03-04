@@ -478,6 +478,36 @@ func (s *Store) RevokeAccount(ctx context.Context, q database.Querier, accountID
 	return s.RevokeSubject(ctx, q, Subject{kind: SubjectAccount, accountID: accountID})
 }
 
+// OpenAccountSessionCount 回報某帳戶名下「尚未被撤銷」的會話數（含已到期但尚未清理者）。
+//
+// 它是 RevokeAccount 的唯讀對照：WHERE 與 RevokeSubject 對帳戶主體落下的條件逐字同形
+// （account_id 相同且 revoked_at IS NULL），所以這個計數正是「若此刻執行 RevokeAccount 會
+// 命中幾行」的事實。會話綁定預檢（見 internal/stdacct 的訪戶綁定預檢）要在真正撤銷之前，
+// 如實告訴操作者這次綁定將讓幾臺裝置重新登入，而那句數字必須與撤銷动作同一把尺，
+// 否則預覽與實況會各說各話。
+//
+// 與 countLive 分開是因為它們答的是兩句話：countLive 數的是「此刻還換得出身分」的會話
+// （疊了 expires_at 與閒置線），供名額判定用；本方法數的是「尚未被標記撤銷」的行，
+// 供預覽即將發生的撤銷範圍用。已到期但未清理的行在名額上不佔位，卻會在撤銷时被標記，
+// 兩個數因此可能不同，混用就會讓預覽少報。本方法只讀不寫，不撤銷任何會話。
+func (s *Store) OpenAccountSessionCount(ctx context.Context, q database.Querier,
+	accountID idgen.ID) (int, error) {
+	if q == nil {
+		return 0, errors.New("session: 需要可用的資料庫連線或交易")
+	}
+	if accountID.IsNil() {
+		return 0, fmt.Errorf("%w：統計帳戶會話必須帶帳戶標識", ErrInvalidSubject)
+	}
+	var n int
+	// 表名與欄名都是本套件自己拼的常量，只有值是引數：這裡沒有字串注入面。
+	if err := q.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM sessions WHERE revoked_at IS NULL AND account_id = ?",
+		accountID.String()).Scan(&n); err != nil {
+		return 0, fmt.Errorf("session: 統計帳戶會話失敗: %w", err)
+	}
+	return n, nil
+}
+
 // RevokeAllRootSessions 撤銷 Root 主體名下全部未撤銷的會話，回傳撤銷數量。
 //
 // 這是 RevokeSubject 的本機維護變體，存在的理由只有一件事：口令遺失後的憑據恢復
