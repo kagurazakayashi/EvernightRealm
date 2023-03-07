@@ -222,6 +222,18 @@ var errorMessages = map[ErrorCode]map[string]string{
 		LocaleEnUS: "This member is not an upgradable guest right now: either they are already a standard account (no upgrade needed), or their sign-in capability is disabled (restore it first, then decide whether to upgrade). This upgrade did not run — the identity was not changed, no credential was stored, no session was revoked, and no audit entry was written. Reload this record's server-side values; switching identities or rewording the password will not change that.",
 		LocaleJaJP: "このメンバーは現在、昇格可能なゲストではありません。すでに通常アカウントか（昇格の必要はありません）、ログイン機能が停止されています（まず再開してから昇格するかどうか決めてください）。今回の昇格は実行されていません。身份は変更されず、認証情報は保存されず、セッションも失効せず、監査記録も残されていません。サーバー側の最新値を再読み込みしてください。別の身份にしたりパスワードの書き方を変えたりしても状況は変わりません。",
 	},
+	CodeBindTicketInvalid: {
+		LocaleZhCN: "这次用的访客绑定凭证换不出一次绑定——它可能不存在、写得不完整、已经过期、已经被用掉，或者它批准的目标不是你本人。出于安全，服务器不指出具体是哪一种，也不回显凭证的任何信息。本次绑定没有执行——访客没被退休、会话没撤销、留痕没追加、你的账户也没被改动。请请管理员重新做一次绑定预检并签发一枚新的凭证；改写这一栏、换个目标或重复提交都不会让它变成有效。",
+		LocaleZhTW: "這一次用的訪戶綁定憑證換不出一次綁定——它可能不存在、寫得不完整、已經過期、已被用掉，或者它批准的目標不是你本人。出於安全，伺服器不指出具體是哪一種，也不回顯憑證的任何資訊。本次綁定沒有執行——訪戶沒被退休、會話沒撤銷、留痕沒追加、你的帳戶也沒被改動。請請管理員重新做一次綁定預檢並簽發一枚新的憑證；改寫這一欄、換個目標或重複提交都不會讓它變成有效。",
+		LocaleEnUS: "The guest-binding ticket used this time cannot produce a binding — it may not exist, be malformed, have expired, already be consumed, or name someone other than you as the target. For safety the server does not say which, and it never echoes any ticket information. Nothing ran this time: the guest was not retired, no session was revoked, no history row was added, and your account was not changed. Ask an administrator to run the binding pre-check again and issue a fresh ticket; rewording this field, pointing it at another account, or resubmitting will not make it valid.",
+		LocaleJaJP: "今回使われたゲストバインド用証跡はバインドを生み出せません。存在しない、形式が不完全、期限切れ、すでに使用済み、または証跡が認めた対象があなた本人でない可能性があります。セキュリティ上、サーバーはどれに該当するかを示さず、証跡の情報も一切返しません。今回バインドは実行されていません。ゲストは退席せず、セッションも失効せず、履歴行も追加されず、あなたのアカウントも変更されていません。管理者にバインド事前チェックをやり直して新しい証跡を発行してもらってください。この欄を書き直したり、別の相手向けに出し直したりしても有効にはなりません。",
+	},
+	CodeBindPlanStale: {
+		LocaleZhCN: "这份绑定计划已经不符合服务器当前的实况，所以没有执行——可能多了一张尚未接入绑定预检的账户引用表、这一对里某一方的身份或登录能力变了，或数据库版本已经推进。旧凭证上钉着的那份计划不会因为你再按一次就变成新计划：请重新预检，并凭新的凭证再确认一次。本次一个字节都没写入——访客没被退休、会话没撤销、留痕没追加、目标账户也没被改动。",
+		LocaleZhTW: "這份綁定計劃已經不符合伺服器當下的實況，所以沒有執行——可能多了一張尚未接入綁定預檢的帳戶引用表、這一對裡某一方的身分或登入能力變了，或資料庫版本已經推進。舊憑證上釘著的那份計劃不會因為你再按一次就變成新計劃：請重新預檢，並憑新的憑證再確認一次。本次一個字元都沒寫入——訪戶沒被退休、會話沒撤銷、留痕沒追加、目標帳戶也沒被改動。",
+		LocaleEnUS: "This binding plan no longer matches the server's current facts, so nothing ran — an account-reference table that the binding pre-check has not been wired for may have appeared, one side's identity or sign-in capability may have changed, or the database schema may have moved on. A plan pinned to an old ticket does not become new by pressing it again: run the pre-check again and confirm with a fresh ticket. Nothing was written this time: the guest was not retired, no session was revoked, no history row was added, and the target account was not changed.",
+		LocaleJaJP: "このバインド計画はサーバーの現在の状況と一致しないため実行されませんでした。バインド事前チェック未接続のアカウント参照表が増えた、この一組のいずれかの身份またはログイン機能が変わった、あるいはデータベースのバージョンが進んだ可能性があります。古い証跡に釘付けられた計画は、もう一度押しても新しい計画にはなりません。事前チェックをやり直し、新しい証跡で改めて確認してください。今回は一文字も書き込まれていません。ゲストは退席せず、セッションも失効せず、履歴行も追加されず、対象アカウントも変更されていません。",
+	},
 }
 
 // messageFor 取得錯誤碼在指定語言的使用者訊息；語言未支援或訊息為空時回退 defaultLocale。

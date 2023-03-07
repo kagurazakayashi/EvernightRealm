@@ -30,13 +30,27 @@ const (
 	inviteHashB = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 )
 
-// applyThroughInvite 建立一座套到最新版（含 0010）的乾淨資料庫（呼叫端自己收尾）。
+// applyThroughInvite 建立一座套到 0010 為止的乾淨資料庫（呼叫端自己收尾）。
+//
+// 刻意不用「套用全部遷移」：本檔要驗收的是「0010 是套用的最後一支」這件事
+// （版本表留一筆、檔頭推進到 10），而 0011 之後全量套用會停在 11，
+// 那句斷言就變成在測另一個東西。切法與 splitApprovalMigrations 同法。
 func applyThroughInvite(t *testing.T) *database.DB {
 	t.Helper()
 	db := mustOpen(t, filepath.Join(retryTempDir(t), "evernight.db"))
 	t.Cleanup(func() { _ = db.Close() })
-	if _, err := Apply(context.Background(), db.SQL(), Options{}); err != nil {
-		t.Fatalf("套用全部遷移（含 0010）失敗：%v", err)
+	known, err := Load()
+	if err != nil {
+		t.Fatalf("讀取內嵌遷移失敗：%v", err)
+	}
+	var through10 []Migration
+	for _, m := range known {
+		if m.Version <= 10 {
+			through10 = append(through10, m)
+		}
+	}
+	if _, err := applySet(context.Background(), db.SQL(), through10, Options{}); err != nil {
+		t.Fatalf("套用遷移到 0010 失敗：%v", err)
 	}
 	return db
 }

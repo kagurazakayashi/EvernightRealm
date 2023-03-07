@@ -27,6 +27,7 @@ import (
 	"github.com/kagurazakayashi/EvernightRealm/internal/disk"
 	"github.com/kagurazakayashi/EvernightRealm/internal/grant"
 	"github.com/kagurazakayashi/EvernightRealm/internal/guestacct"
+	"github.com/kagurazakayashi/EvernightRealm/internal/guestbind"
 	"github.com/kagurazakayashi/EvernightRealm/internal/httpapi"
 	"github.com/kagurazakayashi/EvernightRealm/internal/invitecode"
 	"github.com/kagurazakayashi/EvernightRealm/internal/runlog"
@@ -584,6 +585,7 @@ func run(ctx context.Context, releaseSignals func(), args []string, out io.Write
 	// 都沿用上面的同一批實例，口令派生與 Root 開設管理員共用同一份參數檔。少了它，
 	// admin_create_standard 這個開關就只有一份設定而沒有一條通路去執行——策略與現實
 	// 開始各說各話；少了目錄與詳情，管理員端就只能建人卻查不到自己建過誰。
+	stdacctClock := timeutil.System()
 	standardAccountService, err := stdacct.New(stdacct.Deps{
 		DB:       db,
 		Accounts: accountsStore,
@@ -593,8 +595,13 @@ func run(ctx context.Context, releaseSignals func(), args []string, out io.Write
 		// 必須是同一個會話倉儲實例，否則「撤銷落庫的形態」與「驗證讀到的形態」各長一套。
 		Sessions: sessionStore,
 		Audits:   auditStore,
-		Hashing:  hashingParams,
-		Log:      lg.Logger,
+		// 綁定介質（短期單次憑證與不可變留痕）：與本套件其餘倉儲同一取向，
+		// 時刻一律取注入時鐘——簽發那條通路算失效時刻用的時鐘，必須就是
+		// 倉儲寫 created_at／比對 expires_at 用的那一座，否則「15 分鐘」會在兩處各算一遍。
+		BindTickets: guestbind.NewStore(stdacctClock),
+		Clock:       stdacctClock,
+		Hashing:     hashingParams,
+		Log:         lg.Logger,
 	})
 	if err != nil {
 		lg.Error("建立普通帳戶用例組裝失敗", "err", err)
@@ -734,6 +741,10 @@ func run(ctx context.Context, releaseSignals func(), args []string, out io.Write
 		// 管理員建立普通帳戶：策略現讀與放行合成由 internal/stdacct 在自己的交易裡做，
 		// 傳輸層只負責把受信主體與三個欄位遞進去。
 		StandardAccounts: standardAccountService,
+		// 訪戶綁定的執行側：與上一行是同一個 *stdacct.Service，但註射成另一個依賴欄位——
+		// 兩側的准入邊界不同（管理員的 NeedServerAdmin 對「憑證上釘著的那個目標本人」），
+		// 分成兩欄讓「裝了哪幾條通路」在裝配處一眼可讀。
+		GuestBindings: standardAccountService,
 		// 匿名自註冊：准入（策略現讀＋模式校驗）、頻率封頂與派生併發封頂都由
 		// internal/selfregister 在自己的交易裡做，傳輸層只把三個欄位與實際連線來源遞進去。
 		SelfRegister: selfRegisterService,

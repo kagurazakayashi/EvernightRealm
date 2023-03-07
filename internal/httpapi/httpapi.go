@@ -104,6 +104,14 @@ type Deps struct {
 	// 而「隨後怎麼拿到會話」正好相反——自註冊刻意不簽發、訪客必須在此刻簽發。
 	// 少注入誰就少那一組端點，不會留下一條半能用的通路。
 	Guest GuestUseCase
+	// GuestBindings 為「訪戶綁定的執行側（目標本人三條通路）」用例的入口
+	// （internal/app 注入同一個 *stdacct.Service）。
+	// 為 nil 表示本執行檔不掛這組端點：路徑、回退清單與錯誤面都和未掛載時逐字相同。
+	// 它與 StandardAccounts 是兩個依賴而不是同一個，雖然實作同一個服務：兩側的准入邊界
+	// 完全不同（NeedServerAdmin 對「憑證上釘著的那個人」），共用一個有無判定就會出現
+	// 「只裝了管理端，本人的執行入口也跟著掛上」或反過來的形態——而少一邊都不該讓另一邊
+	// 看起來也壞了（同 SelfRegister 與 RegistrationReview 的分開理由）。
+	GuestBindings GuestBindClaimUseCase
 }
 
 // Server 為 HTTP 服務層。
@@ -156,6 +164,10 @@ type Server struct {
 	// guest 為「訪客以臨時受限身分進入」用例入口（可為 nil）；nil 時 guestEndpoints 回空清單，
 	// /auth/guest 這條路徑根本不掛（/auth 首段仍因登入端點屬 API，回退行為不受影響）。
 	guest GuestUseCase
+	// guestBinds 為「訪戶綁定的執行側」用例入口（預覽、核銷、本人查詢；可為 nil）；nil 時
+	// guestBindClaimEndpoints 回空清單，/auth/guest-bindings 那一族路徑根本不掛
+	// （/auth 首段仍因登入端點屬 API，回退行為不受影響）。
+	guestBinds GuestBindClaimUseCase
 }
 
 // New 以組態、版本字串與外部依賴建立 HTTP 服務層。
@@ -202,6 +214,9 @@ func New(cfg *config.Config, version string, deps Deps) *Server {
 		// 訪客用例為 nil 時一個端點都不掛（見 guestEndpoints）：
 		// 「裝配了什麼就服務什麼」在這一層沒有分支。
 		guest: deps.Guest,
+		// 綁定執行側用例為 nil 時一個端點都不掛（見 guestBindClaimEndpoints）：
+		// 「裝配了什麼就服務什麼」在這一層沒有分支。
+		guestBinds: deps.GuestBindings,
 	}
 	s.httpSrv = &http.Server{
 		Addr:    cfg.Server.Listen,

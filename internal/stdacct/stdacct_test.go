@@ -26,6 +26,7 @@ import (
 	"github.com/kagurazakayashi/EvernightRealm/internal/database/migrate"
 	"github.com/kagurazakayashi/EvernightRealm/internal/devkit"
 	"github.com/kagurazakayashi/EvernightRealm/internal/grant"
+	"github.com/kagurazakayashi/EvernightRealm/internal/guestbind"
 	"github.com/kagurazakayashi/EvernightRealm/internal/identity"
 	"github.com/kagurazakayashi/EvernightRealm/internal/identity/identitytest"
 	"github.com/kagurazakayashi/EvernightRealm/internal/session"
@@ -89,8 +90,12 @@ func newEnv(t *testing.T) *env {
 		// 同一批會話上」，換一個實例就測不到。
 		Sessions: sessions,
 		Audits:   audit.NewStore(clock),
-		Hashing:  credential.TestParams,
-		Log:      slog.New(slog.NewTextHandler(&logs, nil)),
+		// 綁定介質與服務共用同一座注入時鐘：憑證的「15 分鐘」在測試裡必須是可推鐘的
+		// 一件事，而不是兩處各讀一次真時間。
+		BindTickets: guestbind.NewStore(clock),
+		Clock:       clock,
+		Hashing:     credential.TestParams,
+		Log:         slog.New(slog.NewTextHandler(&logs, nil)),
 	})
 	if err != nil {
 		t.Fatalf("建立普通帳戶用例失敗：%v", err)

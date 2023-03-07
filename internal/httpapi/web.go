@@ -83,6 +83,11 @@ func (s *Server) apiRoutes() []apiRoute {
 	// 「管理員替別人做准入決定」與「Root 管理伺服器級准入憑證」是兩套授權邊界（NeedServerAdmin
 	// 對 NeedRoot），不該共用一個開關。
 	routes = append(routes, s.inviteCodeEndpoints()...)
+	// 訪戶綁定的執行側（本人三條通路）由自己那個依賴決定有無：它們落在已被登入端點帶入
+	// API 首段的 /auth 之下，不新增首段、只多掛兩條路徑。與普通帳戶那組端點刻意分開注入——
+	// 同一個服務實例、兩套准入邊界（NeedServerAdmin 對「憑證上釘著的那個人」），
+	// 共用一個開關就會出現「只裝管理端也掛上了本人執行入口」的形態。
+	routes = append(routes, s.guestBindClaimEndpoints()...)
 	// 訪客進入（POST /auth/guest）由自己那個依賴決定有無：它落在已被登入端點帶入 API 首段的
 	// /auth 之下，不新增首段、只多掛一條路徑。與自註冊刻意分開注入——兩條都讓門外的人自行取得
 	// 主體，但建出的主體形態（有憑據的普通帳戶／無憑據的訪客）與准入依據（自註冊模式／訪客開關）

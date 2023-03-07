@@ -266,7 +266,7 @@ func TestReadRowRejectsContradictoryShape(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := accountFromRow(mustID(t), "l", "l", "n",
 				sql.NullString{String: testHash, Valid: true}, "standard", tc.status, 0, 1730000000000,
-				sql.NullInt64{}, tc.disabled, tc.deletedAt, tc.reviewed)
+				sql.NullInt64{}, tc.disabled, tc.deletedAt, tc.reviewed, sql.NullInt64{})
 			if err == nil {
 				t.Error("矛盾形態應在成形階段報錯，實際靜默放行")
 			}
@@ -276,7 +276,8 @@ func TestReadRowRejectsContradictoryShape(t *testing.T) {
 	// 同一組欄位換成一致形態就必須讀得出來——否則上面那條拒絕只是「什麼都拒」。
 	ok, err := accountFromRow(mustID(t), "l", "l", "n",
 		sql.NullString{String: testHash, Valid: true}, "standard", "deleted", 0, 1730000000000,
-		sql.NullInt64{}, sql.NullInt64{}, sql.NullInt64{Int64: 1730000000001, Valid: true}, sql.NullInt64{})
+		sql.NullInt64{}, sql.NullInt64{}, sql.NullInt64{Int64: 1730000000001, Valid: true}, sql.NullInt64{},
+		sql.NullInt64{})
 	if err != nil {
 		t.Fatalf("一致的刪除形態應讀得出來：%v", err)
 	}
@@ -287,7 +288,7 @@ func TestReadRowRejectsContradictoryShape(t *testing.T) {
 	// 待審批的一致形態：沒有停用時刻、也沒有審核時刻（還沒有人做過決定）。
 	pending, err := accountFromRow(mustID(t), "l", "l", "n",
 		sql.NullString{String: testHash, Valid: true}, "standard", "pending", 0, 1730000000000,
-		sql.NullInt64{}, sql.NullInt64{}, sql.NullInt64{}, sql.NullInt64{})
+		sql.NullInt64{}, sql.NullInt64{}, sql.NullInt64{}, sql.NullInt64{}, sql.NullInt64{})
 	if err != nil {
 		t.Fatalf("一致的待審批形態應讀得出來：%v", err)
 	}
@@ -300,7 +301,7 @@ func TestReadRowRejectsContradictoryShape(t *testing.T) {
 	approvedThenDisabled, err := accountFromRow(mustID(t), "l", "l", "n",
 		sql.NullString{String: testHash, Valid: true}, "standard", "disabled", 0, 1730000000000,
 		sql.NullInt64{}, sql.NullInt64{Int64: 1730000000002, Valid: true}, sql.NullInt64{},
-		sql.NullInt64{Int64: 1730000000001, Valid: true})
+		sql.NullInt64{Int64: 1730000000001, Valid: true}, sql.NullInt64{})
 	if err != nil {
 		t.Fatalf("「批准過而後停用」的形態應讀得出來：%v", err)
 	}

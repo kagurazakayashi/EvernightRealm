@@ -9,9 +9,12 @@
 // 狀態問「能不能動這個帳戶的伺服器級登入能力（以及動了之後既有會話怎麼辦）」、
 // 重置問「這個帳戶的口令換成操作者親自交的那一次性口令之後，舊口令與舊會話怎麼辦」、
 // 升級問「這個訪戶能不能就地轉正、轉正時他手上那枚臨時憑據怎麼辦」、
-// 綁定預檢問「若要把這個訪戶併入另一個既有正式帳戶，此刻可不可行、被什麼擋著」——
-// 最後這問是純只讀的衝突預覽：本套件今日沒有、也不許有「執行綁定」的那一動
-// （用戶批准的方向：綁定只能由目標帳戶持有人以自己的會話發起，屬後續步驟）。
+// 綁定預檢問「若要把這個訪戶併入另一個既有正式帳戶，此刻可不可行、被什麼擋著」、
+// 憑證簽發問「這一對既然可行，准不准把最後一動交給那個目標本人」、
+// 核銷與留痕問「目標本人現在要按下去了，那一刻的事實還對嗎」。
+// 預檢那一問是純只讀的衝突預覽（零寫入）；執行那一動只屬於憑證上那個目標帳戶的
+// 已認證會話（用戶批准的同意形態 target_self_initiated），
+// 管理員拿得到簽發、拿不到代他人按下執行——那一格在協定層與資料庫層都不存在。
 // 把「建號」與「目錄」放進同一個套件是刻意的：兩者認的是同一類主體（不持有伺服器級角色的
 // 普通與訪戶帳戶）、落的是同一個審計域（Root 域、actor 是真實操作者），
 // 拆成兩套就會出現「建號認得管理員排除規則、目錄卻把他列進來」這種兩處真相。
@@ -26,7 +29,8 @@
 //     「這個人歸不歸管理員管」是使用帳戶的規則，屬策略與授權，不屬實體；
 //   - 依賴方向因此保持單向：stdacct → acctpolicy（策略現讀與放行合成）、
 //     grant（授予有無）、account（實體與唯一鍵）、session（停用與重置時的定向撤銷、
-//     綁定預檢時的只讀計數）、audit（落地痕跡）、database/migrate（綁定預檢現讀
+//     綁定預檢時的只讀計數）、guestbind（綁定憑證與綁定留痕：那兩張表唯一被碰到的地方，
+//     本套件不抄它們的 SQL）、audit（落地痕跡）、database/migrate（綁定預檢現讀
 //     schema 版本——「這個庫跑到哪一版」只有那一個實作點）、credential／database／identity。
 //
 // 目錄那條跨表只讀 SQL 屬用戶批准的「只讀展示投影例外」（原為 internal/adminacct 而立，
@@ -79,9 +83,11 @@ import (
 	"github.com/kagurazakayashi/EvernightRealm/internal/credential"
 	"github.com/kagurazakayashi/EvernightRealm/internal/database"
 	"github.com/kagurazakayashi/EvernightRealm/internal/grant"
+	"github.com/kagurazakayashi/EvernightRealm/internal/guestbind"
 	"github.com/kagurazakayashi/EvernightRealm/internal/identity"
 	"github.com/kagurazakayashi/EvernightRealm/internal/idgen"
 	"github.com/kagurazakayashi/EvernightRealm/internal/session"
+	"github.com/kagurazakayashi/EvernightRealm/internal/timeutil"
 )
 
 // 對外可判別的結論錯誤：傳輸層據此分流回應，內部故障一律不進這些型別。
@@ -151,9 +157,17 @@ type Deps struct {
 	// Sessions 是會話倉儲，在停用與重置這兩條通路上有作用：狀態寫入、憑據換新與
 	// 目標全部會話的撤銷必須落在同一個交易裡，否則「停用」就只剩一句「他下次登入會被拒」、
 	// 「重置」就只剩一句「他舊口令登不進了」，而他手上那些還活著的裝置一個都沒被處理。
+	// 綁定執行走的是同一個手段（來源訪戶的會話與綁定同交易撤銷）。
 	Sessions *session.Store
 	// Audits 是 Root 域審計倉儲（管理員的伺服器級動作也落在這張表，actor 為 admin）。
 	Audits *audit.Store
+	// BindTickets 是綁定介質倉儲（短期單次操作憑證與不可變綁定留痕，見 internal/guestbind）：
+	// 簽發、核銷預覽、核銷執行與本人查詢四條通路都經它碰到那兩張表，
+	// 本套件自己不抄那兩張表的 SQL。
+	BindTickets *guestbind.Store
+	// Clock 是注入時鐘（nil 時取 timeutil.System）：綁定憑證的失效時刻與
+	// 「這枚憑證此刻還用不用得上」的判定都以它為依據，不接受請求側交來的時刻。
+	Clock timeutil.Clock
 	// Hashing 是當前參數檔（與登入、Root 初始化、開設管理員同一來源）。
 	Hashing credential.Params
 	// Log 為伺服器端記錄出口；nil 時丟棄。
@@ -162,14 +176,16 @@ type Deps struct {
 
 // Service 是普通帳戶用例（建立、目錄、詳情、資料編輯與登入狀態）的編排者。零值不可用，請經 New 取得。
 type Service struct {
-	db       *database.DB
-	accounts *account.Store
-	grants   *grant.Store
-	policy   *acctpolicy.Store
-	sessions *session.Store
-	audits   *audit.Store
-	hashing  credential.Params
-	log      *slog.Logger
+	db          *database.DB
+	accounts    *account.Store
+	grants      *grant.Store
+	policy      *acctpolicy.Store
+	sessions    *session.Store
+	audits      *audit.Store
+	bindTickets *guestbind.Store
+	clock       timeutil.Clock
+	hashing     credential.Params
+	log         *slog.Logger
 }
 
 // New 校驗依賴並建立服務。
@@ -178,28 +194,36 @@ type Service struct {
 // 等於默認放行；少授予倉儲就分不清目錄裡誰是管理員（要嘛把管理員列進普通帳戶目錄、
 // 要嘛把普通帳戶誤判成出局）；少會話倉儲就會落出「狀態改了、舊裝置還活著」的半套停用或半套重置；
 // 少審計倉儲就建出或改出一個不留痕的伺服器級主體變更——
-// 後三者正是審計要防的那件事。
+// 後三者正是審計要防的那件事。少綁定介質倉儲則四條綁定通路一條也走不了：
+// 憑證讀不到、核銷不掉、留痕也追加不了，而「半套綁定」比綁不了更糟。
 func New(deps Deps) (*Service, error) {
 	if deps.DB == nil || deps.Accounts == nil || deps.Grants == nil ||
-		deps.Policy == nil || deps.Sessions == nil || deps.Audits == nil {
-		return nil, errors.New("stdacct: 用例缺少必要依賴（db/accounts/grants/policy/sessions/audits）")
+		deps.Policy == nil || deps.Sessions == nil || deps.Audits == nil ||
+		deps.BindTickets == nil {
+		return nil, errors.New("stdacct: 用例缺少必要依賴（db/accounts/grants/policy/sessions/audits/bindTickets）")
 	}
 	if err := deps.Hashing.Validate(); err != nil {
 		return nil, fmt.Errorf("stdacct: 憑據雜湊參數檔不合格: %w", err)
+	}
+	clock := deps.Clock
+	if clock == nil {
+		clock = timeutil.System()
 	}
 	logger := deps.Log
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
 	return &Service{
-		db:       deps.DB,
-		accounts: deps.Accounts,
-		grants:   deps.Grants,
-		policy:   deps.Policy,
-		sessions: deps.Sessions,
-		audits:   deps.Audits,
-		hashing:  deps.Hashing,
-		log:      logger,
+		db:          deps.DB,
+		accounts:    deps.Accounts,
+		grants:      deps.Grants,
+		policy:      deps.Policy,
+		sessions:    deps.Sessions,
+		audits:      deps.Audits,
+		bindTickets: deps.BindTickets,
+		clock:       clock,
+		hashing:     deps.Hashing,
+		log:         logger,
 	}, nil
 }
 

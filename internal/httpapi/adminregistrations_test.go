@@ -31,6 +31,7 @@ import (
 	"github.com/kagurazakayashi/EvernightRealm/internal/database/migrate"
 	"github.com/kagurazakayashi/EvernightRealm/internal/devkit"
 	"github.com/kagurazakayashi/EvernightRealm/internal/grant"
+	"github.com/kagurazakayashi/EvernightRealm/internal/guestbind"
 	"github.com/kagurazakayashi/EvernightRealm/internal/invitecode"
 	"github.com/kagurazakayashi/EvernightRealm/internal/selfregister"
 	"github.com/kagurazakayashi/EvernightRealm/internal/session"
@@ -121,7 +122,9 @@ func newReviewEnv(t *testing.T) *reviewEnv {
 	}
 	stdService, err := stdacct.New(stdacct.Deps{
 		DB: db, Accounts: accountsStore, Grants: grantsStore, Policy: policyStore,
-		Sessions: sessions, Audits: auditStore, Hashing: credential.TestParams,
+		Sessions: sessions, Audits: auditStore,
+		BindTickets: guestbind.NewStore(clock), Clock: clock,
+		Hashing: credential.TestParams,
 	})
 	if err != nil {
 		t.Fatalf("建立普通帳戶用例失敗：%v", err)

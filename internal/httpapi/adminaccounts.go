@@ -127,6 +127,13 @@ type StdAccountUseCase interface {
 	// 收斂成不可分辨的 stdacct.ErrAccountNotFound，與詳情端點同句。
 	PreflightGuestBind(ctx context.Context, principal identity.Principal,
 		sourceID, targetID idgen.ID, requestID string) (stdacct.GuestBindPreflight, error)
+	// IssueGuestBindTicket 為一對（來源, 目標）簽發一枚限定這一對、短效、只准核銷一次的
+	// 綁定操作憑證：它是本組端點裡唯一會寫東西的綁定通路，寫下的也只有憑證一行與審計一筆
+	// ——訪戶沒被退休、會話沒撤銷、留痕沒追加。簽發前在同一筆交易內把判定重做一遍，
+	// 有任一阻止原因即整個不發生（見 internal/stdacct/bindissue.go）。
+	// 憑證明文只在這一次回應裡出現：它不落庫、不進日誌與審計，也再也讀不回來。
+	IssueGuestBindTicket(ctx context.Context, principal identity.Principal,
+		sourceID, targetID idgen.ID, requestID string) (stdacct.IssuedBindTicket, error)
 }
 
 // createStandardAccountRequest 是建立請求的本體。只有這三個欄位可用：
@@ -220,6 +227,10 @@ type standardAccountItem struct {
 	// DisabledAt 為進入禁用狀態的時刻；可用狀態時欄位缺席（不拿零值冒充「停過」）。
 	// 與 /root/admins 同一分工：只可能在單筆回應裡出現，目錄行不帶。
 	DisabledAt string `json:"disabled_at,omitempty"`
+	// RetiredAt 為訪戶經綁定進入退休終態的時刻；未退休時欄位缺席
+	// （不拿零值冒充「被綁走過」）。它與 status=retired 一起讓界面能說出
+	// 「這個人已被綁走、何時綁走」，而不是把他當成一個查無著落的幽靈行。
+	RetiredAt string `json:"retired_at,omitempty"`
 }
 
 // standardAccountListResponse 是 GET／HEAD /admin/accounts 的回應本體。
@@ -310,6 +321,37 @@ type standardAccountBindPreflightResponse struct {
 	RequestID          string              `json:"request_id"`
 }
 
+// guestBindTicketRequest 是簽發綁定憑證的本體。白名單恰好一欄：目標帳戶標識。
+//
+// 沒有有效期、沒有同意形態、沒有角色、也沒有任何「依據值」欄位：憑證的壽命由碼內常量決定
+// （它存在的意義就是短），同意形態由合同決定（恆為目標本人發起），而簽發这件事本身
+// 不是一個可以被請求內容調整的形態。多一格可填，就多一格「操作者自己定義這份授權」的空間。
+type guestBindTicketRequest struct {
+	TargetAccountID string `json:"target_account_id"`
+}
+
+// guestBindTicketResponse 是憑證簽發成功的回應本體。
+//
+// Ticket 是憑證明文，本倉庫唯一會把一段可用憑據放回回應的欄位，也因此它是唯一一次：
+// 库裡存的是它的 SHA-256，此後任何讀法都拿不回原值。除它之外的全部欄位都是可展示事實
+// （兩側最小資料、影響清單、源會話數、資料庫版本、失效時刻）；
+// 沒有口令、沒有會話材料、沒有帳戶的憑據欄。
+//
+// 這是一份「授權」而不是一個「完成」：回應與界面都不得把它寫成已經綁定。
+// 執行那動屬目標本人的通路（POST /auth/guest-bindings），今日界面在別處。
+type guestBindTicketResponse struct {
+	Ticket             string              `json:"ticket"`
+	TicketID           string              `json:"ticket_id"`
+	Source             standardAccountItem `json:"source"`
+	Target             standardAccountItem `json:"target"`
+	Impacts            []string            `json:"impacts"`
+	SourceOpenSessions int                 `json:"source_open_sessions"`
+	SchemaVersion      int                 `json:"schema_version"`
+	ExpiresAt          string              `json:"expires_at"`
+	ConsentMode        string              `json:"consent_mode"`
+	RequestID          string              `json:"request_id"`
+}
+
 // standardAccountEndpoints 回傳普通帳戶端點的登記清單；未注入用例時為空。
 //
 // 登記與否只這一處來源，深連結回退用的 API 首段清單（/admin）因此自動同步。
@@ -328,11 +370,16 @@ type standardAccountBindPreflightResponse struct {
 // 升級走 /upgrade 子資源：它動的是「這個帳戶是哪一類主體」，比憑據與狀態更高一層——
 // 與 /password 分成兩條路徑，正是為了讓「重置口令」永遠不可能順帶完成一次身份升級
 // （那條 PUT 的本體連登入名的格子都沒有）。
-// 綁定預檢走 /bind-preflight 子資源（POST）：它是一條純只讀的評估通路——「綁定」今日
-// 沒有執行入口（用戶批准的方向：執行動詞屬於目標持有人自己的會話，屬後續步驟），
-// 這裡只有預覽。它掛在來源（訪戶）那一側的子資源上，目標標識從本體進來：
+// 綁定預檢走 /bind-preflight 子資源（POST）：它是一條純只讀的評估通路——本端點今日
+// 仍然不執行綁定，它只回答「這一对此刻能不能綁、被什麼擋著、綁了會發生什麼」。
+// 它掛在來源（訪戶）那一側的子資源上，目標標識從本體進來：
 // 一次請求只評估一對（來源, 目標），不存在「替這個訪戶列出可綁定目標」的讀法——
 // 請求形態本身就是反枚舉邊界，不靠界面藏按钮維持。
+// 憑證簽發走 /bind-ticket 子資源（POST）：它是預覽的另一半——把「这一对可行」變成一枚
+// 限定這一對、15 分鐘、只准核銷一次的操作憑證，交給目標本人。這一步仍不是綁定
+// （訪戶未退休、會話未撤、留痕未追加），而它也絕不能由目標本人來按：主體判定在
+// 用例的第一行（NeedServerAdmin），因此目標的會話敲它只會拿到既有的 2011。
+// 雨條路徑都是 POST 而不是 GET：它們都需要「一对輸入」，其中簽發还要落庫。
 // 普通帳戶今日沒有刪除通路，所以父路徑上只有 GET／HEAD／PUT（Root 那側的 DELETE
 // 不在这裡複製一份）。
 func (s *Server) standardAccountEndpoints() []apiRoute {
@@ -351,6 +398,8 @@ func (s *Server) standardAccountEndpoints() []apiRoute {
 		{"/admin/accounts/{account_id}/upgrade", s.allowMethods(s.handleAdminAccountUpgrade,
 			http.MethodPut)},
 		{"/admin/accounts/{account_id}/bind-preflight", s.allowMethods(s.handleAdminAccountBindPreflight,
+			http.MethodPost)},
+		{"/admin/accounts/{account_id}/bind-ticket", s.allowMethods(s.handleAdminAccountBindTicket,
 			http.MethodPost)},
 	}
 }
@@ -463,6 +512,93 @@ func bindPreflightResponseOf(pre stdacct.GuestBindPreflight, requestID string) s
 		SchemaVersion:      pre.SchemaVersion,
 		ConsentMode:        pre.ConsentMode,
 		RequestID:          requestID,
+	}
+}
+
+// handleAdminAccountBindTicket 處理 POST /admin/accounts/{account_id}/bind-ticket：
+// 為一對（來源訪戶, 目標正式帳戶）簽發一枚短期單次的綁定操作憑證。
+//
+// 前置鏈與父路徑逐字相同（consolePrincipal：來源判定 → 憑據解析 → 首次改密門閂），
+// 授權與兩側範圍都由用例判，傳輸層不先判一次——目標本人帶著自己那枚零授予會話敲這條端點，
+// 拿到的是既有的 2011，而不是「因為憑證准了他所以他能簽發」。
+//
+// 與只讀預檢最大的分別在這裡：這條通路會寫。寫的不是綁定，而是「一份授權」，
+// 所以它沒有「失敗也成功」那一形——不可行的這一對以 2026 帶著阻止原因回來，
+// 而不是 200 加一個布爾值：簽發成功這件事本身就承諾了可行，回 200 卻帶空的 impacts
+// 會讓界面把一份被拒的申請讀成一张已發出的小票。
+// 路徑上的來源標識非法、以及任一侧「不在這本目錄」同样是 1001（與詳情端點同句）；
+// 本體裡的目標標識缺失或不成形是 1004 點名 target_account_id。
+func (s *Server) handleAdminAccountBindTicket(w http.ResponseWriter, r *http.Request) {
+	principal, ok := s.consolePrincipal(w, r)
+	if !ok {
+		return
+	}
+	sourceID, err := idgen.Parse(r.PathValue("account_id"))
+	if err != nil {
+		writeError(w, r, CodeNotFound, http.StatusNotFound)
+		return
+	}
+	var in guestBindTicketRequest
+	if !decodeJSON(w, r, &in) {
+		return
+	}
+	targetID, err := idgen.Parse(in.TargetAccountID)
+	if err != nil {
+		writeErrorDetails(w, r, CodeInvalidBody, http.StatusBadRequest,
+			map[string]any{"invalid_field": "target_account_id"})
+		return
+	}
+	issued, err := s.stdAccounts.IssueGuestBindTicket(r.Context(), principal, sourceID, targetID,
+		requestIDFromRequest(r))
+	if err != nil {
+		s.writeGuestBindTicketFailure(w, r, err)
+		return
+	}
+	impacts := make([]string, 0, len(issued.Plan.Impacts))
+	for _, i := range issued.Plan.Impacts {
+		impacts = append(impacts, i.String())
+	}
+	writeJSON(w, http.StatusOK, guestBindTicketResponse{
+		Ticket:             issued.Ticket,
+		TicketID:           issued.TicketID.String(),
+		Source:             profileItemOf(issued.Plan.Source),
+		Target:             profileItemOf(issued.Plan.Target),
+		Impacts:            impacts,
+		SourceOpenSessions: issued.Plan.SourceOpenSessions,
+		SchemaVersion:      issued.Plan.SchemaVersion,
+		ExpiresAt:          timeutil.FormatUTC(issued.ExpiresAt),
+		ConsentMode:        issued.Plan.ConsentMode,
+		RequestID:          requestIDFromRequest(r),
+	})
+}
+
+// writeGuestBindTicketFailure 對映簽發通路的失敗。
+//
+// 映射短是刻意的：這一條沒有「業務結論以 200 回來」的形態（見 handler 頭注），
+// 而 2026 的 details 只帶穩定原因記號清單——表名、欄位現值與任何憑據材料都不在此列，
+// 界面要的句子由記號去 ARB 裡選，不是由伺服器拼散文。
+func (s *Server) writeGuestBindTicketFailure(w http.ResponseWriter, r *http.Request, err error) {
+	var planErr *stdacct.BindPlanError
+	switch {
+	case errors.Is(err, stdacct.ErrAccountNotFound):
+		writeError(w, r, CodeNotFound, http.StatusNotFound)
+	case errors.As(err, &planErr):
+		blockers := make([]string, 0, len(planErr.Blockers))
+		for _, b := range planErr.Blockers {
+			blockers = append(blockers, b.String())
+		}
+		writeErrorDetails(w, r, CodeBindPlanStale, http.StatusConflict,
+			map[string]any{"blockers": blockers})
+	case errors.Is(err, identity.ErrPermissionDenied):
+		// 403：憑據有效，缺的是權限；不發刪除指令——那枚 Cookie 此刻仍換得出同一個主體。
+		writeError(w, r, CodePermissionDenied, http.StatusForbidden)
+	case errors.Is(err, identity.ErrNotAuthenticated), errors.Is(err, identity.ErrInvalidPrincipal):
+		// 與建號同口徑：帶著有效會話卻換不出可信主體是服務端缺陷，報 500 讓它被查。
+		s.logger.Error("綁定憑證簽發的主體不合法", "request_id", requestIDFromRequest(r), "err", err)
+		writeError(w, r, CodeUnknown, http.StatusInternalServerError)
+	default:
+		s.logger.Error("綁定憑證簽發失敗", "request_id", requestIDFromRequest(r), "err", err)
+		writeError(w, r, CodeUnknown, http.StatusInternalServerError)
 	}
 }
 
@@ -953,7 +1089,7 @@ func directoryItemOf(row stdacct.DirectoryRow) standardAccountItem {
 	return item
 }
 
-// profileItemOf 把單筆經實體校驗的資料成回應本體；與目錄行同形，外加禁用時刻。
+// profileItemOf 把單筆經實體校驗的資料成回應本體；與目錄行同形，外加禁用與退休時刻。
 func profileItemOf(p stdacct.StandardProfile) standardAccountItem {
 	item := standardAccountItem{
 		AccountID:          p.AccountID.String(),
@@ -969,6 +1105,9 @@ func profileItemOf(p stdacct.StandardProfile) standardAccountItem {
 	}
 	if !p.DisabledAt.IsZero() {
 		item.DisabledAt = timeutil.FormatUTC(p.DisabledAt)
+	}
+	if !p.RetiredAt.IsZero() {
+		item.RetiredAt = timeutil.FormatUTC(p.RetiredAt)
 	}
 	return item
 }

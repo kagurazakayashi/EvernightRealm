@@ -68,6 +68,10 @@ type StandardProfile struct {
 	Status account.Status
 	// DisabledAt 為進入禁用狀態的時刻；active 時恆為零值（資料庫 NULL）。
 	DisabledAt time.Time
+	// RetiredAt 為進入綁定退休終態的時刻；不為 retired 時恆為零值（資料庫 NULL）。
+	// 它與 Status 一同把「這個人已被誰綁走、哪一刻被綁走」講成讀得到的事實：
+	// 退休行仍在本目錄之內（刻意保留的可回溯性），而這一欄是那句話的時間部分。
+	RetiredAt time.Time
 	// MustChangePassword 為是否仍欠首次改密（只讀展示；解除它的唯一通路是本人改密）。
 	MustChangePassword bool
 	// CreatedAt 為帳戶建立時刻。
@@ -205,6 +209,10 @@ func (s *Service) readStandardProfile(ctx context.Context, q database.Querier,
 		a.Status == account.StatusRejected {
 		return StandardProfile{}, ErrAccountNotFound
 	}
+	// 退休態刻意留在本目錄的讀取範圍內：那個人被綁走了，但他存在過、他的歷史指得回來，
+	// 而「這一行是綁定留痕的來源」正是操作者要看得見的事實。
+	// 它不是一個可再被寫入的目標——停用／恢復、重置、升級、再一次綁定四條通路各按
+	// 自己的 WHERE 守衛與形態判定把它拒在門外（不是靠這裡不出局來放行的）。
 	return StandardProfile{
 		AccountID:          a.ID,
 		LoginName:          a.LoginName,
@@ -212,6 +220,7 @@ func (s *Service) readStandardProfile(ctx context.Context, q database.Querier,
 		Type:               a.Type,
 		Status:             a.Status,
 		DisabledAt:         a.DisabledAt,
+		RetiredAt:          a.RetiredAt,
 		MustChangePassword: a.MustChangePassword,
 		CreatedAt:          a.CreatedAt,
 		LastLoginAt:        a.LastLoginAt,

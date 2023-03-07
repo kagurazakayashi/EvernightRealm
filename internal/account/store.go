@@ -285,6 +285,45 @@ func (s *Store) UpgradeGuestToStandard(ctx context.Context, q database.Querier, 
 	return n > 0, nil
 }
 
+// RetireGuestForBind 讓一名此刻可用的訪戶進入退休終態：同一條 UPDATE 落下
+// status='retired' 與 retired_at，兩個欄位同生同滅（遷移 0011 的成對 CHECK 不接受半成品）。
+//
+// 這一跳只做兩件事，而且 SQL 的形狀就是那兩句話的證據：
+//   - 不動 display_name：與 MarkDeleted 的區別正在這裡。退休不做匿名化——X 那個名字是歷史
+//     的一部分，「他曾經叫這個名字、後來以這個標識被併入 Y」要能在讀一行資料時原样看見；
+//   - 不動 account_type、不動 login_name 與其鍵、不動任何時刻欄：穩定標識存续、
+//     登入名繼續被佔用（「不可複用」因此是落庫的事實而不是介面的一句勸告）、
+//     憑據欄本來就為 NULL（訪戶形態凍結）也沒有可複製的東西。
+//
+// WHERE 守衛取的是可觀測事實而不是呼叫端交來的依據值（與 UpgradeGuestToStandard 同一取向）：
+// 「訪戶且可用」是目錄詳情本来就读得到的事實，放進 WHERE 就足以讓
+// 「對已退休訪戶的重複綁定」「對停用訪戶的綁定」命中零行。呼叫端已在同一筆交易裡
+// 先做範圍核實與形態判定，走到 changed=false 只剩併發的另一次綁定或程式缺陷，
+// 兩者都該讓交易回滾而不是報綁定成功。
+//
+// 時刻取自注入時鐘並由呼叫端在同筆交易內重讀取得（留痕行的 bound_at 用的就是那一個值）：
+// 一次綁定在資料庫裡只有一個時刻，不留「兩行各記各的」的空间。
+func (s *Store) RetireGuestForBind(ctx context.Context, q database.Querier, id idgen.ID) (bool, error) {
+	if q == nil {
+		return false, errors.New("account: 需要可用的資料庫連線或交易")
+	}
+	if id.IsNil() {
+		return false, errors.New("account: 退休訪戶必須帶目標標識")
+	}
+	res, err := q.ExecContext(ctx,
+		`UPDATE accounts SET status = ?, retired_at = ?
+		WHERE id = ? AND account_type = 'guest' AND status = 'active'`,
+		string(StatusRetired), timeutil.ToMillis(s.clock.Now()), id.String())
+	if err != nil {
+		return false, fmt.Errorf("account: 讓訪戶進入退休終態失敗: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("account: 讀取退休結果失敗: %w", err)
+	}
+	return n > 0, nil
+}
+
 // UpdateDisplayName 以比較-and-set 更換帳戶顯示名：只有 display_name 仍逐字等於
 // expectedDisplayName 時，才把它換成新值。
 //
@@ -490,7 +529,7 @@ func (s *Store) MarkDeleted(ctx context.Context, q database.Querier, id idgen.ID
 // selectAccountSQL 是欄位清單的唯一定義點（查詢用的欄序與 scanRow 的取值順序同源）。
 const selectAccountSQL = `SELECT id, login_name, login_name_key, display_name, password_hash,
 		account_type, status, must_change_password, created_at, last_login_at, disabled_at, deleted_at,
-		reviewed_at
+		reviewed_at, retired_at
 	FROM accounts`
 
 // scanOne 收攏 QueryRow 的取行與錯誤映射。
@@ -502,10 +541,11 @@ func scanOne(row *sql.Row) (Account, error) {
 		mustChange, createdAt                    int64
 		lastLoginAt, disabledAt, deletedAt       sql.NullInt64
 		reviewedAt                               sql.NullInt64
+		retiredAt                                sql.NullInt64
 	)
 	err := row.Scan(&idText, &loginName, &loginKey, &displayName, &passwordHash,
 		&typeText, &statusText, &mustChange, &createdAt, &lastLoginAt, &disabledAt, &deletedAt,
-		&reviewedAt)
+		&reviewedAt, &retiredAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Account{}, ErrNotFound
 	}
@@ -513,22 +553,23 @@ func scanOne(row *sql.Row) (Account, error) {
 		return Account{}, fmt.Errorf("account: 讀取帳戶失敗: %w", err)
 	}
 	return accountFromRow(idText, loginName, loginKey, displayName, passwordHash,
-		typeText, statusText, mustChange, createdAt, lastLoginAt, disabledAt, deletedAt, reviewedAt)
+		typeText, statusText, mustChange, createdAt, lastLoginAt, disabledAt, deletedAt, reviewedAt,
+		retiredAt)
 }
 
 // accountFromRow 把一列欄位讀回實體並做入庫後校驗。
 //
 // 標識讀不回來、或帶著表外枚舉值時一律報錯：那代表資料庫被繞過校驗寫入了東西
 // （或執行檔比資料庫舊），靜默跳過會讓那筆帳戶在介面上徹底消失。
-// 狀態與四個時刻的配對也在這裡複核（遷移 0007 的三條方向規則加 0009 的三條）：
-// 讀取路徑是「帳戶實體」唯一的成形點，放行一個形態矛盾的行，
-// 等於讓下游每個用例各自決定「rejected 但沒有 reviewed_at」算什麼。
+// 狀態與五個時刻的配對也在這裡複核（遷移 0007 的三條方向規則加 0009 的三條、
+// 0011 的一條）：讀取路徑是「帳戶實體」唯一的成形點，
+// 放行一個形態矛盾的行，等於讓下游每個用例各自決定「rejected 但沒有 reviewed_at」算什麼。
 func accountFromRow(
 	idText, loginName, loginKey, displayName string,
 	passwordHash sql.NullString,
 	typeText, statusText string,
 	mustChange, createdAt int64,
-	lastLoginAt, disabledAt, deletedAt, reviewedAt sql.NullInt64,
+	lastLoginAt, disabledAt, deletedAt, reviewedAt, retiredAt sql.NullInt64,
 ) (Account, error) {
 	id, err := idgen.Parse(idText)
 	if err != nil {
@@ -559,6 +600,9 @@ func accountFromRow(
 	}
 	if reviewedAt.Valid {
 		a.ReviewedAt = timeutil.FromMillis(reviewedAt.Int64)
+	}
+	if retiredAt.Valid {
+		a.RetiredAt = timeutil.FromMillis(retiredAt.Int64)
 	}
 	// 形態複核：0007 的三條方向規則逐字承接。
 	//   - disabled 必帶停用時刻；
@@ -592,6 +636,23 @@ func accountFromRow(
 	if (a.Status == StatusPending || a.Status == StatusRejected) && !a.DisabledAt.IsZero() {
 		return Account{}, fmt.Errorf("account: 帳戶 %s 是審批鏈的狀態卻帶著停用時刻（%s）",
 			idText, statusText)
+	}
+	// 0011 新增的三條：退休時刻只與退休態成對，而退休只屬於訪戶、不屬於「被停用過」那條鏈。
+	//   - retired 必帶時刻：一句「他被併走了」沒有時刻就無從核實是哪一次綁定說的話；
+	//   - 非 retired 卻帶著時刻：兩套真相同時成立（狀態說他還在，時刻說他已被併走）；
+	//   - 退休行帶著停用時刻：綁定只從「可用」那一跳進入，停用中的訪戶要綁走
+	//     得先恢復他的登入能力，那是另一句話（資料庫 CHECK 同樣擋死，這裡讓讀取路徑
+	//     也說同一句話，外部工具改壞庫時不會有一處靜默放行）。
+	if (a.Status == StatusRetired) != !a.RetiredAt.IsZero() {
+		return Account{}, fmt.Errorf("account: 帳戶 %s 的 status 與 retired_at 不成對（%s/%v）",
+			idText, statusText, a.RetiredAt)
+	}
+	if a.Status == StatusRetired && a.Type != TypeGuest {
+		return Account{}, fmt.Errorf("account: 帳戶 %s 是 %s 類型卻帶著退休終態（只有訪戶會被綁走）",
+			idText, typeText)
+	}
+	if a.Status == StatusRetired && !a.DisabledAt.IsZero() {
+		return Account{}, fmt.Errorf("account: 帳戶 %s 已退休卻帶著停用時刻", idText)
 	}
 	return a, nil
 }

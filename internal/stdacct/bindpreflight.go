@@ -32,22 +32,27 @@
 //   - sessions（硬外鍵）：執行時與綁定同交易撤銷，與升級同一手段；
 //   - account_server_roles（硬外鍵）：訪戶的行集按遷移 0006 的觸發器恆空，
 //     預檢現讀復核一次，查得有任一授予即判形態缺陷並阻止（source_has_grants）；
+//   - guest_bind_tickets（硬外鍵，三個標識欄）：綁定憑證，承載的是「准了這一對」的
+//     授權痕跡，不是待搬遷的歸屬；
+//   - guest_account_bindings（硬外鍵，兩個標識欄）：綁定的不可變留痕，本身就是「留痕」
+//     而不是衝突；
 //   - root_audit／activity_audit（無外鍵的軟參照、只追加）：歷史指向原標識，
 //     原樣保留，既不搬也不改寫，因此不構成衝突——它們是「留痕」本身，
 //     不是「待搬遷的引用」。
 //
-// 其餘現存的表（server_settings、策略單例、邀請碼、兩張遷移守衛表）不引用帳戶。
-// 這份登記表就是本步能宣稱的全部覆蓋範圍——所以預檢不用碼內寫死的靜態清單交差了事：
+// 其餘現存的表（server_settings、策略單例、邀請碼、幾支遷移的守衛表）不引用帳戶。
+// 這份登記表就是綁定通路能宣稱的全部覆蓋範圍——所以判定不用碼內寫死的靜態清單交差了事：
 // 每次運行都現掃實庫的外鍵邊（sqlite_master＋PRAGMA foreign_key_list），只要存在
 // 一張引用 accounts 而不在登記表上的表（未來活動、帳本、NPC 模組新加的表），
 // 整體收斂成阻止原因 unknown_references：評估不了的引用就拒絕，
 // 絕不靜默合併權限或資產，也絕不假裝看不見。未來模組必須先把自己的引用
 // 接入這份登記表（與那時的執行通路一起），綁定才重新被允許。
 //
-// 數據版本：回應帶實庫當前的 schema 版本（migrate.Current 這一處唯一實作點讀取）。
-// 這句話告訴呼叫端「這份預覽是按哪一版本的登記表跑的」；預覽天生就是會過期的快照，
-// 執行步在寫入前必須重讀版本與全部可觀測事實並重新判定——那是執行通路的職責，
-// 本用例不負責把預覽鎖成憑證，也不提供把預覽當依據的任何通路（零寫入、零落庫憑據）。
+// 數據版本：結論帶實庫當前的 schema 版本（migrate.Current 這一處唯一實作點讀取）。
+// 這句話告訴呼叫端「這份判定是按哪一版本的登記表跑的」；預覽天生就是會過期的快照，
+// 而寫入通路（見 bindissue.go 與 bindclaim.go）在寫之前必須重讀版本與全部可觀測事實
+// 並重新判定——那是那兩條通路的職責，本檔案这一條不負責把預覽鎖成憑證，
+// 也不提供把預覽當依據的任何通路（零寫入、零落庫憑據）。
 package stdacct
 
 import (
@@ -58,8 +63,10 @@ import (
 	"regexp"
 
 	"github.com/kagurazakayashi/EvernightRealm/internal/account"
+	"github.com/kagurazakayashi/EvernightRealm/internal/database"
 	"github.com/kagurazakayashi/EvernightRealm/internal/database/migrate"
 	"github.com/kagurazakayashi/EvernightRealm/internal/grant"
+	"github.com/kagurazakayashi/EvernightRealm/internal/guestbind"
 	"github.com/kagurazakayashi/EvernightRealm/internal/identity"
 	"github.com/kagurazakayashi/EvernightRealm/internal/idgen"
 )
@@ -136,7 +143,10 @@ func (i BindImpact) String() string { return string(i) }
 // BindConsentModeTargetSelfInitiated 是唯一已批准的同意形態：綁定只能由目標帳戶
 // 持有人以自己的已認證會話發起。它寫在回應的 consent_mode 欄裡（恆為此值），
 // 因為「誰有資格按下執行」是合同的一部分，不是界面文案的修辭。
-const BindConsentModeTargetSelfInitiated = "target_self_initiated"
+//
+// 字面值的權威在 internal/guestbind（那裡它是落庫 CHECK 的封閉集合），
+// 這裡只是同一個值的對外名字——兩處各拼一次字串，遲早有一處拼錯而另一處不知道。
+const BindConsentModeTargetSelfInitiated = guestbind.ConsentModeTargetSelfInitiated
 
 // bindKnownAccountReferences 是硬引用（外鍵指向 accounts(id)）的處置登記表：
 // 表名 → 處置一句。登記表外的引用表一律觸發 unknown_references（見檔案頭注）。
@@ -145,6 +155,13 @@ const BindConsentModeTargetSelfInitiated = "target_self_initiated"
 var bindKnownAccountReferences = map[string]string{
 	"sessions":             "綁定執行時與綁定同交易撤銷（RevokeAccount 手段，與升級同源）",
 	"account_server_roles": "訪戶行集按遷移 0006 觸發器恆空；預檢現讀復核，非空即 source_has_grants",
+	// 遷移 0011 建的兩張表是綁定通路自己的介質與留痕，必須同批登記：
+	// 漏登記的后果不是「少一句說明」，而是預檢從此把自己的表讀成未知引用、
+	// 把整條綁定通路永久封死（fail-closed 的方向是對的，但那會是一個自己造出來的死鎖）。
+	"guest_bind_tickets": "簽發後短效、限定這一對、只准核銷一次的憑證：核銷時同交易標記 consumed_at，" +
+		"未核銷者到期即失效；它承載的是「准了這一對」的授權痕跡，不是待搬遷的歸屬",
+	"guest_account_bindings": "綁定的不可變留痕（只追加）：來源標識存續、指向原行，" +
+		"既有歷史從不被改寫成「從來都是目標帳戶」；source 欄的 UNIQUE 是「一個訪戶只被綁走一次」的結構保證",
 }
 
 // bindTableIdentifier 是能把表名安全拼進 PRAGMA 的形狀閘。sqlite_master 裡的表名
@@ -188,16 +205,9 @@ type GuestBindPreflight struct {
 // 寫交易的邊界，為一次預覽去排單寫入者的鎖是把「讀」當「寫」用）：
 //  1. 授權先於一切（NeedServerAdmin，與建號、目錄、編輯、停用、重置、升級同一道閘）：
 //     匿名 2002 族、訪戶本人与普通帳戶 2011 都是既有授權矩陣的事實，本用例不新造規則；
-//  2. 兩側經 readStandardProfile 讀取：不在目錄的一方（不存在／幽靈／管理員／
-//     已刪除／待審批鏈）讓整個預檢以不可分辨的 ErrAccountNotFound 收場——與詳情端點
-//     同形，預覽不是新的枚舉面；
-//  3. 現掃實庫外鍵邊（findUnregisteredAccountReferences）：登記表外的任何帳戶引用表
-//     記一條 unknown_references，並將本對綁定整體阻止；
-//  4. 形態與歸屬判定：同對／非訪戶來源／停用來源／帶授予的來源／訪戶目標／
-//     停用目標——每一條都是「此刻的安全邊界」，不是一個可以繞過的建議；
-//  5. 源會話計數與 schema 版本讀取：回應要如實說出影響範圍和這份快照的時代背景；
-//  6. 組裝：blockers 清空才 executable，可執行才帶 impacts。被拒（2011／1001）與
-//     被預覽為不可行（200 帶原因）都零寫入——後者連日誌都只是一句 Info 關聯記錄。
+//  2. 零值標識不進資料庫也不分句：與其餘通路「不在目錄」同一句話；
+//  3. 其餘判定全部在 evaluateBindPlan 裡，與簽發／核銷那兩條通路共用同一份實作——
+//     「預覽說可行」與「執行時重讀到的可行性」必須是同一句話，不是兩套規則裡恰好写得像的兩句。
 func (s *Service) PreflightGuestBind(ctx context.Context, principal identity.Principal,
 	sourceID, targetID idgen.ID, requestID string) (GuestBindPreflight, error) {
 	if err := identity.Authorize(principal, identity.NeedServerAdmin); err != nil {
@@ -210,31 +220,67 @@ func (s *Service) PreflightGuestBind(ctx context.Context, principal identity.Pri
 		return GuestBindPreflight{}, ErrAccountNotFound
 	}
 
-	q := s.db.SQL()
+	// 本條路徑是純預覽：走 autocommit 快照、零交易、零寫入。
+	plan, unknownRefs, err := s.evaluateBindPlan(ctx, s.db.SQL(), sourceID, targetID)
+	if err != nil {
+		return GuestBindPreflight{}, err
+	}
+	// 未知引用的表名只進執行日誌：回應給操作者的意義是「有模組還沒接入預檢」，
+	// 數表名既幫不上處置，也不是這條通路該出口的細節。
+	if len(unknownRefs) > 0 {
+		s.log.Warn("綁定預檢發現未接入登記表的帳戶引用表",
+			"tables", fmt.Sprint(unknownRefs), "request_id", requestID)
+	}
+	s.log.Info("已完成訪戶綁定預檢（只讀，未綁定）",
+		"source", sourceID.String(), "target", targetID.String(),
+		"executable", plan.Executable, "request_id", requestID)
+	return plan, nil
+}
+
+// evaluateBindPlan 是對一對（來源, 目標）綁定可行性的唯一判定實作：
+// 只讀預檢、憑證簽發與憑證核銷三條通路都經它在「各自那一刻」取得結論。
+//
+// q 由呼叫端給（autocommit 連線或交易）：這正是三條通路共用同一份判定而不各寫一套的條件——
+// 預覽用 autocommit，簽發與核銷用它們各自的寫交易，判定內容逐字相同、讀到的時代不同。
+// 回傳的第二個值是未接入登記表的引用表名清單（只供日誌與摘要，不進回應），
+// 錯誤只可能是被分過類的結論（ErrAccountNotFound 一族）或內部故障。
+//
+// 判定順序與每一跳的理由：
+//  1. 兩側經 readStandardProfile 讀取：不在目錄的一方（不存在／幽靈／管理員／
+//     已刪除／待審批鏈）讓整個預檢以不可分辨的 ErrAccountNotFound 收場——與詳情端點
+//     同形，預覽不是新的枚舉面；
+//  2. 現掃實庫外鍵邊（findUnregisteredAccountReferences）：登記表外的任何帳戶引用表
+//     記一條 unknown_references，並將本對綁定整體阻止；
+//  3. 形態與歸屬判定：同對／非訪戶來源／停用來源／帶授予的來源／訪戶目標／
+//     停用目標——每一條都是「此刻的安全邊界」，不是一個可以繞過的建議；
+//  4. 源會話計數與 schema 版本讀取：結論要如實說出影響範圍和這份快照的時代背景；
+//  5. 組裝：blockers 清空才 executable，可執行才帶 impacts。
+func (s *Service) evaluateBindPlan(ctx context.Context, q database.Querier,
+	sourceID, targetID idgen.ID) (GuestBindPreflight, []string, error) {
 	source, err := s.readStandardProfile(ctx, q, sourceID)
 	if err != nil {
-		return GuestBindPreflight{}, classifyBindPreflightRead(err)
+		return GuestBindPreflight{}, nil, classifyBindPreflightRead(err)
 	}
 	target, err := s.readStandardProfile(ctx, q, targetID)
 	if err != nil {
-		return GuestBindPreflight{}, classifyBindPreflightRead(err)
+		return GuestBindPreflight{}, nil, classifyBindPreflightRead(err)
 	}
-	unknownRefs, err := s.findUnregisteredAccountReferences(ctx)
+	unknownRefs, err := s.findUnregisteredAccountReferences(ctx, q)
 	if err != nil {
-		s.log.Error("綁定預檢掃描帳戶引用失敗", "request_id", requestID, "err", err)
-		return GuestBindPreflight{}, fmt.Errorf("stdacct: 綁定預檢掃描帳戶引用失敗: %w", err)
+		return GuestBindPreflight{}, nil, fmt.Errorf("stdacct: 綁定預檢掃描帳戶引用失敗: %w", err)
 	}
 	openSessions, err := s.sessions.OpenAccountSessionCount(ctx, q, sourceID)
 	if err != nil {
-		s.log.Error("綁定預檢統計源會話失敗", "request_id", requestID, "err", err)
-		return GuestBindPreflight{}, fmt.Errorf("stdacct: 綁定預檢統計源會話失敗: %w", err)
+		return GuestBindPreflight{}, nil, fmt.Errorf("stdacct: 綁定預檢統計源會話失敗: %w", err)
 	}
-	// 版本讀取複用 migrate.Current——「這個庫跑到了哪一版」在整個倉庫只有那一個實作點；
+	// 版本讀取複用 migrate.Current——「這個庫跑到哪一版」在整個倉庫只有那一個實作點；
 	// 在這裡自己抄一句 SELECT MAX(version) 就是養出第二個真相。
-	schemaVersion, err := migrate.Current(ctx, q)
+	// 取 autocommit 連線而不是呼叫端那條 q：migrate.Current 的簽名要的是 *sql.DB，
+	// 而這個讀取在交易內也安全——遷移自己必須拿一條寫交易才能推進版本，
+	// 而 SQLite 只有一個寫入者，本交易進行期間版本不可能改變。
+	schemaVersion, err := migrate.Current(ctx, s.db.SQL())
 	if err != nil {
-		s.log.Error("綁定預檢讀取資料庫版本失敗", "request_id", requestID, "err", err)
-		return GuestBindPreflight{}, fmt.Errorf("stdacct: 綁定預檢讀取資料庫版本失敗: %w", err)
+		return GuestBindPreflight{}, nil, fmt.Errorf("stdacct: 綁定預檢讀取資料庫版本失敗: %w", err)
 	}
 
 	result := GuestBindPreflight{
@@ -251,9 +297,7 @@ func (s *Service) PreflightGuestBind(ctx context.Context, principal identity.Pri
 	// （一個 guest 的「同對」預覽同時說「目標不是正式帳戶」是精確的廢話）。
 	if sourceID == targetID {
 		result.Blockers = append(result.Blockers, BindBlockerSameAccount)
-		s.log.Info("已完成訪戶綁定預檢（只讀，未綁定）",
-			"source", sourceID.String(), "executable", false, "request_id", requestID)
-		return result, nil
+		return result, unknownRefs, nil
 	}
 
 	// 來源側：綁定的主詞只能是「此刻是訪戶且可登入且名下沒有評估不了的授予」的這行人。
@@ -264,12 +308,11 @@ func (s *Service) PreflightGuestBind(ctx context.Context, principal identity.Pri
 			result.Blockers = append(result.Blockers, BindBlockerSourceNotActive)
 		}
 		// 授予復核讀 grant 倉儲的公開讀法（授予的權威只在那裡，本套件不抄 SQL）。
-		// Roles() 對壞值（認不得的角色字串）失敗即整次預檢失敗：那是「評估不了」，
+		// Roles() 對壞值（認不得的角色字串）失敗即整次判定失敗：那是「評估不了」，
 		// 絕不能降級成「他沒有授予」放行綁定——靜默放行才是這條通路最壞的結局。
 		roles, err := s.grants.Roles(ctx, q, sourceID)
 		if err != nil {
-			s.log.Error("綁定預檢復核來源授予失敗", "request_id", requestID, "err", err)
-			return GuestBindPreflight{}, fmt.Errorf("stdacct: 綁定預檢復核來源授予失敗: %w", err)
+			return GuestBindPreflight{}, nil, fmt.Errorf("stdacct: 綁定預檢復核來源授予失敗: %w", err)
 		}
 		if roles.Count() > 0 {
 			result.Blockers = append(result.Blockers, BindBlockerSourceHasGrants)
@@ -285,15 +328,11 @@ func (s *Service) PreflightGuestBind(ctx context.Context, principal identity.Pri
 		result.Blockers = append(result.Blockers, BindBlockerTargetNotActive)
 	}
 
-	// 未知引用最後追加：它是對「本預檢自己的認知邊界」的判定，優先級上與形態原因
+	// 未知引用最後追加：它是對「本判定自己的認知邊界」的判定，優先級上與形態原因
 	// 平級並列，但處置完全不同——形態原因有重讀後再試的通路，未知引用要等的是
-	// 未來模組把自己接入登記表，催誰重試都沒用。記號只出現一次：表名不進回應。
+	// 未來模組把自己接入登記表，催誰重試都沒用。記號只出現一次：表名不進結論。
 	if len(unknownRefs) > 0 {
 		result.Blockers = append(result.Blockers, BindBlockerUnknownReferences)
-		// 表名只進執行日誌：回應給操作者的意義是「有模組還沒接入預檢」，
-		// 數表名既幫不上處置，也不是這條通路該出口的細節。
-		s.log.Warn("綁定預檢發現未接入登記表的帳戶引用表",
-			"tables", fmt.Sprint(unknownRefs), "request_id", requestID)
 	}
 
 	result.Executable = len(result.Blockers) == 0
@@ -306,10 +345,7 @@ func (s *Service) PreflightGuestBind(ctx context.Context, principal identity.Pri
 			BindImpactTargetShapeUnchanged,
 		}
 	}
-	s.log.Info("已完成訪戶綁定預檢（只讀，未綁定）",
-		"source", sourceID.String(), "target", targetID.String(),
-		"executable", result.Executable, "request_id", requestID)
-	return result, nil
+	return result, unknownRefs, nil
 }
 
 // classifyBindPreflightRead 把 readStandardProfile 的失敗收斂成預檢對外的可判別結論。
@@ -335,9 +371,12 @@ func classifyBindPreflightRead(err error) error {
 //
 // 讀取失敗一律上拋（呼叫端收斂為整次預檢失敗）：查不成就是評估不了，
 // 評估不了就不能說「可行」。
-func (s *Service) findUnregisteredAccountReferences(ctx context.Context) ([]string, error) {
-	db := s.db.SQL()
-	rows, err := db.QueryContext(ctx,
+func (s *Service) findUnregisteredAccountReferences(ctx context.Context,
+	q database.Querier) ([]string, error) {
+	if q == nil {
+		return nil, errors.New("stdacct: 綁定預檢缺少資料庫連線或交易")
+	}
+	rows, err := q.QueryContext(ctx,
 		"SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
 	if err != nil {
 		return nil, fmt.Errorf("stdacct: 列舉資料庫表失敗: %w", err)
@@ -371,7 +410,7 @@ func (s *Service) findUnregisteredAccountReferences(ctx context.Context) ([]stri
 			unknown = append(unknown, name)
 			continue
 		}
-		referencesAccounts, err := tableReferencesAccounts(ctx, db, name)
+		referencesAccounts, err := tableReferencesAccounts(ctx, q, name)
 		if err != nil {
 			return nil, err
 		}
@@ -387,8 +426,8 @@ func (s *Service) findUnregisteredAccountReferences(ctx context.Context) ([]stri
 // 表名已由呼叫端過形狀閘，拼進 PRAGMA 的雙引號識別符沒有注入面；
 // PRAGMA 的結果列（id, seq, table, from, to, on_update, on_delete, match）是 SQLite
 // 的穩定協議，to 在隱式參照主鍵時可能為 NULL，因此掃成可空值再比較。
-func tableReferencesAccounts(ctx context.Context, db *sql.DB, table string) (bool, error) {
-	rows, err := db.QueryContext(ctx, `PRAGMA foreign_key_list("`+table+`")`)
+func tableReferencesAccounts(ctx context.Context, q database.Querier, table string) (bool, error) {
+	rows, err := q.QueryContext(ctx, `PRAGMA foreign_key_list("`+table+`")`)
 	if err != nil {
 		return false, fmt.Errorf("stdacct: 讀取表 %s 的外鍵失敗: %w", table, err)
 	}

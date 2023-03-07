@@ -41,7 +41,7 @@ func (t Type) valid() bool {
 // Status 是帳戶狀態（資料庫欄 status）。
 //
 // 三個級別的刪除語意（0003 定前兩級，0007 增第三級），加上待審批通路帶來的兩級
-// （0009 增 pending 與 rejected）：
+// （0009 增 pending 與 rejected），再加上綁定通路帶來的退休終態（0011 增 retired）：
 //   - StatusActive：可登入；
 //   - StatusDisabled：停用，「視同沒有這個帳戶」但行與登入名鍵保留，
 //     其他模組據此對其隱形，登入名不可被復用，且可經停用/恢復通路重新登入；
@@ -55,8 +55,12 @@ func (t Type) valid() bool {
 //     而那個決定是拒絕」。它由審批用例進入、不再由任何通路離開（用戶批准的單向決定：
 //     已做過決定的申請不能被改判，也不能被同一個人重新申請而覆蓋——登入名持續被佔用正是
 //     那句決定的落庫形態）。要讓同一個人再進來是另行建立一筆帳戶，那是另一句話。
+//   - StatusRetired：訪戶經綁定併入既有正式帳戶後的終態。與 deleted 同為「沒有回去的路」，
+//     但兩句話不同：這一行說「他被併進別人了」，那一行說「他被刪掉了」，
+//     混成一個取值就再也分不出來（用戶批准的留痕方向）。它只能由綁定核銷進入，
+//     且只有訪戶能進入；與刪除另一處區別是這一態不改顯示名——X 的名字是歷史的一部分。
 //
-// 全部五個取值裡，「可登入」只有一個：現行的登入、主體成形、會話簽發與解析都寫成
+// 全部六個取值裡，「可登入」只有一個：現行的登入、主體成形、會話簽發與解析都寫成
 // 「status 不是 active 就拒絕」，因此新增取值天然落在門外——安全預設來自既有形狀，
 // 不是來自各處再補一個分支。
 //
@@ -72,6 +76,15 @@ const (
 	StatusDeleted Status = "deleted"
 	// StatusPending 是待審批：申請已落地、還沒有人做過決定，不可登入也不可經停用/恢復通路變動。
 	StatusPending Status = "pending"
+	// StatusRetired 是綁定退休終態：訪戶 X 經綁定併入既有正式帳戶 Y 之後，X 那一行進入
+	// 的狀態——不可登入、登入名繼續被佔用（不可複用）、且沒有任何通路能把它翻回可登入態。
+	//
+	// 它與 StatusDeleted 刻意是兩個取值：一個說「他被併進別人了」，一個說「他被刪掉了」，
+	// 兩句話在歷史裡的含義不同，混成一個值就再也分不出來（用戶批准的留痕方向）。
+	// 與刪除的另一處區別是這一態不改顯示名：X 的名字是歷史的一部分，
+	// 「他曾經叫這個名字、後來以這個標識被併入 Y」要能在讀一行資料時原样看見。
+	// 只有訪戶能進入這一態（遷移 0011 的 CHECK 把這句話釘在資料庫層）。
+	StatusRetired Status = "retired"
 	// StatusRejected 是申請已被拒絕：行與登入名佔用保留，差別是審核已做過一次拒絕的決定
 	// （時刻記在 reviewed_at，與批准共用那一欄）。
 	//
@@ -88,12 +101,13 @@ func (s Status) String() string { return string(s) }
 // valid 回報是否為已批准的狀態。
 //
 // 這裡回答的是「資料庫裡出現這個值合不合形態」，不是「呼叫端可不可以要求這個值」：
-// StatusDeleted 與 StatusRejected 形態上合法（前者由 MarkDeleted、後者由 DecideApplication 寫入），
+// StatusDeleted、StatusRejected 與 StatusRetired 形態上合法（分別由 MarkDeleted、
+// DecideApplication 的拒絕分支、RetireGuestForBind 寫入），
 // 卻都不在建立時給得出來（見 creatable）；而 StatusPending 是唯一一個
 // 「由某條建立通路生下來就帶著」的狀態——待審批帳戶的出生地就是自註冊的 approval 模式。
 func (s Status) valid() bool {
 	switch s {
-	case StatusActive, StatusDisabled, StatusDeleted, StatusPending, StatusRejected:
+	case StatusActive, StatusDisabled, StatusDeleted, StatusPending, StatusRejected, StatusRetired:
 		return true
 	}
 	return false
@@ -106,8 +120,9 @@ func (s Status) valid() bool {
 // 把 pending 放進 settable，等於讓目錄那條「恢復」按下去就把一個申請變成帳戶——
 // 那是審批的決定，不是登入能力的開關。
 //
-// 刪除終態與拒絕態同樣不在其中：一個只能由 MarkDeleted 進入，
-// 一個只能由 DecideApplication 的拒絕分支進入，那條 UPDATE 的形狀本身就是那句話的證據。
+// 刪除終態、拒絕態與退休態同樣不在其中：一個只能由 MarkDeleted 進入，
+// 一個只能由 DecideApplication 的拒絕分支進入，一個只能由綁定核銷進入，
+// 那三條 UPDATE 的形狀本身就是那句話的證據。
 func (s Status) settable() bool {
 	return s == StatusActive || s == StatusDisabled
 }
@@ -271,6 +286,12 @@ type Account struct {
 	// 一句「他不是待審批申請」對一個剛被批准的人來說是錯的，而這個欄位正是把兩者分開的依據。
 	// 沒有審核人欄與審核備註欄：審核人是誰屬 root_audit 的事實，自由文本不進資料庫層。
 	ReviewedAt time.Time
+	// RetiredAt 為進入綁定退休終態的時刻；Status 不為 retired 時必須為零值。
+	//
+	// 它記的是「這一行以哪個標識被併入誰」這一跳發生的時刻，與留痕行的 bound_at 同值
+	// （同一條交易裡寫下）。退休不做匿名化、不搬歷史，所以這一欄與 DeletedAt
+	// 各自回答一句不同的話：一句是「他被併走了」，一句是「他被刪掉了」。
+	RetiredAt time.Time
 }
 
 // New 從建立輸入構造領域實體並完成全部領域校驗。

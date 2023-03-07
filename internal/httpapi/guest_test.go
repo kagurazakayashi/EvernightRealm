@@ -32,6 +32,7 @@ import (
 	"github.com/kagurazakayashi/EvernightRealm/internal/devkit"
 	"github.com/kagurazakayashi/EvernightRealm/internal/grant"
 	"github.com/kagurazakayashi/EvernightRealm/internal/guestacct"
+	"github.com/kagurazakayashi/EvernightRealm/internal/guestbind"
 	"github.com/kagurazakayashi/EvernightRealm/internal/identity"
 	"github.com/kagurazakayashi/EvernightRealm/internal/session"
 	"github.com/kagurazakayashi/EvernightRealm/internal/stdacct"
@@ -306,7 +307,9 @@ func newGuestLiveEnv(t *testing.T) *guestLiveEnv {
 	}
 	stdService, err := stdacct.New(stdacct.Deps{
 		DB: db, Accounts: accountsStore, Grants: grantsStore, Policy: policyStore,
-		Sessions: sessions, Audits: auditStore, Hashing: credential.TestParams,
+		Sessions: sessions, Audits: auditStore,
+		BindTickets: guestbind.NewStore(clock), Clock: clock,
+		Hashing: credential.TestParams,
 	})
 	if err != nil {
 		t.Fatalf("建立普通帳戶用例失敗：%v", err)
@@ -332,6 +335,9 @@ func newGuestLiveEnv(t *testing.T) *guestLiveEnv {
 	srv := New(&cfg, testVersion, Deps{
 		Auth: authService, Admins: adminService, AccountPolicy: policyService,
 		StandardAccounts: stdService, Guest: guestService, Clock: clock,
+		// 綁定執行側（本人三條通路）與管理端共用同一個服務實例，但它是另一個依賴欄位：
+		// 兩側的准入邊界不同，分开注入才測得出「只裝管理端時本人通路根本不掛」。
+		GuestBindings: stdService,
 	})
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
