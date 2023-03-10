@@ -363,8 +363,13 @@ func TestBindPreflightAuthorizationMatrix(t *testing.T) {
 	}
 }
 
-// TestBindPreflightNilGhostAndDeleted 零值標識、幽靈與刪除終態在兩側都是同一句
-// 「不在目錄」；來源與目標各自独立成句，不洩漏「差哪一半」。
+// TestBindPreflightNilGhostAndDeleted 零值標識與幽靈在兩側都是同一句「不在目錄」，
+// 來源與目標各自獨立成句，不洩漏「差哪一半」。
+//
+// 刪除終態不再屬於這一組：用戶批准的展示策略把已刪者留在本目錄的讀取範圍之內，
+// 所以一側是刪除態時，預檢照樣回一份 200 的預覽，而那一对是不可執行——
+// 理由是「他不是一個可登入的帳戶」這一句穩定的 blocker，而不是假裝查無此人。
+// （同一條斷言由 TestBindPreflightDeletedSideIsBlockedNotNotFound 釘住。）
 func TestBindPreflightNilGhostAndDeleted(t *testing.T) {
 	e := newEnv(t)
 	ctx := context.Background()
@@ -384,9 +389,69 @@ func TestBindPreflightNilGhostAndDeleted(t *testing.T) {
 		{deleted.ID, guest.ID}, {guest.ID, deleted.ID},
 	}
 	for i, pair := range probes {
-		if _, err := e.service.PreflightGuestBind(ctx, admin, pair[0], pair[1], "req-nil"); !errors.Is(err, ErrAccountNotFound) {
-			t.Errorf("第 %d 組零值/幽靈/刪除探測應收斂成「不在目錄」，實際 %v", i+1, err)
+		plan, err := e.service.PreflightGuestBind(ctx, admin, pair[0], pair[1], "req-nil")
+		if pair[0] == deleted.ID || pair[1] == deleted.ID {
+			// 刪除態那一對：預覽成功、不可執行，而且一個字都沒寫。
+			if err != nil {
+				t.Errorf("第 %d 組的刪除終態應回一份可讀的預覽而不是拒絕，實際 %v", i+1, err)
+			}
+			if plan.Executable {
+				t.Errorf("第 %d 組的刪除終態被預覽成可執行：%+v", i+1, plan.Blockers)
+			}
+			if len(plan.Blockers) == 0 {
+				t.Errorf("第 %d 組的刪除終態必須給出穩定原因記號，實際空", i+1)
+			}
+			continue
 		}
+		if !errors.Is(err, ErrAccountNotFound) {
+			t.Errorf("第 %d 組零值/幽靈探測應收斂成「不在目錄」，實際 %v", i+1, err)
+		}
+	}
+	if n := countRows(t, e.db, "root_audit"); n != 0 {
+		t.Errorf("連同刪除態在內的全部預覽都是純只讀，root_audit 不得多出一筆，實際 %d 筆", n)
+	}
+}
+
+// TestBindPreflightDeletedSideIsBlockedNotNotFound 把「刪除態走的是 blocker 而不是 1001」
+// 這一句按兩側各自釘牢：停用與刪除共用「非可登入狀態」那枚記號，但界面讀到的 status
+// 仍是 deleted——它才是讓操作者明白「等誰重試都沒用」的那一半事實。
+func TestBindPreflightDeletedSideIsBlockedNotNotFound(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	admin := identitytest.Account(t, identitytest.NewID(t), identitytest.ServerAdmin())
+	guest := e.seed(t, seedInput{Login: "guest_del_pair", Display: "候選旅人",
+		Type: account.TypeGuest})
+	target := e.seed(t, seedInput{Login: "std_del_partner", Display: "承接正式"})
+	deletedGuest := e.seed(t, seedInput{Login: "guest_del_src", Display: "已刪旅人二",
+		Type: account.TypeGuest, Deleted: true})
+	deletedStandard := e.seed(t, seedInput{Login: "std_del_tgt", Display: "已刪正式",
+		Deleted: true})
+
+	plan, err := e.service.PreflightGuestBind(ctx, admin, deletedGuest.ID, target.ID, "req-d1")
+	if err != nil {
+		t.Fatalf("已刪除的來源訪戶應回一份可讀預覽而不是拒絕，實際 %v", err)
+	}
+	if plan.Executable || blockerLine(plan.Blockers) != string(BindBlockerSourceNotActive) {
+		t.Errorf("已刪除的來源應只被 source_not_active 擋下，實際 executable=%v blockers=%q",
+			plan.Executable, blockerLine(plan.Blockers))
+	}
+	if plan.Source.Status != account.StatusDeleted {
+		t.Errorf("預覽要如實帶出來源的終態（界面據此收起那顆按鈕），實際 %s", plan.Source.Status)
+	}
+
+	plan, err = e.service.PreflightGuestBind(ctx, admin, guest.ID, deletedStandard.ID, "req-d2")
+	if err != nil {
+		t.Fatalf("已刪除的目標帳戶應回一份可讀預覽而不是拒絕，實際 %v", err)
+	}
+	if plan.Executable || blockerLine(plan.Blockers) != string(BindBlockerTargetNotActive) {
+		t.Errorf("已刪除的目標應只被 target_not_active 擋下，實際 executable=%v blockers=%q",
+			plan.Executable, blockerLine(plan.Blockers))
+	}
+	if plan.Target.Status != account.StatusDeleted {
+		t.Errorf("預覽要如實帶出目標的終態，實際 %s", plan.Target.Status)
+	}
+	if n := countRows(t, e.db, "root_audit"); n != 0 {
+		t.Errorf("兩份刪除態預覽都必須零寫入，root_audit 實際 %d 筆", n)
 	}
 }
 

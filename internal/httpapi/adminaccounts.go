@@ -28,7 +28,12 @@
 //     這組端點用到的碼：1001（不在這本目錄裡）、1004（改寫法）、2011（換身分也沒用）、
 //     2012（那個名字是別人的）、2013（你看見的現值已過期）、2014（他的可用性已不是你確認時那樣）、
 //     2017（策略此刻不放開這條建號通路）、2018（他是訪戶，沒有可重置的憑據）、
-//     2024（他此刻不是可升級的訪戶）。
+//     2024（他此刻不是可升級的訪戶）、2027（他已被軟刪除，是終態）、
+//     2028（他已被綁走，是退休終態）。最後兩枚是本組端點對「目標已是終態」給的
+//     兩句話：他們列得到、讀得到，但每一條寫入通路都當場拒絕，而且拒絕的理由與處置
+//     不同形（一個什麼都別再做，一個要去讀那條綁定留痕），所以各是一枚碼。
+//     詳情讀取對他們回 200 並帶著 deleted_at／retired_at——「列得出、點得開、動不了」
+//     是同筆資料一次講完的三件事，不是三套互相矛盾的說法。
 //     2018 與 2024 說的是相反方向的兩句話：前者擋「用重置口令順帶完成升級」，
 //     後者擋「對已轉正或已停用者再次發起升級」。
 //     綁定預檢一個新碼都不加：「此刻不可綁定」不是錯誤而是 200 預覽本體裡的
@@ -127,6 +132,13 @@ type StdAccountUseCase interface {
 	// 收斂成不可分辨的 stdacct.ErrAccountNotFound，與詳情端點同句。
 	PreflightGuestBind(ctx context.Context, principal identity.Principal,
 		sourceID, targetID idgen.ID, requestID string) (stdacct.GuestBindPreflight, error)
+	// DeleteStandardAccount 以持有伺服器級管理權的受信主體軟刪除一名目錄內的普通帳戶或
+	// 訪戶帳戶：新登入被拒、既有會話同交易撤銷、顯示名匿名化，而行、登入名鍵與歷史參照
+	// 一律保留（見 internal/stdacct/deleted.go）。刻意不設依據值——操作者對「現行刪除時刻」
+	// 拿不出誠實錨點，正當性錨在狀態機守衛上；因此重複刪除回的是「他已是刪除態」，
+	// 而不是又成功刪了一次。
+	DeleteStandardAccount(ctx context.Context, principal identity.Principal,
+		accountID idgen.ID, requestID string) (stdacct.Deletion, error)
 	// IssueGuestBindTicket 為一對（來源, 目標）簽發一枚限定這一對、短效、只准核銷一次的
 	// 綁定操作憑證：它是本組端點裡唯一會寫東西的綁定通路，寫下的也只有憑證一行與審計一筆
 	// ——訪戶沒被退休、會話沒撤銷、留痕沒追加。簽發前在同一筆交易內把判定重做一遍，
@@ -231,6 +243,11 @@ type standardAccountItem struct {
 	// （不拿零值冒充「被綁走過」）。它與 status=retired 一起讓界面能說出
 	// 「這個人已被綁走、何時綁走」，而不是把他當成一個查無著落的幽靈行。
 	RetiredAt string `json:"retired_at,omitempty"`
+	// DeletedAt 為進入刪除終態的時刻；未刪除時欄位缺席（不拿零值冒充「被刪過」）。
+	// 用戶批准的刪除後展示策略是把已刪者留在目錄與詳情裡，而這一欄是那句話的時間部分：
+	// 界面要能說出「他在何處、何時被刪」，而不是讓操作者對著一個查不到的標識猜。
+	// 與 /root/admins 同一分工：目錄行與單筆都帶（R2-005 那側也是兩處都給）。
+	DeletedAt string `json:"deleted_at,omitempty"`
 }
 
 // standardAccountListResponse 是 GET／HEAD /admin/accounts 的回應本體。
@@ -352,6 +369,27 @@ type guestBindTicketResponse struct {
 	RequestID          string              `json:"request_id"`
 }
 
+// deleteStandardAccountRequest 是刪除請求的本體：一個欄位都沒有。
+//
+// 與 /root/admins 那側的刪除本體同形：這條通路表達的是「我要刪他」這一句完整的意思，
+// 沒有任何可調參數。默默忽略一份帶了 expected_status 或 purge 的本體，
+// 等於承認那些欄位本來可以有意義——而「依據值」在刪除上沒有誠實對象，
+// 「物理清庫」更不是本通路的能力（它連一個可填的格子都沒有）。
+type deleteStandardAccountRequest struct{}
+
+// standardAccountDeleteResponse 是 DELETE /admin/accounts/{account_id} 的回應本體。
+//
+// account 是「刪除之後的資料庫現值」：status 恆為 deleted、display_name 是服務端寫回的
+// 佔位值、並帶著 deleted_at——界面據此把這張卡改成只讀，而不是回顯呼叫端的意圖。
+// revoked_sessions 與停用、重置、升級回應同一理由：界面要能如實說出「這次讓 N 臺裝置
+// 失去登入狀態」；0 是事實（他可能早就停用著，或那一趟訪客會話早已到期）而不是失敗。
+// 回應裡絕對不會有的東西：任一側的口令或雜湊、會話材料、內部正規化鍵。
+type standardAccountDeleteResponse struct {
+	Account         standardAccountItem `json:"account"`
+	RevokedSessions int                 `json:"revoked_sessions"`
+	RequestID       string              `json:"request_id"`
+}
+
 // standardAccountEndpoints 回傳普通帳戶端點的登記清單；未注入用例時為空。
 //
 // 登記與否只這一處來源，深連結回退用的 API 首段清單（/admin）因此自動同步。
@@ -380,8 +418,13 @@ type guestBindTicketResponse struct {
 // （訪戶未退休、會話未撤、留痕未追加），而它也絕不能由目標本人來按：主體判定在
 // 用例的第一行（NeedServerAdmin），因此目標的會話敲它只會拿到既有的 2011。
 // 雨條路徑都是 POST 而不是 GET：它們都需要「一对輸入」，其中簽發还要落庫。
-// 普通帳戶今日沒有刪除通路，所以父路徑上只有 GET／HEAD／PUT（Root 那側的 DELETE
-// 不在这裡複製一份）。
+// 父路徑是四個方法（GET／HEAD／PUT／DELETE）：DELETE 就是普通帳戶與訪戶的軟刪除入口，
+// 形態與 /root/admins/{account_id} 同形，但它是另一條端點、另一本書、另一道授權閘。
+// 這不是「把 Root 那側的寫法複製一份」：那一條經 NeedRoot 且只認持有授予的人，
+// 這一條經 NeedServerAdmin 而它的範圍恰恰是把持有授予的人排掉——所以「普通管理員能不能
+// 刪另一位管理員或 Root」在兩條通路上都沒有一個可以填的格子，而不是靠界面藏按鈕。
+// 路由登記多一個方法也意味著跨域那側要把 DELETE 列入組態白名單才走得通
+// （出廠默認未動，見 README 的跨域一節）——登記本身不放鬆任何邊界。
 func (s *Server) standardAccountEndpoints() []apiRoute {
 	if s.stdAccounts == nil {
 		return nil
@@ -390,7 +433,7 @@ func (s *Server) standardAccountEndpoints() []apiRoute {
 		{"/admin/accounts", s.allowMethods(s.handleAdminAccounts,
 			http.MethodGet, http.MethodHead, http.MethodPost)},
 		{"/admin/accounts/{account_id}", s.allowMethods(s.handleAdminAccountProfile,
-			http.MethodGet, http.MethodHead, http.MethodPut)},
+			http.MethodGet, http.MethodHead, http.MethodPut, http.MethodDelete)},
 		{"/admin/accounts/{account_id}/status", s.allowMethods(s.handleAdminAccountStatus,
 			http.MethodPut)},
 		{"/admin/accounts/{account_id}/password", s.allowMethods(s.handleAdminAccountPassword,
@@ -711,9 +754,13 @@ func (s *Server) handleAdminAccounts(w http.ResponseWriter, r *http.Request) {
 // handleAdminAccountProfile 處理 /admin/accounts/{account_id}：GET／HEAD 詳情、PUT 編輯。
 //
 // 標識解析失敗與「查無此人」是同一句話：不告訴敲門的人他猜的格式對不對。
-// 這一句同樣罩住「他其實是個管理員」與「他已在刪除終態裡」兩種情況——兩者都不在
+// 這一句同樣罩住「他其實是個管理員」與「他還在審批鏈門外」兩種情況——兩者都不在
 // 這本目錄的範圍內（三道範圍檢查見 internal/stdacct/profile.go），把它們報成可區分的
 // 結論就等於讓一條普通帳戶端點替 Root 的管理員目錄做枚舉。
+//
+// 已刪除與已退休不在這句話裡：他們在這本目錄之內，詳情讀得到、帶著各自的時刻，
+// 而界面據此把這張卡轉成只讀。「列得出、點得開、動不了」三件事必須能由同一筆資料
+// 一次講完，否則操作者對著一個查不到的標識只能猜當年那個人是誰。
 func (s *Server) handleAdminAccountProfile(w http.ResponseWriter, r *http.Request) {
 	principal, ok := s.consolePrincipal(w, r)
 	if !ok {
@@ -724,8 +771,12 @@ func (s *Server) handleAdminAccountProfile(w http.ResponseWriter, r *http.Reques
 		writeError(w, r, CodeNotFound, http.StatusNotFound)
 		return
 	}
-	if r.Method == http.MethodPut {
+	switch r.Method {
+	case http.MethodPut:
 		s.updateStandardAccount(w, r, principal, id)
+		return
+	case http.MethodDelete:
+		s.deleteStandardAccount(w, r, principal, id)
 		return
 	}
 	profile, err := s.stdAccounts.StandardAccountProfile(r.Context(), principal, id)
@@ -917,6 +968,67 @@ func (s *Server) writeStandardAccountDirectoryFailure(w http.ResponseWriter, r *
 	}
 }
 
+// deleteStandardAccount 處理 DELETE /admin/accounts/{account_id}：軟刪除一名目錄內的
+// 普通帳戶或訪戶帳戶。
+//
+// 前置鏈與父路徑其餘方法逐字相同（consolePrincipal：來源判定 → 憑據解析 → 首次改密門閂），
+// 這裡不判第二次權限——授權、目標範圍與終態判定全在用例裡，兩處各判一套的結局是其中一套被繞過。
+//
+// 本體不許帶任何欄位：不帶本體就是「我要刪他」，帶了就必須是個空物件。這條判定不是講究——
+// 默默忽略一份帶 expected_status 或 purge 的本體，等於承認那些欄位本來可以有意義，
+// 而刪除沒有誠實的依據值可填，物理清庫更不是這條通路的能力。
+//
+// 成功回 200 而不是 204：回應本體帶著「刪除之後的現值」與這次撤銷的會話數量，
+// 界面要拿服務端的事實改掉那份詳情，而不是拿一個空回應猜結果。
+//
+// 失敗映射逐條對應不同的處置：
+//   - 1001：標識不合法、目標不在這本目錄（含幽靈標識、持有授予的管理員、Root 保留標識、
+//     以及還在審批鏈門外的申請）——幾種企圖同一句話，這條端點不是標識探測器；
+//   - 2027：目標已是刪除終態。重試不會讓它變成成功，所以要與 1001 分開一句話；
+//   - 2028：目標是被綁走的退休訪戶。他也是終態，但那句話指向的是綁定留痕，
+//     處置與「已被刪除」不同形，因此各是一枚碼；
+//   - 2011：這個主體不具備伺服器級管理權（訪戶本人與普通帳戶都在這裡被拒）；
+//   - 500：其餘，細節只進日誌。
+func (s *Server) deleteStandardAccount(w http.ResponseWriter, r *http.Request,
+	principal identity.Principal, accountID idgen.ID) {
+	var in deleteStandardAccountRequest
+	if r.ContentLength != 0 && !decodeJSON(w, r, &in) {
+		return
+	}
+	deletion, err := s.stdAccounts.DeleteStandardAccount(r.Context(), principal,
+		accountID, requestIDFromRequest(r))
+	if err != nil {
+		s.writeDeleteStandardAccountFailure(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, standardAccountDeleteResponse{
+		Account:         profileItemOf(deletion.Profile),
+		RevokedSessions: deletion.RevokedSessions,
+		RequestID:       requestIDFromRequest(r),
+	})
+}
+
+// writeDeleteStandardAccountFailure 把刪除用例的錯誤對映為對外回應。
+//
+// 與其餘寫入映射同一取向：每一句的處置不同就各給一個碼，不讓人拿「再試一次」這把錘子
+// 去敲四個不同的門。2027 與 2028 都是 409（業務結論），不是 500，也不是 1001。
+func (s *Server) writeDeleteStandardAccountFailure(w http.ResponseWriter, r *http.Request,
+	err error) {
+	switch {
+	case errors.Is(err, stdacct.ErrAccountDeleted):
+		writeError(w, r, CodeAccountDeleted, http.StatusConflict)
+	case errors.Is(err, stdacct.ErrAccountRetired):
+		writeError(w, r, CodeAccountRetired, http.StatusConflict)
+	case errors.Is(err, stdacct.ErrAccountNotFound):
+		writeError(w, r, CodeNotFound, http.StatusNotFound)
+	case errors.Is(err, identity.ErrPermissionDenied):
+		writeError(w, r, CodePermissionDenied, http.StatusForbidden)
+	default:
+		s.logger.Error("軟刪除普通帳戶失敗", "request_id", requestIDFromRequest(r), "err", err)
+		writeError(w, r, CodeUnknown, http.StatusInternalServerError)
+	}
+}
+
 // writeStandardAccountReadFailure 把詳情讀取的錯誤對映為對外回應。
 func (s *Server) writeStandardAccountReadFailure(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
@@ -946,6 +1058,10 @@ func (s *Server) writeUpdateStandardAccountFailure(w http.ResponseWriter, r *htt
 			map[string]any{"invalid_field": "display_name"})
 	case errors.Is(err, stdacct.ErrProfileConflict):
 		writeError(w, r, CodeProfileConflict, http.StatusConflict)
+	case errors.Is(err, stdacct.ErrAccountDeleted):
+		writeError(w, r, CodeAccountDeleted, http.StatusConflict)
+	case errors.Is(err, stdacct.ErrAccountRetired):
+		writeError(w, r, CodeAccountRetired, http.StatusConflict)
 	case errors.Is(err, stdacct.ErrAccountNotFound):
 		writeError(w, r, CodeNotFound, http.StatusNotFound)
 	case errors.Is(err, identity.ErrPermissionDenied):
@@ -963,9 +1079,10 @@ func (s *Server) writeUpdateStandardAccountFailure(w http.ResponseWriter, r *htt
 // 2014 是 Root 那條停用通路已發布的碼，兩處處置逐字相同（都是「你確認時的那個可用性
 // 已經不是現值」），為同一句話再發一個數字只會讓界面多一條「兩個碼要不要各寫一句案」的
 // 維護點——與 R2-008 把資料衝突收斂到 2013 同一取向。
-// 已刪除的普通帳戶走的是 1001 而不是 2015：那本目錄按定義就不列他，
-// 「不在目錄」本來就是這裡對三種出局形態唯一的一句-answer（見 internal/stdacct/profile.go
-// 的三道範圍檢查），而 2015 說的是 Root 目錄裡列得到、但不再接受寫入的那個人。
+// 已刪除與已退休的普通帳戶走的是 2027／2028，不再是 1001：用戶批准的刪除後展示策略
+// 把他們留在這本目錄裡，「換個目標」對一個就在冊上、詳情點得開的人是誤導；
+// 而「停用」與「恢復」對一個終態都不是一個可發的令。這與 Root 那側用 2015 而不是 1001
+// 擋已刪管理員是同一個道理，只是兩本名冊各自有自己的碼與自己的句子。
 func (s *Server) writeUpdateStandardAccountStatusFailure(w http.ResponseWriter,
 	r *http.Request, err error) {
 	switch {
@@ -974,6 +1091,10 @@ func (s *Server) writeUpdateStandardAccountStatusFailure(w http.ResponseWriter,
 			map[string]any{"invalid_field": "status"})
 	case errors.Is(err, stdacct.ErrStatusConflict):
 		writeError(w, r, CodeAdminStatusConflict, http.StatusConflict)
+	case errors.Is(err, stdacct.ErrAccountDeleted):
+		writeError(w, r, CodeAccountDeleted, http.StatusConflict)
+	case errors.Is(err, stdacct.ErrAccountRetired):
+		writeError(w, r, CodeAccountRetired, http.StatusConflict)
 	case errors.Is(err, stdacct.ErrAccountNotFound):
 		writeError(w, r, CodeNotFound, http.StatusNotFound)
 	case errors.Is(err, identity.ErrPermissionDenied):
@@ -1001,6 +1122,10 @@ func (s *Server) writeResetStandardAccountPasswordFailure(w http.ResponseWriter,
 			map[string]any{"invalid_field": "password"})
 	case errors.Is(err, stdacct.ErrGuestTarget):
 		writeError(w, r, CodeGuestUpgradeRequired, http.StatusForbidden)
+	case errors.Is(err, stdacct.ErrAccountDeleted):
+		writeError(w, r, CodeAccountDeleted, http.StatusConflict)
+	case errors.Is(err, stdacct.ErrAccountRetired):
+		writeError(w, r, CodeAccountRetired, http.StatusConflict)
 	case errors.Is(err, stdacct.ErrAccountNotFound):
 		writeError(w, r, CodeNotFound, http.StatusNotFound)
 	case errors.Is(err, identity.ErrPermissionDenied):
@@ -1018,6 +1143,8 @@ func (s *Server) writeResetStandardAccountPasswordFailure(w http.ResponseWriter,
 // 2014 兜併發尾巴（重讀現狀再決定）、1001 是目標不在目錄、2011 是主體不對——
 // 訪戶本人敲這條端點拿到的就是最後這一句（零授予過不了 NeedServerAdmin，
 // 「Guest 不能給自己提升權限」是既有授權矩陣的事實，不是本步新造的規則）。
+// 2027／2028 走的是「他已是終態」那兩句，而不是 2024：2024 的處置暗示「重讀現狀之後
+// 那顆按鈕還在」，而對一個已刪除或已被綁走的人，那顆按鈕永遠不會再出現。
 // 其餘細節只進日誌。
 func (s *Server) writeUpgradeGuestAccountFailure(w http.ResponseWriter,
 	r *http.Request, err error) {
@@ -1032,6 +1159,10 @@ func (s *Server) writeUpgradeGuestAccountFailure(w http.ResponseWriter,
 		writeError(w, r, CodeLoginNameTaken, http.StatusConflict)
 	case errors.Is(err, stdacct.ErrNotUpgradeableGuest):
 		writeError(w, r, CodeGuestNotUpgradable, http.StatusConflict)
+	case errors.Is(err, stdacct.ErrAccountDeleted):
+		writeError(w, r, CodeAccountDeleted, http.StatusConflict)
+	case errors.Is(err, stdacct.ErrAccountRetired):
+		writeError(w, r, CodeAccountRetired, http.StatusConflict)
 	case errors.Is(err, stdacct.ErrUpgradeConflict):
 		writeError(w, r, CodeAdminStatusConflict, http.StatusConflict)
 	case errors.Is(err, stdacct.ErrAccountNotFound):
@@ -1086,10 +1217,15 @@ func directoryItemOf(row stdacct.DirectoryRow) standardAccountItem {
 	if !row.LastLoginAt.IsZero() {
 		item.LastLoginAt = timeutil.FormatUTC(row.LastLoginAt)
 	}
+	// 目錄行也帶刪除時刻：界面在名冊上就要能說出「這一行已被刪於何時」，
+	// 不必為每一筆再點開詳情才拿得到那個時刻（與 /root/admins 的目錄同一分工）。
+	if !row.DeletedAt.IsZero() {
+		item.DeletedAt = timeutil.FormatUTC(row.DeletedAt)
+	}
 	return item
 }
 
-// profileItemOf 把單筆經實體校驗的資料成回應本體；與目錄行同形，外加禁用與退休時刻。
+// profileItemOf 把單筆經實體校驗的資料成回應本體；與目錄行同形，外加三個時刻欄位。
 func profileItemOf(p stdacct.StandardProfile) standardAccountItem {
 	item := standardAccountItem{
 		AccountID:          p.AccountID.String(),
@@ -1108,6 +1244,9 @@ func profileItemOf(p stdacct.StandardProfile) standardAccountItem {
 	}
 	if !p.RetiredAt.IsZero() {
 		item.RetiredAt = timeutil.FormatUTC(p.RetiredAt)
+	}
+	if !p.DeletedAt.IsZero() {
+		item.DeletedAt = timeutil.FormatUTC(p.DeletedAt)
 	}
 	return item
 }

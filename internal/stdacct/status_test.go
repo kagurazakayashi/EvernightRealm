@@ -299,7 +299,7 @@ func TestDisableGuestWritesStatusWithoutSessions(t *testing.T) {
 		t.Errorf("無憑據的訪客沒有會話可撤，撤銷數量應為 0，實際 %d", result.RevokedSessions)
 	}
 	if result.Profile.MustChangePassword {
-		t.Error("訪客的改密旗標恆為假（遷移 0003 的形態凍結），本斷言在測的是夹具而非通路")
+		t.Error("訪客的改密旗標恆為假（遷移 0003 的形態凍結），本斷言在測的是夾具而非通路")
 	}
 }
 
@@ -350,8 +350,9 @@ func TestStatusChangeRejectsNonAdminSubjects(t *testing.T) {
 	}
 }
 
-// TestStatusChangeTargetScope 目標範圍：另一位管理員、操作者自己、刪除終態、
-// 幽靈標識與零值標識一律同一句話（ErrAccountNotFound），且零寫入零審計。
+// TestStatusChangeTargetScope 目標範圍：另一位管理員、操作者自己、幽靈標識與零值標識
+// 一律同一句話（ErrAccountNotFound）；刪除終態與退休終態各回自己那句（他們就在
+// 這本目錄裡，「換個目標」對他們是誤導）。全部拒絕都零寫入零審計。
 //
 // 這一條量的是本步那句邊界：普通管理員不能拿這條通路動管理員，也不能動 Root。
 // Root 不在 accounts 表裡，以他的保留標識打進來與幽靈同形；而另一位管理員與操作者自己
@@ -369,13 +370,14 @@ func TestStatusChangeTargetScope(t *testing.T) {
 
 	peer := e.seed(t, seedInput{Login: "scope.peer", Display: "另一位管理員", Admin: true})
 	deleted := e.seed(t, seedInput{Login: "scope.gone", Display: "已刪除的", Deleted: true})
+	retired := e.seed(t, seedInput{Login: "scope.retired", Display: "已被綁走的",
+		Type: account.TypeGuest, Retired: true})
 	cases := []struct {
 		name string
 		id   idgen.ID
 	}{
 		{"另一位管理員", peer.ID},
 		{"操作者自己", self.ID},
-		{"刪除終態", deleted.ID},
 		{"幽靈標識", identitytest.NewID(t)},
 		{"零值標識", idgen.ID{}},
 	}
@@ -386,6 +388,29 @@ func TestStatusChangeTargetScope(t *testing.T) {
 			"req-scope-"+tc.name)
 		if !errors.Is(err, ErrAccountNotFound) {
 			t.Errorf("%s 應回不在目錄的同形結論，實際 %v", tc.name, err)
+		}
+	}
+	// 兩種終態各自成句：他們都讀得到，但「停用／恢復」對他們不是一個可發的令。
+	// 期望值按現狀給一個誠實的 CAS 依據值（退休行用 active、已刪行用 disabled），
+	// 為的是讓這一格量到的是終態判定而不是「參數寫法不合法」那一格。
+	for _, tc := range []struct {
+		name string
+		id   idgen.ID
+		err  error
+		from account.Status
+		to   account.Status
+	}{
+		// 已刪行以「恢復」的角度打進來（disabled → active），退休行以「停用」的角度打進來
+		// （active → disabled）：兩句都先過 statusChangeValid 那一道寫法閘，
+		// 讓這一格量到的是交易內的終態判定，而不是「新舊同值」這種參數錯誤。
+		{"刪除終態", deleted.ID, ErrAccountDeleted, account.StatusDisabled, account.StatusActive},
+		{"退休終態", retired.ID, ErrAccountRetired, account.StatusActive, account.StatusDisabled},
+	} {
+		_, err := e.service.UpdateStandardAccountStatus(ctx, admin, tc.id,
+			StatusChangeInput{NewStatus: tc.to, ExpectedStatus: tc.from},
+			"req-scope-"+tc.name)
+		if !errors.Is(err, tc.err) {
+			t.Errorf("%s 應回 %v，實際 %v", tc.name, tc.err, err)
 		}
 	}
 	// peer 與 deleted 兩筆的整行現值仍該是種入時的形態。

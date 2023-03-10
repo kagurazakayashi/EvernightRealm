@@ -244,7 +244,6 @@ func TestAdminStandardStatusAccessControl(t *testing.T) {
 	for name, id := range map[string]idgen.ID{
 		"同級管理員":     peer.ID,
 		"操作者自己":     selfParsed,
-		"刪除終態":      gone.ID,
 		"Root 保留標識": rootReserved,
 		"幽靈標識":      phantom,
 	} {
@@ -253,6 +252,16 @@ func TestAdminStandardStatusAccessControl(t *testing.T) {
 		if resp.StatusCode != http.StatusNotFound || envelopeCode(t, resp) != int(CodeNotFound) {
 			t.Errorf("%s 應回 1001/404 同形，實際 %d", name, resp.StatusCode)
 		}
+	}
+	// 已刪除者不再是 1001：他就在這本目錄裡（列得出、點得開），而「停用／恢復」對
+	// 一個終態不是一個可發的令，所以這條通路給他的是自己那一句 2027/409。
+	// 依據值填的是他在目錄上被讀得到的那個狀態（disabled），讓這一格量到終態判定
+	// 而不是「新舊同值」那種參數錯誤。
+	terminal := putJSON(t, e.ts, statusPath(gone.ID), statusBody("active", "disabled"), "",
+		map[string]string{"Cookie": cookieHeader(admin)})
+	if terminal.StatusCode != http.StatusConflict ||
+		envelopeCode(t, terminal) != int(CodeAccountDeleted) {
+		t.Errorf("已刪除者的停用令應回 2027/409，實際 %d", terminal.StatusCode)
 	}
 	if got := rawRowSnapshot(t, e, peer.ID)["status"]; got != "active" {
 		t.Errorf("管理員不得被這條通路停用，peer 現值 %s", got)
@@ -368,11 +377,18 @@ func TestAdminStandardStatusRouting(t *testing.T) {
 			t.Errorf("%s /status 的 Allow 應只列 PUT，實際 %q", method, allow)
 		}
 	}
-	// 父路徑仍是「詳情與編輯」：DELETE 那條通路今天還不存在（普通帳戶的刪除屬後續步驟）。
-	deleted := sendMethod(t, e.ts, http.MethodDelete, "/admin/accounts/"+target.ID.String(), admin)
-	if deleted.StatusCode != http.StatusMethodNotAllowed ||
-		envelopeCode(t, deleted) != int(CodeMethodNotAllowed) {
-		t.Errorf("DELETE 父路徑應回 1002/405，實際 %d", deleted.StatusCode)
+	// /status 這條子路徑今天仍然只有 PUT：拿父路徑那組方法來敲子路徑，
+	// 405 必須只列 PUT（父路徑的 DELETE 不應漏進這一行——兩條路徑的方法集合各自獨立）。
+	for _, method := range []string{http.MethodDelete, http.MethodPost, http.MethodPatch} {
+		resp := sendMethod(t, e.ts, method, statusPath(target.ID), admin)
+		if resp.StatusCode != http.StatusMethodNotAllowed ||
+			envelopeCode(t, resp) != int(CodeMethodNotAllowed) {
+			t.Errorf("%s /status 應回 1002/405，實際 %d", method, resp.StatusCode)
+			continue
+		}
+		if allow := resp.Header.Get("Allow"); allow != http.MethodPut {
+			t.Errorf("%s /status 的 Allow 應只列 PUT，實際 %q", method, allow)
+		}
 	}
 	// 多一個段落沒有登記：回的是 JSON 的 1001，不是網頁外殼也不是 405。
 	extra := sendMethod(t, e.ts, http.MethodPut, statusPath(target.ID)+"/extra", admin)

@@ -224,10 +224,34 @@ func TestAdminDirectoryScopeAndShape(t *testing.T) {
 	if float64(len(rows)) != envelope["total"].(float64) {
 		t.Errorf("行數與總數應一致（本頁翻完），實際 rows=%d total=%v", len(rows), envelope["total"])
 	}
-	// 這裡只該看到 shape.guest 一筆：peer 有授予、gone 已刪除、shape.admin 有授予、
-	// Root 不在 accounts 表裡。
-	if len(rows) != 1 || rows[0]["login_name"] != "shape.guest" {
-		t.Errorf("目錄範圍不對，實際 %v", rows)
+	// 這裡該看到 shape.guest 與 shape.gone 兩筆：peer 有授予、shape.admin 有授予、
+	// Root 不在 accounts 表裡，三者一律不列；而 gone 已被軟刪除，按用戶批准的
+	// 刪除後展示策略他仍然在名冊上（行留著正是為了被讀到），帶著 status=deleted
+	// 與 deleted_at。少了他，界面就只剩「查無此人」這個錯答案可用。
+	if len(rows) != 2 {
+		t.Fatalf("目錄範圍不對，實際 %v", rows)
+	}
+	byLogin := map[string]map[string]any{}
+	for _, row := range rows {
+		byLogin[row["login_name"].(string)] = row
+	}
+	guestRow, goneRow := byLogin["shape.guest"], byLogin["shape.gone"]
+	if guestRow == nil || goneRow == nil {
+		t.Fatalf("目錄應列出去訪客與已刪者兩筆，實際 %v", rows)
+	}
+	if guestRow["account_type"] != "guest" {
+		t.Errorf("訪客列必須如實顯示來源，實際 %v", guestRow["account_type"])
+	}
+	// 已刪者的那一行必須自己講完整：狀態、刪除時刻、服務端寫回的佔位顯示名，
+	// 而登入名原樣保留（這正是「名字繼續被占用」的可讀形態）。
+	if goneRow["status"] != "deleted" {
+		t.Errorf("已刪者的狀態應如實帶出，實際 %v", goneRow["status"])
+	}
+	if at, ok := goneRow["deleted_at"]; !ok || at == "" {
+		t.Errorf("已刪者的行必須帶 deleted_at，實際 %v", goneRow)
+	}
+	if name, _ := goneRow["display_name"].(string); !strings.HasPrefix(strings.ToLower(name), "del_") {
+		t.Errorf("已刪者讀到的應是佔位顯示名，實際 %q", name)
 	}
 	for _, row := range rows {
 		for _, key := range []string{"account_id", "login_name", "display_name", "account_type",
@@ -236,20 +260,28 @@ func TestAdminDirectoryScopeAndShape(t *testing.T) {
 				t.Errorf("行缺少 %s：%v", key, row)
 			}
 		}
-		if row["account_type"] != "guest" {
-			t.Errorf("訪客列必須如實顯示來源，實際 %v", row["account_type"])
-		}
 		// 從未登入時 last_login_at 應缺席（不拿建立時刻冒充）。
 		if _, ok := row["last_login_at"]; ok {
 			t.Errorf("從未登入的行不該帶 last_login_at：%v", row)
 		}
+		// 沒被刪過的行不該帶刪除時刻——那與零值冒充是同一件事的兩種寫法。
+		if row["status"] != "deleted" {
+			if _, ok := row["deleted_at"]; ok {
+				t.Errorf("非刪除態的行不該帶 deleted_at：%v", row)
+			}
+		}
 	}
+	// 憑據與會話材料仍然一個字都不许出現。deleted_at 已不在這一列裡：
+	// 它是刪除後展示策略要求必須出現的那一欄，而它是一個時刻，不是一條憑據。
 	for _, forbidden := range []string{"password_hash", "argon2id", "login_name_key",
 		"$argon2id$", "token", "cookie", "roles", "granted_at", "activity",
-		strings.ToLower(dirTestPassword), strings.ToLower(stdTestInitial), "deleted_at"} {
+		strings.ToLower(dirTestPassword), strings.ToLower(stdTestInitial)} {
 		if strings.Contains(raw, forbidden) {
 			t.Errorf("目錄原文不得含 %q：實際 %s", forbidden, raw)
 		}
+	}
+	if strings.Contains(raw, "del_2026") == false {
+		t.Errorf("已刪者的佔位顯示名應由服務端寫回並被原樣列出，實際 %s", raw)
 	}
 }
 
@@ -285,11 +317,15 @@ func TestAdminDirectoryFiltersAndInvalidParams(t *testing.T) {
 		total  float64
 		rows   int
 	}{
-		"默認":      {url.Values{}, 5, 5},
-		"類型訪客":    {url.Values{"type": []string{"guest"}}, 1, 1},
-		"類型普通":    {url.Values{"type": []string{"standard"}}, 4, 4},
-		"狀態啟用":    {url.Values{"status": []string{"active"}}, 4, 4},
-		"狀態停用":    {url.Values{"status": []string{"disabled"}}, 1, 1},
+		"默認":   {url.Values{}, 5, 5},
+		"類型訪客": {url.Values{"type": []string{"guest"}}, 1, 1},
+		"類型普通": {url.Values{"type": []string{"standard"}}, 4, 4},
+		"狀態啟用": {url.Values{"status": []string{"active"}}, 4, 4},
+		"狀態停用": {url.Values{"status": []string{"disabled"}}, 1, 1},
+		// 刪除態現在是一個被受理的篩選值（用戶批准的刪除後展示策略）。這個現場裡
+		// 還沒有已刪者，所以它量到的是「合法值走正常路：200、空頁、總數 0」，
+		// 而不是被当成非法參數——已刪者被列出來的那一段由 TestAdminDirectoryScopeAndShape 釘。
+		"狀態列刪除態":  {url.Values{"status": []string{"deleted"}}, 0, 0},
 		"關鍵字顯示名":  {url.Values{"q": []string{"阿爾法"}}, 1, 1},
 		"關鍵字登入名":  {url.Values{"q": []string{"HTTP.BETA"}}, 1, 1},
 		"關鍵字不命中":  {url.Values{"q": []string{"查無此名"}}, 0, 0},
@@ -320,12 +356,15 @@ func TestAdminDirectoryFiltersAndInvalidParams(t *testing.T) {
 	for name, tc := range map[string]struct {
 		params url.Values
 	}{
-		"頁碼為零":   {url.Values{"page": []string{"0"}}},
-		"頁碼非數字":  {url.Values{"page": []string{"abc"}}},
-		"每頁為零":   {url.Values{"page_size": []string{"0"}}},
-		"每頁超上限":  {url.Values{"page_size": []string{"101"}}},
-		"狀態表外值":  {url.Values{"status": []string{"ghost"}}},
-		"狀態列刪除態": {url.Values{"status": []string{"deleted"}}},
+		"頁碼為零":  {url.Values{"page": []string{"0"}}},
+		"頁碼非數字": {url.Values{"page": []string{"abc"}}},
+		"每頁為零":  {url.Values{"page_size": []string{"0"}}},
+		"每頁超上限": {url.Values{"page_size": []string{"101"}}},
+		"狀態表外值": {url.Values{"status": []string{"ghost"}}},
+		// 待審批與已拒絕仍然不是這一頁能篩的價值：他們不在這本書裡（屬
+		// /admin/registrations 那本名冊），把篩選值放進來等於讓目錄替另一本書宣稱範圍。
+		"狀態列待審批": {url.Values{"status": []string{"pending"}}},
+		"狀態列已拒絕": {url.Values{"status": []string{"rejected"}}},
 		"類型表外值":  {url.Values{"type": []string{"root"}}},
 		"關鍵字超長":  {url.Values{"q": []string{strings.Repeat("夜", 65)}}},
 	} {
@@ -461,7 +500,6 @@ func TestAdminProfileDetailAndEditLoop(t *testing.T) {
 
 	for name, id := range map[string]string{
 		"同級管理員":   peer.ID.String(),
-		"已刪除者":    gone.ID.String(),
 		"幽靈標識":    phantomID.String(),
 		"格式非法的標識": "not-a-uuid",
 	} {
@@ -474,6 +512,44 @@ func TestAdminProfileDetailAndEditLoop(t *testing.T) {
 		if write.StatusCode != http.StatusNotFound || envelopeCode(t, write) != int(CodeNotFound) {
 			t.Errorf("編輯 %s 應回 1001/404，實際 %d", name, write.StatusCode)
 		}
+	}
+
+	// 已刪除者反其道：讀得到（200，帶著 deleted_at 與佔位顯示名），但編輯被 2027 擋下。
+	// 這一組量的是用戶批准的「列得出、點得開、動不了」三件事在同一筆回應裡一次講完——
+	// 若他從這一頁消失，操作者就只剩「查無此人」這個錯答案可用。
+	read := getAuth(t, e.ts, "/admin/accounts/"+gone.ID.String(), cookieHeader(admin), "", "")
+	if read.StatusCode != http.StatusOK {
+		t.Fatalf("讀已刪除者應回 200，實際 %d", read.StatusCode)
+	}
+	deletedDetail := mustReadAll(t, read)
+	for _, want := range []string{`"status":"deleted"`, `"deleted_at":"`, "DEL_"} {
+		if !strings.Contains(deletedDetail, want) {
+			t.Errorf("已刪除者的詳情應帶 %s，實際 %s", want, deletedDetail)
+		}
+	}
+	write := sendMethodBody(t, e.ts, http.MethodPut, "/admin/accounts/"+gone.ID.String(),
+		`{"display_name":"不該落庫","expected_display_name":"改前的顯示名"}`, admin)
+	if write.StatusCode != http.StatusConflict {
+		t.Errorf("編輯已刪除者應回 409，實際 %d", write.StatusCode)
+	}
+	// 碼與訊息一次讀：信封的 code 必是 2027（不再是 1001），而 message 是非空的一句
+	// 本地化話术，且不含任何憑據材料——這是「終態拒絕自成一句」在傳輸層的形態。
+	var termEnv struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal([]byte(mustReadAll(t, write)), &termEnv); err != nil {
+		t.Fatalf("2027 信封解析失敗：%v", err)
+	}
+	if termEnv.Code != int(CodeAccountDeleted) {
+		t.Errorf("編輯已刪除者的機器碼應是 2027，實際 %d", termEnv.Code)
+	}
+	if termEnv.Message == "" || strings.Contains(strings.ToLower(termEnv.Message), "argon2id") {
+		t.Errorf("2027 的訊息異常：%q", termEnv.Message)
+	}
+	if text := mustReadAll(t, getAuth(t, e.ts, "/admin/accounts/"+target.ID.String(),
+		cookieHeader(admin), "", "")); !strings.Contains(text, "改後的顯示名") {
+		t.Errorf("被終態拒絕的編輯不該寫進任何一筆，目標現值異常：%s", text)
 	}
 }
 
@@ -539,9 +615,12 @@ func TestAdminProfileForgedFieldsAndMethodShape(t *testing.T) {
 		t.Errorf("被拒的編輯不得追加審計（前 %d 後 %d）", auditsBefore, n)
 	}
 
+	// 父路徑如今受理 DELETE（軟刪除），所以「不受理的方法」這組探測改用 PATCH 與 TRACE：
+	// 這一格要證的是「沒登記的方法必然 405 並帶 Allow」，與父路徑有幾個方法無關。
 	for _, probe := range []struct{ method, path string }{
 		{http.MethodPost, "/admin/accounts/" + target.ID.String()},
-		{http.MethodDelete, "/admin/accounts/" + target.ID.String()},
+		{http.MethodPatch, "/admin/accounts/" + target.ID.String()},
+		{http.MethodTrace, "/admin/accounts/" + target.ID.String()},
 		{http.MethodPut, "/admin/accounts"},
 		{http.MethodDelete, "/admin/accounts"},
 	} {

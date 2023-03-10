@@ -24,13 +24,17 @@
 // 「把訪客升級成管理員」在協定層就沒有一個可以填的格子（本體白名單只有登入名與口令，
 // 未知欄位由 decodeJSON 當場拒殺），在用例層也沒有可寫的地方。
 //
-// 目標範圍在既有的 readStandardProfile 之上再加兩道只屬於這條通路的檢查：
+// 目標範圍在既有的 readStandardProfile（加上所有寫入通路共用的 requireNotTerminal）
+// 之上再加兩道只屬於這條通路的檢查：
 //   - 必須是訪戶（account_type=guest）：他已是普通帳戶時本次整個不發生——
 //     那顆按鈕對這個人不再存在，重複提交只會再拿到同一句 ErrNotUpgradeableGuest；
 //   - 必須是可登入狀態（active）：停用中的訪戶今天不能升級，處置是先恢復他的登入能力
 //     （或直接讓他這一趟臨時身分自然到期）。「停用不是刪除、升級不是復活」因此都
-//     寫在判定形狀上；已進入刪除終態者早在 readStandardProfile 出局，與其餘通路同句 1001。
-//     兩者都回同一枚獨立結論（不是 1001、不是 2011）：這個人就躺在這本目錄裡、
+//     寫在判定形狀上；已進入刪除終態者與已被綁走的退休訪戶更早在 requireNotTerminal
+//     就出局，各回「他已被刪除」「他已綁定退休」那一句（2027／2028）——
+//     他們都還在這本目錄裡，把他們報成「查無此人」是誤導，
+//     而退休行每一欄都被庫釘住，讓寫去撞觸發器只會換成一個 500。
+//     「已轉正」與「已停用」兩者都回同一枚獨立結論（不是 1001、不是 2011）：這個人就躺在這本目錄裡、
 //     操作者的權限也足夠，缺的是目標此刻的形態——把「已是正式帳戶」和「已被停用」
 //     收進同一句話是刻意的：界面在發起請求前就按服務端讀回的來源與狀態分岔，
 //     這枚碼在正路徑上只兜住併發與繞過界面的直打，不值得為兩種內部原因發兩枚碼。
@@ -64,8 +68,8 @@ import (
 
 // 升級用例的結論錯誤：口令形狀不合格、目標形態不可升級、併發落敗各自可判別，
 // 內部故障一律不進這些型別。「目標不在本目錄」不另發一型：沿用詳情、編輯、停用、
-// 重置同一枚 ErrAccountNotFound——「他不存在／他是管理員／他已刪除」在本目錄
-// 從來只有一個答案。
+// 重置同一枚 ErrAccountNotFound——「他不存在／他是管理員／他還在審批鏈門外」在本目錄
+// 從來只有一個答案；已刪除與已退休是另兩句（見 deleted.go）。
 var (
 	// ErrInvalidUpgradePassword 表示操作者交出的初始口令不滿足憑據模組的形狀界線（空或超長）。
 	//
@@ -121,10 +125,10 @@ type GuestUpgrade struct {
 //     而是既有授權矩陣對零授予主體的事實；
 //  2. 口令派生放在交易之外：Argon2id 按生產參數檔是數百毫秒級的計算，與建號、
 //     重置同一理由。派生失敗（空口令、超長口令）在此回輸入錯誤，一條寫入都沒有發生；
-//  3. 交易內 readStandardProfile：帳戶存在、是否持有授予、是否已進入刪除終態或審批鏈
+//  3. 交易內 readStandardProfile：帳戶存在、是否持有授予、是否還在審批鏈門外
 //     一起核實，對不在本目錄的標識整個操作不發生並回 ErrAccountNotFound；
-//  4. 形態兩道檢查（必須是訪戶、必須可登入）：出局點在寫入之前，被拒的升級
-//     零寫入、零撤銷、零審計——與被拒的建號、重置同口徑；
+//  4. 形態三道檢查（不是終態、必須是訪戶、必須可登入）：出局點都在寫入之前，
+//     被拒的升級零寫入、零撤銷、零審計——與被拒的建號、重置同口徑；
 //  5. 單條 UPDATE 轉正（UpgradeGuestToStandard）：分類、正式登入名與鍵、雜湊、
 //     改密旗標同生同滅，「失敗不留無口令的半升級身份」由此成立；重名回 ErrDuplicateLogin、
 //     守衛零行回 ErrUpgradeConflict，兩者都讓整筆交易回滾；
@@ -157,6 +161,11 @@ func (s *Service) UpgradeGuestToStandard(ctx context.Context, principal identity
 	err = s.db.InTx(ctx, func(tctx context.Context, tx *database.Tx) error {
 		before, err := s.readStandardProfile(tctx, tx, accountID)
 		if err != nil {
+			return err
+		}
+		// 終態判定在類型與狀態兩道檢查之前：一個已刪除或已被綁走的人，該拿到的是
+		// 他那句終態的話，而不是「他此刻不是可升級的訪戶」這句還暗示重讀後可以再按一次的話。
+		if err := requireNotTerminal(before); err != nil {
 			return err
 		}
 		if before.Type != account.TypeGuest || before.Status != account.StatusActive {
@@ -202,7 +211,8 @@ func (s *Service) UpgradeGuestToStandard(ctx context.Context, principal identity
 			s.log.Warn("升級訪戶被拒：正式登入名不合領域規則", "request_id", requestID)
 			return GuestUpgrade{}, err
 		case errors.Is(err, ErrNotUpgradeableGuest), errors.Is(err, ErrUpgradeConflict),
-			errors.Is(err, ErrInvalidUpgradePassword), errors.Is(err, ErrAccountNotFound):
+			errors.Is(err, ErrInvalidUpgradePassword), errors.Is(err, ErrAccountNotFound),
+			errors.Is(err, ErrAccountDeleted), errors.Is(err, ErrAccountRetired):
 			return GuestUpgrade{}, err
 		}
 		s.log.Error("升級訪戶失敗", "request_id", requestID, "err", err)

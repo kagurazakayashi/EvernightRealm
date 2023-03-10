@@ -21,10 +21,11 @@
 // 誤讀成「綁定已完成了半程」。
 //
 // 目標範圍與隱私邊界：來源與目標都經 readStandardProfile 讀取，所以「不在目錄」的
-// 任何一方（不存在／幽靈／持有伺服器級授予的管理員／已刪除／待審批鏈）一律收斂成
+// 任何一方（不存在／幽靈／持有伺服器級授予的管理員／待審批鏈）一律收斂成
 // 同一句不可分辨的 ErrAccountNotFound——與詳情端點逐字同形，預檢因此不新增任何
-// 枚舉信號；目錄內的事實（訪戶或正式、可用或停用）本來就對本目錄的操作者可見，
-// 預覽的阻止原因不是新的披露面。本端點一次只吃一對（來源, 目標）：沒有任何
+// 枚舉信號；目錄內的事實（訪戶或正式、可用、停用，以及已刪除與已退休這兩種終態）
+// 本來就對本目錄的操作者可見，預覽的阻止原因不是新的披露面：兩種終態走得是
+// 「非可登入狀態」那條 blocker，而不是另一套拒絕語意。本端點一次只吃一對（來源, 目標）：沒有任何
 // 「替這個訪戶列出可綁定目標」的讀法，請求形態本身就是反枚舉邊界。
 //
 // 引用登記表與未知引用阻止（AGENTS §7：歷史身分保留與跨活動隔離是領域要求）：
@@ -79,15 +80,16 @@ type BindBlocker string
 
 const (
 	// BindBlockerSameAccount 表示來源與目標是同一行：那句話本身就是病——
-	// 「把訪戶併入他自己」没有任何可發生的動作。命中這條時其餘按帳戶形態的檢查
+	// 「把訪戶併入他自己」沒有任何可發生的動作。命中這條時其餘按帳戶形態的檢查
 	// 一概不再追加（兩側讀的是同一行，堆疊出的原因句只會誤導）。
 	BindBlockerSameAccount BindBlocker = "same_source_target"
 	// BindBlockerSourceNotGuest 表示來源此刻不是訪戶：他已被就地升級、或未來
 	// 已綁定並進入退休終態——綁定的主詞只能落在 account_type='guest' 那行人身上。
 	// 這同時就是「已綁定過的訪戶不得再綁第二次」的檢測形態（退休之後他不再是 guest）。
 	BindBlockerSourceNotGuest BindBlocker = "source_not_guest"
-	// BindBlockerSourceNotActive 表示來源訪戶此刻被停用：綁定不該順帶復活誰
-	// （與升級同一口徑：處置是先恢復登入或讓那趟臨時身分自然到期）。
+	// BindBlockerSourceNotActive 表示來源訪戶此刻不是一個可登入的帳戶：被停用，
+	// 或已進入刪除／綁定退休的終態。綁定不該順帶復活誰（與升級同一口徑：
+	// 停用的處置是先恢復登入或讓那趟臨時身分自然到期，而終態沒有回去的路）。
 	BindBlockerSourceNotActive BindBlocker = "source_not_active"
 	// BindBlockerSourceHasGrants 表示來源這行人名下查得有伺服器級授予——訪戶帶授予
 	// 按遷移 0006 的觸發器在本來形態下不可能出生，查到即是外部改壞庫的缺陷形態；
@@ -98,9 +100,11 @@ const (
 	// （持有伺服器級授予的目標到不了這裡：readStandardProfile 已把管理員收進
 	// 「不在目錄」那句不可分辨的話，這是刻意設計，不是漏判。）
 	BindBlockerTargetNotStandard BindBlocker = "target_not_standard"
-	// BindBlockerTargetNotActive 表示目標此刻被停用：一個登不進門的正式帳戶
+	// BindBlockerTargetNotActive 表示目標此刻不是一個可登入的正式帳戶（被停用，
+	// 或已進入刪除終態）：一個登不進門的人
 	// 沒有能力在自己的會話裡完成「確認並接受綁定」那一步（同意的來源見檔案頭注），
-	// 所以停用中的目標對綁定不是候選，處置是先恢復他的登入能力。
+	// 所以這樣的目標對綁定不是候選——停用的處置是先恢復他的登入能力，
+	// 而刪除是終態，沒有任何通路能把他帶回門內（那一對必須換一個承接受方）。
 	BindBlockerTargetNotActive BindBlocker = "target_not_active"
 	// BindBlockerUnknownReferences 表示這個庫裡存在引用帳戶、而本預檢尚未登記如何
 	// 處置的表：它的行可能承載評估不了的歸屬（未來的活動名冊、資產所有權、NPC 關係），
@@ -173,7 +177,7 @@ var bindTableIdentifier = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 // 阻止原因、將產生的影響、源會話計數與這份快照運行的資料版本。
 //
 // 沒有、也不可能有的一欄是「綁定完成的憑據」：本用例零寫入，產不出任何生效中的東西。
-// 兩側 Profile 沿用目錄详情的同一個可展示形狀（StandardProfile）：預覽不披露
+// 兩側 Profile 沿用目錄詳情的同一個可展示形狀（StandardProfile）：預覽不披露
 // 目錄本來看不到的任何欄位，憑據材料更是從形狀上就放不進來。
 type GuestBindPreflight struct {
 	// Source 為來源訪戶經實體校驗的單筆資料。
@@ -247,12 +251,16 @@ func (s *Service) PreflightGuestBind(ctx context.Context, principal identity.Pri
 //
 // 判定順序與每一跳的理由：
 //  1. 兩側經 readStandardProfile 讀取：不在目錄的一方（不存在／幽靈／管理員／
-//     已刪除／待審批鏈）讓整個預檢以不可分辨的 ErrAccountNotFound 收場——與詳情端點
-//     同形，預覽不是新的枚舉面；
+//     待審批鏈）讓整個預檢以不可分辨的 ErrAccountNotFound 收場——與詳情端點
+//     同形，預覽不是新的枚舉面；已刪除與已退休在這本目錄的讀取範圍之內，
+//     他們在第 3 步以非可登入狀態被擋，而不是在第 1 步假裝查無此人；
+//     （第 3 步那一支判定的取值見下方 blocker 常數：兩種終態都落在 not_active 那一句，
+//     因為綁定要問的是「他現在還登不登得進來」，而 deleting 與 retired 都答「不了」。）
 //  2. 現掃實庫外鍵邊（findUnregisteredAccountReferences）：登記表外的任何帳戶引用表
 //     記一條 unknown_references，並將本對綁定整體阻止；
-//  3. 形態與歸屬判定：同對／非訪戶來源／停用來源／帶授予的來源／訪戶目標／
-//     停用目標——每一條都是「此刻的安全邊界」，不是一個可以繞過的建議；
+//  3. 形態與歸屬判定：同對／非訪戶來源／來源非可登入狀態（停用、已刪除或已退休）／
+//     帶授予的來源／訪戶目標／目標非可登入狀態（停用或已刪除）——
+//     每一條都是「此刻的安全邊界」，不是一個可以繞過的建議；
 //  4. 源會話計數與 schema 版本讀取：結論要如實說出影響範圍和這份快照的時代背景；
 //  5. 組裝：blockers 清空才 executable，可執行才帶 impacts。
 func (s *Service) evaluateBindPlan(ctx context.Context, q database.Querier,
@@ -319,9 +327,12 @@ func (s *Service) evaluateBindPlan(ctx context.Context, q database.Querier,
 		}
 	}
 
-	// 目標側：承接受方必須是「此刻是普通正式帳戶且可登入」的這行人。管理員與刪除／
-	// 待審批者到不了這裡（已在範圍檢查收進 1001 那句），所以這裡不需要、也不應該
+	// 目標側：承接受方必須是「此刻是普通正式帳戶且可登入」的這行人。管理員與待審批者
+	// 到不了這裡（已在範圍檢查收進 1001 那句），所以這裡不需要、也不應該
 	// 再判一次「他是不是特權帳戶」——那句话早已是一句不可分辨的「不在目錄」。
+	// 已刪除的目標會走到這裡，由下面那一支 Status != active 的判定擋住：刪除是終態，
+	// 「先恢復他的登入能力再綁」對他不是處置，而界面早在讀回的 status 上就把這條
+	// 通路收起了——這一格擋的是繞過界面的直打與併發尾巴。
 	if target.Type != account.TypeStandard {
 		result.Blockers = append(result.Blockers, BindBlockerTargetNotStandard)
 	} else if target.Status != account.StatusActive {

@@ -22,6 +22,7 @@ import (
 	"github.com/kagurazakayashi/EvernightRealm/internal/identity"
 	"github.com/kagurazakayashi/EvernightRealm/internal/identity/identitytest"
 	"github.com/kagurazakayashi/EvernightRealm/internal/idgen"
+	"github.com/kagurazakayashi/EvernightRealm/internal/timeutil"
 )
 
 // seedInput 是種入一筆帳戶時要指定的形態（本檔多數用例需要非默認形態：訪客、停用、管理員）。
@@ -36,9 +37,14 @@ type seedInput struct {
 	Status account.Status
 	// Admin 表示建完後補一筆 server_admin 授予（把這筆變成「不該出現在普通帳戶目錄」的人）。
 	Admin bool
-	// Deleted 表示建完後經倉儲寫入刪除終態（繞過應用層的那條路在本步尚未開放，
-	// 因此刪除態只能由這裡種出來——這也正是「目錄與寫入通路都要把他排掉」的可證形態）。
+	// Deleted 表示建完後經倉儲寫入刪除終態。刪除自有應用層通路（見 deleted.go），
+	// 但夾具要的是「目錄與每一條寫入通路面對已存在終態行時的答案」，
+	// 由倉儲直接種出來比走一遍用例更穩定（不把夾具綁在某條通路的現值上）。
 	Deleted bool
+	// Retired 表示建完後經倉儲寫入綁定退休終態（只有訪戶可以是這個形態）。
+	// 它同樣是「種」而不是「綁」：本檔要量的是各條通路面對退休行的回答，
+	// 而不是綁定那一步自己（那有 bindexecute_test.go 負責）。
+	Retired bool
 }
 
 // seed 種入一筆帳戶並回傳實體。
@@ -87,11 +93,25 @@ func (e *env) seed(t *testing.T, in seedInput) account.Account {
 			t.Fatalf("寫入刪除終態失敗：%v（changed=%v）", err, ok)
 		}
 	}
+	if in.Retired {
+		// 與 RetireGuestForBind 同形的單條 UPDATE：退休態與退休時刻同生，
+		// 由注入時鐘給時刻（不拿零值或系統時間湊數）。
+		res, err := e.db.SQL().ExecContext(ctx,
+			"UPDATE accounts SET status = ?, retired_at = ? WHERE id = ? AND account_type = ?",
+			string(account.StatusRetired), timeutil.ToMillis(e.clock.Now()),
+			created.ID.String(), account.TypeGuest.String())
+		if err != nil {
+			t.Fatalf("寫入退休終態失敗：%v", err)
+		}
+		if n, err := res.RowsAffected(); err != nil || n != 1 {
+			t.Fatalf("退休終態應恰好命中一行（n=%d）：%v", n, err)
+		}
+	}
 	return created
 }
 
 // disabledAtFor 依狀態補禁用時刻：域規則要求 disabled 與 disabled_at 同生同滅，
-// 這個配對在測試夹具裡也必须由同一個時鐘給出，不拿零值或系統時間湊數。
+// 這個配對在測試夾具裡也必须由同一個時鐘給出，不拿零值或系統時間湊數。
 func disabledAtFor(status account.Status, now time.Time) time.Time {
 	if status == account.StatusDisabled {
 		return now
@@ -151,8 +171,12 @@ func isDenied(err error) bool {
 		errors.Is(err, identity.ErrNotAuthenticated)
 }
 
-// TestDirectoryScopeExcludesAdminsAndDeleted 目錄範圍：只列不帶伺服器級授予、
-// 且未進入刪除終態的帳戶（普通與訪客都在內），依建立時刻倒序。
+// TestDirectoryScopeExcludesAdminsAndDeleted 目錄範圍：列不帶伺服器級授予的帳戶
+// （普通、訪客，以及已進入刪除終態的那一筆），依建立時刻倒序；持有授予者一律不列。
+//
+// 已刪者列得進來是用戶批准的展示策略（與 /root/admins 同形）：他的行留著正是為了被讀到，
+// 而目錄要把「他被刪於何時」一併給出。他列在這兒不等於還能被他做事——那句話由
+// 每一條寫入通路的終態判定回答，不在這一頁的 WHERE 裡判第二次。
 func TestDirectoryScopeExcludesAdminsAndDeleted(t *testing.T) {
 	e := newEnv(t)
 	admin := identitytest.Account(t, identitytest.NewID(t), identitytest.ServerAdmin())
@@ -170,18 +194,31 @@ func TestDirectoryScopeExcludesAdminsAndDeleted(t *testing.T) {
 	e.seed(t, seedInput{Login: "scope.peer-off", Display: "停用的管理員", Admin: true,
 		Status: account.StatusDisabled})
 	e.clock.Advance(time.Minute)
-	e.seed(t, seedInput{Login: "scope.gone", Display: "已被刪除的", Deleted: true})
+	gone := e.seed(t, seedInput{Login: "scope.gone", Display: "已被刪除的", Deleted: true})
 
 	page, err := e.service.Directory(ctx, admin, DirectoryQuery{Page: 1, PageSize: 10})
 	if err != nil {
 		t.Fatalf("讀目錄失敗：%v", err)
 	}
-	if page.Total != 2 || len(page.Rows) != 2 {
-		t.Fatalf("目錄應只列兩位非授予者（含訪客），實際 total=%d rows=%d", page.Total, len(page.Rows))
+	if page.Total != 3 || len(page.Rows) != 3 {
+		t.Fatalf("目錄應列三位非授予者（含訪客與已刪者），實際 total=%d rows=%d",
+			page.Total, len(page.Rows))
 	}
-	// 倒序：後種的訪客在前。
-	if page.Rows[0].AccountID != guest.ID.String() || page.Rows[1].AccountID != plain.ID.String() {
-		t.Errorf("排序應為建立時刻倒序，實際 %s, %s", page.Rows[0].AccountID, page.Rows[1].AccountID)
+	// 倒序：最後種的那一筆（已刪者）在前。這裡要證的恰恰是「已刪不會把他從名冊上抹掉」，
+	// 所以順序斷言按三筆來量，而不是把他當成不存在。
+	if page.Rows[0].AccountID != gone.ID.String() || page.Rows[1].AccountID != guest.ID.String() ||
+		page.Rows[2].AccountID != plain.ID.String() {
+		t.Errorf("排序應為建立時刻倒序，實際 %s, %s, %s",
+			page.Rows[0].AccountID, page.Rows[1].AccountID, page.Rows[2].AccountID)
+	}
+	if page.Rows[0].Status != account.StatusDeleted.String() ||
+		page.Rows[0].DeletedAt.IsZero() {
+		t.Errorf("已刪的那一行要同時帶出狀態與刪除時刻，實際 %+v", page.Rows[0])
+	}
+	for _, row := range page.Rows[1:] {
+		if !row.DeletedAt.IsZero() {
+			t.Errorf("未刪除的行不該帶刪除時刻（不拿零值之外的東西冒充）：%+v", row)
+		}
 	}
 	for _, row := range page.Rows {
 		if row.AccountType == "" || row.Status == "" || row.LoginName == "" {
@@ -249,7 +286,7 @@ func TestDirectoryFiltersAndInvalidParams(t *testing.T) {
 		"每頁為零":   {DirectoryQuery{Page: 1, PageSize: 0}, ErrInvalidPageSize},
 		"每頁超上限":  {DirectoryQuery{Page: 1, PageSize: DirectoryMaxPageSize + 1}, ErrInvalidPageSize},
 		"狀態表外值":  {DirectoryQuery{Page: 1, PageSize: 10, StatusFilter: "ghost"}, ErrInvalidStatusFilter},
-		"狀態列刪除態": {DirectoryQuery{Page: 1, PageSize: 10, StatusFilter: "deleted"}, ErrInvalidStatusFilter},
+		"狀態列待審批": {DirectoryQuery{Page: 1, PageSize: 10, StatusFilter: "pending"}, ErrInvalidStatusFilter},
 		"類型表外值":  {DirectoryQuery{Page: 1, PageSize: 10, TypeFilter: "root"}, ErrInvalidTypeFilter},
 		"關鍵字過長":  {DirectoryQuery{Page: 1, PageSize: 10, Keyword: strings.Repeat("夜", DirectoryKeywordMaxRunes+1)}, ErrInvalidKeyword},
 	} {
@@ -356,13 +393,31 @@ func TestStandardProfileScopeMatrix(t *testing.T) {
 	for name, id := range map[string]idgen.ID{
 		"另一位管理員": peer.ID,
 		"操作者自己":  selfSeed.ID,
-		"已刪除帳戶":  deleted.ID,
 		"幽靈標識":   identitytest.NewID(t),
 		"零值標識":   idgen.ID{},
 	} {
 		if _, err := e.service.StandardAccountProfile(ctx, admin, id); !errors.Is(err, ErrAccountNotFound) {
 			t.Errorf("%s 應收斂成「不在這本目錄裡」，實際 %v", name, err)
 		}
+	}
+
+	// 已刪除帳戶反方向獨立成句：用戶批准的展示策略是「列得出、點得開、一律只讀」，
+	// 所以詳情讀得到，而且帶著 deleted_at 與那顆佔位顯示名——界面要把「他已被刪於何時」
+	// 講成服務端的事實，而不是讓操作者對著一個查不到的標識猜。
+	deletedProfile, err := e.service.StandardAccountProfile(ctx, admin, deleted.ID)
+	if err != nil {
+		t.Fatalf("已刪除帳戶的詳情必須讀得到（歷史身分回溯），實際 %v", err)
+	}
+	if deletedProfile.Status != account.StatusDeleted || deletedProfile.DeletedAt.IsZero() {
+		t.Errorf("詳情應如實帶出刪除終態與刪除時刻，實際 status=%s deletedAt=%v",
+			deletedProfile.Status, deletedProfile.DeletedAt)
+	}
+	if !strings.HasPrefix(deletedProfile.DisplayName, "DEL_") {
+		t.Errorf("詳情讀到的應是服務端寫回的佔位顯示名，實際 %q", deletedProfile.DisplayName)
+	}
+	if deletedProfile.LoginName != deleted.LoginName {
+		t.Errorf("刪除不動登入名（名字繼續被占用）：期望 %q，實際 %q",
+			deleted.LoginName, deletedProfile.LoginName)
 	}
 }
 
@@ -497,7 +552,8 @@ func TestUpdateStandardProfileConcurrentAndStale(t *testing.T) {
 }
 
 // TestUpdateStandardProfileRefusesOutOfRangeAndBadInput 目標範圍與輸入合規的兩側拒絕：
-// 管理員／已刪除者／幽靈標識都改不到，非法顯示名不落庫也不留審計。
+// 管理員／幽靈標識改不到，終態目標（已刪除、已退休）改不到，
+// 非法顯示名不落庫也不留審計。
 func TestUpdateStandardProfileRefusesOutOfRangeAndBadInput(t *testing.T) {
 	e := newEnv(t)
 	ctx := context.Background()
@@ -513,7 +569,7 @@ func TestUpdateStandardProfileRefusesOutOfRangeAndBadInput(t *testing.T) {
 		err error
 	}{
 		"同級管理員":  {peer.ID, ErrAccountNotFound},
-		"已刪除者":   {deleted.ID, ErrAccountNotFound},
+		"已刪除者":   {deleted.ID, ErrAccountDeleted},
 		"不存在的標識": {identitytest.NewID(t), ErrAccountNotFound},
 		"零值標識":   {idgen.ID{}, ErrAccountNotFound},
 	} {

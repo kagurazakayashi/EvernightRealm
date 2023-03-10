@@ -61,8 +61,9 @@ func (s *Server) apiRoutes() []apiRoute {
 	routes = append(routes, s.initStatusEndpoints()...)
 	// 帳戶建立策略端點（Root 讀寫＋對外的兩個布林）同一個來源、同一個有無判定。
 	routes = append(routes, s.accountPolicyEndpoints()...)
-	// 管理員打理普通帳戶端點（POST 與 GET /admin/accounts、GET／PUT /admin/accounts/{account_id}、
-	// PUT /admin/accounts/{account_id}/status、PUT /admin/accounts/{account_id}/password）
+	// 管理員打理普通帳戶端點（POST 與 GET /admin/accounts、GET／HEAD／PUT／DELETE
+	// /admin/accounts/{account_id}——DELETE 是軟刪除、本體一個欄位都不帶，
+	// 以及 /status、/password、/upgrade、/bind-preflight、/bind-ticket 五條子資源）
 	// 同一個來源、同一個有無判定；「/admin 首段屬於 API」因此只在端點掛上時才成立。
 	routes = append(routes, s.standardAccountEndpoints()...)
 	// 匿名自註冊端點（POST /auth/register）同一個來源、同一個有無判定；未注入用例時不掛。

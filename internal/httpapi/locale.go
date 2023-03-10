@@ -234,6 +234,18 @@ var errorMessages = map[ErrorCode]map[string]string{
 		LocaleEnUS: "This binding plan no longer matches the server's current facts, so nothing ran — an account-reference table that the binding pre-check has not been wired for may have appeared, one side's identity or sign-in capability may have changed, or the database schema may have moved on. A plan pinned to an old ticket does not become new by pressing it again: run the pre-check again and confirm with a fresh ticket. Nothing was written this time: the guest was not retired, no session was revoked, no history row was added, and the target account was not changed.",
 		LocaleJaJP: "このバインド計画はサーバーの現在の状況と一致しないため実行されませんでした。バインド事前チェック未接続のアカウント参照表が増えた、この一組のいずれかの身份またはログイン機能が変わった、あるいはデータベースのバージョンが進んだ可能性があります。古い証跡に釘付けられた計画は、もう一度押しても新しい計画にはなりません。事前チェックをやり直し、新しい証跡で改めて確認してください。今回は一文字も書き込まれていません。ゲストは退席せず、セッションも失効せず、履歴行も追加されず、対象アカウントも変更されていません。",
 	},
+	CodeAccountDeleted: {
+		LocaleZhCN: "这名成员已经被软删除，本次操作没有执行。删除是终态：他不再接受任何修改，也不会被恢复登录，再删一次同样不会成功。他的登录名继续被占用，别人抢不到同一个名字；他的账户行仍然留在目录与详情里，是为了让过往的记录与身份指得回同一个人。",
+		LocaleZhTW: "這名成員已經被軟刪除，本次操作沒有執行。刪除是終態：他不再接受任何修改，也不會被恢復登入，再刪一次同樣不會成功。他的登入名繼續被佔用，別人搶不到同一個名字；他的帳戶行仍然留在目錄與詳情裡，是為了讓過往的記錄與身分指得回同一個人。",
+		LocaleEnUS: "This member has already been soft-deleted, so this operation did not run. Deletion is terminal: the account accepts no further changes, cannot be restored to sign-in, and deleting it again will not succeed either. Its sign-in name stays occupied so nobody else can claim the same name, and the account row remains in the directory and detail view so that past records keep pointing to the same person.",
+		LocaleJaJP: "このメンバーはすでにソフト削除されているため、今回の操作は実行されませんでした。削除は終端状態です。これ以上どんな変更も受け付けず、サインインを復帰させることもできません。もう一度削除しても成功しません。ログイン名は占有されたままなので他人は同じ名前を取得できず、アカウント行は一覧と詳細に残ります。過去の記録を同じ人物に辿りできるようにするためです。",
+	},
+	CodeAccountRetired: {
+		LocaleZhCN: "这名访客已经被绑定并入另一个正式账户，进入的是退休终态，本次操作没有执行。他不是被删除，而是以这个身份并进了别人：既不能被删除，也没有任何通路让他重新可用。要查他是谁、何时并入了哪个账户，请读那条绑定留痕。",
+		LocaleZhTW: "這名訪戶已經被綁定併入另一個正式帳戶，進入的是退休終態，本次操作沒有執行。他不是被刪除，而是以這個身分併進了別人：既不能被刪除，也沒有任何通路讓他重新可用。要查他是誰、何時併入了哪個帳戶，請讀那條綁定留痕。",
+		LocaleEnUS: "This guest has already been bound into another standard account and is in the retired terminal state, so this operation did not run. He was not deleted — he merged into someone else under this identity: he cannot be deleted, and no path makes him usable again. To see who he was and when he was merged, read that binding history record.",
+		LocaleJaJP: "このゲストはすでに別の正式アカウントへバインド併合され、退席（終端）状態にあるため、今回の操作は実行されませんでした。削除されたのではなく、この身份のまま他人に併されたのです。削除することも、彼を再び使えるようにする通路もありません。彼が誰で、いつどのアカウントに併されたかは、そのバインド履歴の記録を読んでください。",
+	},
 }
 
 // messageFor 取得錯誤碼在指定語言的使用者訊息；語言未支援或訊息為空時回退 defaultLocale。

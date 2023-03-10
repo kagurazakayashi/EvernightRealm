@@ -14,10 +14,11 @@
 //
 // 底層機制逐字複用管理員停用那兩條倉儲寫法（account.Store.SetStatus 的 CAS、
 // session.Store.RevokeAccount 的定向撤銷），但目標範圍由本套件獨立判定：
-// 範圍規則是「不持有 server_admin 授予、且未進入刪除終態」，所以管理員拿這條通路
+// 範圍規則是「不持有 server_admin 授予、不在審批鏈門外，且未進入任何終態」，所以管理員拿這條通路
 // 動不了另一位管理員，也動不了他自己（那三種形態與查無此人收斂成同一個
-// ErrAccountNotFound），而 Root 本来就不在 accounts 表裡。授權仍然是 NeedServerAdmin
-// ——與建號、目錄、資料編輯同一道閘，本步不新增檔位也不下放。
+// ErrAccountNotFound），而 Root 本来就不在 accounts 表裡；兩種終態（已刪、已退休）
+// 各自回自己那句話，因為它們就在這本目錄裡，說「換個目標」是誤導。
+// 授權仍然是 NeedServerAdmin——與建號、目錄、資料編輯、刪除同一道閘，本步不新增檔位也不下放。
 //
 // 恢復只恢復「新登入資格」這一件事：不復活停用前被撤銷的會話（撤銷不可逆，
 // 恢復通路一個 session 都不碰）、不清除尚未完成的首次改密旗標（UPDATE 語句不碰那欄）、
@@ -97,19 +98,20 @@ type StatusChange struct {
 // 全部寫入落在同一個交易，順序與每一跳的理由：
 //  1. 授權（NeedServerAdmin，與建號、目錄、編輯同一道閘）與輸入校驗在交易外：
 //     被拒的請求一個查詢都不該多花；
-//  2. 交易內 readStandardProfile：帳戶存在、是否持有授予、是否已進入刪除終態
-//     三道範圍檢查一起核實。對不在本目錄的標識整個操作不發生，而「已刪除的普通帳戶」
-//     在這裡自然得到與詳情、編輯相同的結論（ErrAccountNotFound），不需要 2015 那句話——
-//     那句是 Root 管理員目錄的處置，而那本目錄裡的人本來就列得到已刪者；
-//  3. CAS 寫狀態（WHERE 帶著呼叫端所依據的現狀）：changed=false 即回 ErrStatusConflict
+//  2. 交易內 readStandardProfile：帳戶存在、是否持有授予、是否還在審批鏈門外
+//     三道範圍檢查一起核實。對不在本目錄的標識整個操作不發生；
+//  3. requireNotTerminal：已刪除與已退休都讀得到，但兩態都不接受停用／恢復的寫入——
+//     刪除是終態而「恢復登入」對它從來不是一個可發的令，退休行每一欄都被庫釘住，
+//     少了這一道只會換成一個撞觸發器的 500（判定點只有一個，見 deleted.go）；
+//  4. CAS 寫狀態（WHERE 帶著呼叫端所依據的現狀）：changed=false 即回 ErrStatusConflict
 //     並讓交易回滾——狀態、disabled_at、會話、審計四件事沒有一件發生，
 //     衝突的停用不是「部分成功」；
-//  4. 僅在進入 disabled 時同交易撤銷目標全部會話：恢復永不撤銷，
-//     「不復活停用前會話」因此成立在第 3 步已落庫的 revoked_at 上，不靠解析路徑各加特例；
-//  5. 同交易重讀並追加 Root 域審計：變更與其審計同生同滅。
+//  5. 僅在進入 disabled 時同交易撤銷目標全部會話：恢復永不撤銷，
+//     「不復活停用前會話」因此成立在第 4 步已落庫的 revoked_at 上，不靠解析路徑各加特例；
+//  6. 同交易重讀並追加 Root 域審計：變更與其審計同生同滅。
 //
-// 被拒的變更（非管理員、不在目錄、併發衝突、輸入不構成變更）不追加審計：
-// 與被拒的建號、編輯、管理員停用同口徑——拒絕的結論不該成為寫入放大器。
+// 被拒的變更（非管理員、不在目錄、目標是終態、併發衝突、輸入不構成變更）不追加審計：
+// 與被拒的建號、編輯、重置同口徑——拒絕的結論不該成為寫入放大器。
 func (s *Service) UpdateStandardAccountStatus(ctx context.Context, principal identity.Principal,
 	accountID idgen.ID, in StatusChangeInput, requestID string) (StatusChange, error) {
 	if err := identity.Authorize(principal, identity.NeedServerAdmin); err != nil {
@@ -129,6 +131,16 @@ func (s *Service) UpdateStandardAccountStatus(ctx context.Context, principal ide
 	err := s.db.InTx(ctx, func(tctx context.Context, tx *database.Tx) error {
 		before, err := s.readStandardProfile(tctx, tx, accountID)
 		if err != nil {
+			return err
+		}
+		// 已刪除與已退休都不進這條通路：「恢復登入」承認的是停用過的帳戶，
+		// 把終態當成「一個還能被恢復的停用」是這條通路最壞的誤讀（用戶批准：
+		// 停用與刪除是不同狀態，而綁定後的訪戶沒有任何通路可恢復）。
+		// 判定在 CAS 之前，因此這次拒絕既不改狀態、也不撤會話、也不留審計。
+		// 一個說明：statusChangeValid 在交易外先擋掉「expected_status 填了終態值」的寫法
+		// （那根本不是一條可選的遷移，屬請求本體的問題），這一跳擋的是「他現在是終態」
+		// 這個資料庫事實——兩句的話題不同，誰也不代替誰。
+		if err := requireNotTerminal(before); err != nil {
 			return err
 		}
 		changed, err := s.accounts.SetStatus(tctx, tx, accountID, in.NewStatus, in.ExpectedStatus)
@@ -165,7 +177,8 @@ func (s *Service) UpdateStandardAccountStatus(ctx context.Context, principal ide
 		case errors.Is(err, account.ErrNotFound), errors.Is(err, grant.ErrNotFound):
 			return StatusChange{}, ErrAccountNotFound
 		case errors.Is(err, ErrStatusConflict), errors.Is(err, ErrAccountNotFound),
-			errors.Is(err, ErrInvalidStatusChange):
+			errors.Is(err, ErrInvalidStatusChange), errors.Is(err, ErrAccountDeleted),
+			errors.Is(err, ErrAccountRetired):
 			return StatusChange{}, err
 		}
 		s.log.Error("變更普通帳戶狀態失敗", "request_id", requestID, "err", err)
@@ -181,7 +194,9 @@ func (s *Service) UpdateStandardAccountStatus(ctx context.Context, principal ide
 // 兩側都必須落在封閉集合內且互不相同。同值不發給交易與 CAS 的理由寫在
 // account.Store.SetStatus 的域不變量裡（沒有新事實可寫，且 disabled→disabled
 // 會把 disabled_at 重新蓋一次「此刻被停」的假時刻）。
-// 刪除終態在這裡也過不了 valid：它不是一条可選的遷移，而是一道範圍檢查的出局條件。
+// 兩種終態（deleted／retired）作為任一側也過不了 valid：它們不是一條可選的遷移。
+// 但這一格擋的是「請求寫法」（呼叫端宣稱的 expected_status 根本不在可選集合裡），
+// 目標此刻是不是終態仍由交易內的現讀判定（requireNotTerminal），兩者話題不同。
 func statusChangeValid(in StatusChangeInput) bool {
 	valid := func(s account.Status) bool {
 		return s == account.StatusActive || s == account.StatusDisabled

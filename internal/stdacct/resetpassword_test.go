@@ -332,10 +332,15 @@ func TestResetGuestIsRefusedWithoutWrites(t *testing.T) {
 	}
 }
 
-// TestResetTargetScope 目標範圍：另一位管理員、操作者自己、刪除終態、Root 保留標識、
-// 幽靈標識與零值標識一律同一句話（ErrAccountNotFound），且零寫入零審計。
+// TestResetTargetScope 目標範圍：另一位管理員、操作者自己、Root 保留標識、幽靈標識與
+// 零值標識一律同一句話（ErrAccountNotFound）；刪除終態與退休終態各回自己那一句。
+// 全部拒絕都零寫入零審計。
 //
 // 這一條量的是本步那句邊界：普通管理員不能拿這條通路重置其他管理員，也重置不到 Root。
+// 而「他已被刪除」與「他已被綁走」不再是查無同形——用戶批准的展示策略把他們留在名冊上，
+// 說「換個目標」對一個就在冊上的人是誤導。退休訪戶拿到的也不是 2018
+// （「他是訪戶，重置要等升級通路」對他是一句永遠不會兌現的等待），
+// 所以終態判定排在類型判定之前。
 func TestResetTargetScope(t *testing.T) {
 	e := newEnv(t)
 	ctx := context.Background()
@@ -355,7 +360,6 @@ func TestResetTargetScope(t *testing.T) {
 	for name, id := range map[string]idgen.ID{
 		"另一位管理員":    peer.ID,
 		"操作者自己":     self.ID,
-		"刪除終態":      deleted.ID,
 		"Root 保留標識": rootSubjectID,
 		"幽靈標識":      identitytest.NewID(t),
 		"零值標識":      idgen.ID{},
@@ -363,6 +367,20 @@ func TestResetTargetScope(t *testing.T) {
 		if _, err := e.service.ResetStandardAccountPassword(ctx, admin, id,
 			testResetPassword, "req-scope-"+name); !errors.Is(err, ErrAccountNotFound) {
 			t.Errorf("%s 應回不在目錄的同形結論，實際 %v", name, err)
+		}
+	}
+	retired := e.seed(t, seedInput{Login: "reset.scope.retired", Display: "已被綁走的旅人",
+		Type: account.TypeGuest, Retired: true})
+	for name, tc := range map[string]struct {
+		id  idgen.ID
+		err error
+	}{
+		"刪除終態": {deleted.ID, ErrAccountDeleted},
+		"退休終態": {retired.ID, ErrAccountRetired},
+	} {
+		if _, err := e.service.ResetStandardAccountPassword(ctx, admin, tc.id,
+			testResetPassword, "req-terminal-"+name); !errors.Is(err, tc.err) {
+			t.Errorf("%s 應回 %v，實際 %v", name, tc.err, err)
 		}
 	}
 	if got := rowSnapshot(t, e, peer.ID); !strings.Contains(got, "password_hash=") {

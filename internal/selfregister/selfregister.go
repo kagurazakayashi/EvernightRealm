@@ -454,7 +454,25 @@ func (s *Service) ApplicationStatus(ctx context.Context, in ApplicationStatusInp
 		return ApplicationStatus{}, ErrInvalidCredentials
 	}
 
-	// 到這裡身分已證明：接下來兩句都只對「他本人」說，因此不再是探測信號。
+	// 到這裡身分已證明：接下來幾句都只對「他本人」說，因此不再是探測信號。
+	//
+	// 已進入刪除終態者不再得到任何一句申請狀態：軟刪除動的是「這個人不再是任何可用
+	// 帳戶」這件事，而他手上那份「我申請過了、而且被批了」的證明正好是刪除要收走的
+	// 東西之一。處置收成與其他憑據失敗同形的 2001（與登入端點逐字同一句話），
+	// 並且計一次憑據失敗——一個已經被刪掉的人反覆敲這條門，不該每次都被記成成功。
+	//
+	// 這一句必須排在口令驗證之後而不是之前：先答「他是刪除態」會讓這條通路在
+	// 口令都沒對的時候就把「這個名字存在而且被刪過」講出去，而那正是它一直刻意
+	// 收斂成同一句話的東西。驗證過了才說，說的就只是對他本人說的事實。
+	// 也不發一枚「他已被刪除」的新碼：對一個只能靠口令認身份的匿名通路，
+	// 任何可分辨的終態句都是新的枚舉面，而 2027／2028 那兩句是管理端讀得到目錄
+	// 才需要的分辨，兩側的需求不同，不共用。
+	if a.Status == account.StatusDeleted {
+		s.credentialGuardFailure(sourceIP, target)
+		s.log.Warn("查申請狀態被拒：該帳戶已被軟刪除，申請證明不再對外有效",
+			"account", a.ID.String(), "request_id", requestID)
+		return ApplicationStatus{}, ErrInvalidCredentials
+	}
 	outcome, known := outcomeOfApplication(a)
 	if !known {
 		// 口令對了，但這一筆帳戶根本沒走過審批通路（開放自註冊建的、管理員建的、Root 開的）。
@@ -480,8 +498,11 @@ func (s *Service) ApplicationStatus(ctx context.Context, in ApplicationStatusInp
 // 判定順序是刻意的：先問 status（他此刻在審批鏈的哪一站），再問 reviewed_at
 // （他是不是走審批進來的）。
 //   - pending／rejected 直接回答，兩個狀態各對應一句；
-//   - 其餘狀態（active／disabled／deleted）帶著審核時刻的，就是「當初被批准過」——
+//   - 其餘狀態（active／disabled）帶著審核時刻的，就是「當初被批准過」——
 //     一個剛被批准的人若在這裡拿到 ErrNotAnApplication，那句「你不是待審批申請」對他是錯的；
+//   - deleted 不在這裡出現：呼叫端在進到這一步之前就把已刪除者收成 2001（見 ApplicationStatus
+//     的那段註解）。這一格因此只回答「申請怎麼樣了」，而「他還算不算一個活著的帳戶」
+//     由呼叫端那道終態閘先行判定——兩個問題各有一個實作點，不在此處再判一次。
 //   - 不帶審核時刻的則根本沒走過審批通路（開放自註冊、管理員建號、Root 開的），
 //     由呼叫端換成 ErrNotAnApplication。
 //

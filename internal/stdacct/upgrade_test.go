@@ -3,7 +3,7 @@
 // 舊會話撤銷、審計追加——以及它們被拒時「一件都不發生」的形態。
 //
 // 這一檔把本步要求驗的七件事釘死：
-//   - 升級保留原账户的穩定標識（ID 逐字不变）与既存引用（審計指向同一標識、
+//   - 升級保留原帳戶的穩定標識（ID 逐字不变）与既存引用（審計指向同一標識、
 //     舊審計一個字不動）；
 //   - 重名失敗不改變訪戶一個字（整筆回滾）；
 //   - 重複升級（對已轉正者）被拒且零寫入；
@@ -312,8 +312,12 @@ func TestUpgradeDisabledGuestRefused(t *testing.T) {
 	}
 }
 
-// TestUpgradeTargetScopeConvergesToNotFound 刪除終態、持有授予者與幽靈標識走
-// 目錄同一句 ErrAccountNotFound：升級通路不在本目錄範圍的問題上不多發信號。
+// TestUpgradeTargetScopeConvergesToNotFound 持有授予者與幽靈標識走目錄同一句
+// ErrAccountNotFound：升級通路不在本目錄範圍的問題上不多發信號。
+//
+// 兩種終態各自成句（已刪 2027、已退休 2028），不再是查無同形：用戶批准的展示策略把
+// 他們留在這本目錄裡，而「換個目標」對一個就在名冊上的人是誤導；退休行每一欄都被
+// 庫釘住，少了這一句，直打這條通路的人換到的是一個撞觸發器的 500。
 func TestUpgradeTargetScopeConvergesToNotFound(t *testing.T) {
 	e := newEnv(t)
 	ctx := context.Background()
@@ -321,12 +325,13 @@ func TestUpgradeTargetScopeConvergesToNotFound(t *testing.T) {
 
 	deleted := e.seed(t, seedInput{Login: "guest_gone", Display: "已刪旅人",
 		Type: account.TypeGuest, Deleted: true})
+	retired := e.seed(t, seedInput{Login: "guest_retired_scope", Display: "已被綁走的旅人",
+		Type: account.TypeGuest, Retired: true})
 	ghostID, err := idgen.New()
 	if err != nil {
 		t.Fatalf("產生幽靈標識失敗：%v", err)
 	}
 	cases := map[string]idgen.ID{
-		"刪除終態": deleted.ID,
 		"幽靈標識": ghostID,
 		"零值標識": idgen.ID{},
 	}
@@ -335,6 +340,19 @@ func TestUpgradeTargetScopeConvergesToNotFound(t *testing.T) {
 			UpgradeInput{LoginName: testUpgradeLogin, InitialPassword: testUpgradePassword},
 			"req-scope"); !errors.Is(err, ErrAccountNotFound) {
 			t.Errorf("%s 應收斂為查無同形，實際 %v", name, err)
+		}
+	}
+	for name, tc := range map[string]struct {
+		id  idgen.ID
+		err error
+	}{
+		"刪除終態": {deleted.ID, ErrAccountDeleted},
+		"退休終態": {retired.ID, ErrAccountRetired},
+	} {
+		if _, err := e.service.UpgradeGuestToStandard(ctx, admin, tc.id,
+			UpgradeInput{LoginName: testUpgradeLogin, InitialPassword: testUpgradePassword},
+			"req-scope-"+name); !errors.Is(err, tc.err) {
+			t.Errorf("%s 應回自己那句終態的拒絕，期望 %v，實際 %v", name, tc.err, err)
 		}
 	}
 	if n := countUpgradeAudits(t, e); n != 0 {

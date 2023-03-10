@@ -4,10 +4,12 @@
 // 兩者共用同一個強制換哈希的倉儲寫法（account.Store.SetPassword）與同一把撤銷刀
 // （session.RevokeAccount），也共用「重置不是本人改密」這條用例分界；
 // 不同的是授權閘與目標範圍——那一側經 NeedRoot 且只認管理員目錄，
-// 這一側經 NeedServerAdmin（與建號、目錄、資料編輯、停用同一道閘）且目標範圍
-// 逐字沿用本套件的範圍規則：不持有 server_admin 授予、未進入刪除終態。
+// 這一側經 NeedServerAdmin（與建號、目錄、資料編輯、停用、刪除同一道閘）且目標範圍
+// 逐字沿用本套件的範圍規則：不持有 server_admin 授予、不在審批鏈門外、未進入任何終態。
 // 因此一位管理員拿這條通路動不了另一位管理員，也動不了他自己，更動不到 Root
-// （Root 本来就不落 accounts 表）——那些形態與查無此人收斂成同一個 ErrAccountNotFound。
+// （Root 本来就不落 accounts 表）——那些形態與查無此人收斂成同一個 ErrAccountNotFound；
+// 而已刪除與已退休的帳戶就在這本目錄裡，他們各自得到自己那句拒絕（2027／2028），
+// 而不是被「換個目標」誤導。
 //
 // 一次成功重置落地的是三件事的合力，缺一件都是半套：
 //   - 舊口令失效：password_hash 整欄換掉，拿舊明文永遠過不了 Verify；
@@ -17,8 +19,8 @@
 //     交付出去的那個口令只用一次，本人首次登入必須改掉（門閂與 2010 沿用既有閘）。
 //
 // 重置不改的事實同樣必須如實列出：停用狀態保持原樣（UPDATE 語句裡沒有 status 與
-// disabled_at 兩欄，「重置不是解除停用」成立在 SQL 形狀上）、刪除終態與授予與顯示名
-// 都不動（重置不是復活、不是撤權、不是改名）、尚未完成的首次改密義務不會被清掉
+// disabled_at 兩欄，「重置不是解除停用」成立在 SQL 形狀上）、授予與顯示名與刪除時刻
+// 都不動（重置不是復活、不是撤權、不是改名，而兩個終態根本進不到這條通路）、尚未完成的首次改密義務不會被清掉
 // （這一步是把旗標寫成 1，不是把它歸零）。換言之：一個待审批（欠首改）的人被重置之後
 // 仍然欠首改，一個被停用的人被重置之後仍然登不進去——想解開那兩件事各有自己的通路。
 //
@@ -56,7 +58,8 @@ import (
 
 // 重置用例的結論錯誤：口令形狀不合格與目標形態不合各自可判別，內部故障一律不進這些型別。
 // 「目標不在本目錄」不另發一型：沿用詳情、編輯、停用同一枚 ErrAccountNotFound，
-// 因為這四條通路對「他是管理員／他已刪除／查無此人」的回答本來就是同一句話。
+// 因為這幾條通路對「他是管理員／他還在門外／查無此人」的回答本來就是同一句話。
+// 已刪除與已退休不在這句裡：他們在本目錄之內，各回自己的那枚結論。
 var (
 	// ErrInvalidResetPassword 表示操作者交出的新口令不滿足憑據模組的形狀界線（空或超長）。
 	//
@@ -89,10 +92,10 @@ type StandardPasswordReset struct {
 //  2. 口令派生放在交易之外：Argon2id 按生產參數檔是數百毫秒級的計算，
 //     與建號、Root 重置管理員同一理由——一次慢派生不該讓全服停筆。
 //     派生失敗（空口令、超長口令）在此回輸入錯誤，一條寫入都沒有發生；
-//  3. 交易內 readStandardProfile：帳戶存在、是否持有授予、是否已進入刪除終態
+//  3. 交易內 readStandardProfile：帳戶存在、是否持有授予、是否還在審批鏈門外
 //     三道範圍檢查一起核實，對不在本目錄的標識整個操作不發生；
-//     「已刪除的普通帳戶」在這裡自然得到與詳情、編輯、停用同一句 1001，
-//     不需要管理員目錄那枚 2015——那本目錄列得到已刪者，這本目錄按定義不列；
+//     已刪除與已退休都在這裡讀得到，由緊隨的 requireNotTerminal 回自己那句話
+//     （他們就在這本目錄裡，說「換個目標」是誤導，而撞庫的觸發器只會換成 500）；
 //  4. 訪戶帳戶在這裡出局（寫入之前）：一行的 type 是剛讀回來的事實，
 //     不再多查一次；被拒的重置零寫入、零撤銷、零審計；
 //  5. 強制換哈希（SetPassword）：旗標與哈希同一條 UPDATE，「換口令」與
@@ -102,7 +105,7 @@ type StandardPasswordReset struct {
 //     與停用那一步同一個執行手段（session.RevokeAccount）；
 //  7. 同交易重讀並追加 Root 域審計：變更與其審計同生同滅。
 //
-// 被拒的重置（非管理員、不在目錄、訪戶目標、口令形狀不合格）不追加審計：
+// 被拒的重置（非管理員、不在目錄、終態目標、訪戶目標、口令形狀不合格）不追加審計：
 // 與被拒的建號、編輯、停用、Root 重置管理員同口徑——拒絕的結論不該成為寫入放大器。
 func (s *Service) ResetStandardAccountPassword(ctx context.Context, principal identity.Principal,
 	accountID idgen.ID, newPassword, requestID string) (StandardPasswordReset, error) {
@@ -129,6 +132,11 @@ func (s *Service) ResetStandardAccountPassword(ctx context.Context, principal id
 	err = s.db.InTx(ctx, func(tctx context.Context, tx *database.Tx) error {
 		before, err := s.readStandardProfile(tctx, tx, accountID)
 		if err != nil {
+			return err
+		}
+		// 終態判定在類型判定之前：一個已退休的訪戶該拿到的是「他已被綁走」那一句，
+		// 而不是「他是訪戶、重置要等升級通路」——後者對他是一句不會兌現的等待。
+		if err := requireNotTerminal(before); err != nil {
 			return err
 		}
 		if before.Type == account.TypeGuest {
@@ -167,7 +175,8 @@ func (s *Service) ResetStandardAccountPassword(ctx context.Context, principal id
 		case errors.Is(err, account.ErrNotFound), errors.Is(err, grant.ErrNotFound):
 			return StandardPasswordReset{}, ErrAccountNotFound
 		case errors.Is(err, ErrAccountNotFound), errors.Is(err, ErrGuestTarget),
-			errors.Is(err, ErrInvalidResetPassword):
+			errors.Is(err, ErrInvalidResetPassword), errors.Is(err, ErrAccountDeleted),
+			errors.Is(err, ErrAccountRetired):
 			return StandardPasswordReset{}, err
 		}
 		s.log.Error("重置普通帳戶憑據失敗", "request_id", requestID, "err", err)
@@ -200,7 +209,7 @@ func (s *Service) passwordResetRecord(principal identity.Principal, before, afte
 		Action: "account.password_reset",
 		Target: audit.Target{Kind: "account", ID: after.AccountID.String()},
 		Reason: "伺服器級管理員經已認證會話重置普通帳戶的登入憑據：舊口令與既有會話失效，" +
-			"首次登入須改密，停用狀態與刪除終態不變",
+			"首次登入須改密，停用狀態不變（已刪除與已退休的終態目標進不到這條通路）",
 		RequestID: trimRequestID(requestID),
 		Changes: []audit.Change{
 			{Field: "must_change_password", Before: before.MustChangePassword,

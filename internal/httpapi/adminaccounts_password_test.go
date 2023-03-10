@@ -234,10 +234,10 @@ func TestAdminStandardPasswordResetAccessControlAndGuest(t *testing.T) {
 	}
 	// 特權目標與查無同形：管理员拿这条通路动不了另一位管理員，也动不到 Root，
 	// 更拿不到「差哪一半」的信号。
+	goneHashBefore := rawRowSnapshot(t, e, gone.ID)["password_hash"]
 	for name, id := range map[string]idgen.ID{
 		"同級管理員":     peer.ID,
 		"操作者自己":     selfParsed,
-		"刪除終態":      gone.ID,
 		"Root 保留標識": rootReserved,
 		"幽靈標識":      phantom,
 	} {
@@ -247,6 +247,18 @@ func TestAdminStandardPasswordResetAccessControlAndGuest(t *testing.T) {
 			t.Errorf("%s 應回 1001/404 同形，實際 %d", name, resp.StatusCode)
 		}
 	}
+	// 已刪除者走 2027 而不是 1001：他在目錄上讀得到，而重置這條通路對一個終態
+	// 沒有任何可發生的對象——「換個目標」對他是誤導，「再試一次」也不會變成成功。
+	terminal := putJSON(t, e.ts, passwordPath(gone.ID),
+		resetBody(stdTestResetPassword), "", map[string]string{"Cookie": cookieHeader(admin)})
+	if terminal.StatusCode != http.StatusConflict ||
+		envelopeCode(t, terminal) != int(CodeAccountDeleted) {
+		t.Errorf("已刪除者的重置應回 2027/409，實際 %d", terminal.StatusCode)
+	}
+	if got := rawRowSnapshot(t, e, gone.ID)["password_hash"]; got != goneHashBefore {
+		t.Errorf("被終態拒絕的重置不得換掉任何一欄口令：前 %s 後 %s", goneHashBefore, got)
+	}
+
 	peerHash := rawRowSnapshot(t, e, peer.ID)["password_hash"]
 	if got := rawRowSnapshot(t, e, peer.ID)["password_hash"]; got != peerHash {
 		t.Error("管理員不得被這條通路重置憑據")

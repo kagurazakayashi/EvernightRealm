@@ -5,11 +5,16 @@
 // 「介面上呈現的當前資料」與「資料庫保存的結果」因此不可能各說各話。
 //
 // 目標範圍（誰算「這本目錄裡的一筆」）在這裡獨立判定，不復用目錄那段 SQL：
-//   - internal/account.ByID 給經過實體校驗的帳戶真相（含狀態與三個時刻的成對複核）；
+//   - internal/account.ByID 給經過實體校驗的帳戶真相（含狀態與四個時刻的成對複核）；
 //   - internal/grant 的公開讀法回答「他是不是持有 server_admin 的管理員」——
 //     查無授予正是「他在這本目錄裡」的正面答案，查得有授予則一律出局；
-//   - 刪除終態出局（與目錄同一條邊界，理由見 directory.go 頭注）。
+//   - 待審批鏈的兩個狀態出局（他還在門外，那本名冊是 internal/acctreview 的書）。
 //     三個問題各自有自己的權威實作點，不拿展示投影反向回答授權與範圍。
+//
+// 兩個終態（deleted 與 retired）刻意留在讀取範圍之內：用戶批准的刪除後展示策略是
+// 「列得出、點得開、一律只讀」。可讀不等於可寫——每一次寫入都在自己的用例裡
+// 經 requireNotTerminal 當場拒掉（判定點只有那一個，見 deleted.go），
+// 而「這一行是綁定留痕的來源」與「這一行已被刪於何時」正是操作者要看見的事實。
 //
 // 編輯的白名單只有一欄：display_name。狀態、憑據、首次改密旗標與帳戶類型
 // 不在此通路之內（UPDATE 語句裡連這些欄位都不出現，見 account.Store.UpdateDisplayName），
@@ -35,9 +40,11 @@ import (
 // 資料用例的結論錯誤：非管理員、不在目錄、併發落敗各自可判別，內部故障一律不進這些型別。
 var (
 	// ErrAccountNotFound 表示目標不是這本目錄裡的一筆：帳戶不存在、他是持有伺服器級
-	// 角色的管理員（含敲這條端點的操作者自己）、或他已進入刪除終態。三種情況一律
+	// 角色的管理員（含敲這條端點的操作者自己）、或他還在審批鏈的門外。三種情況一律
 	// 同一個答案，且不提供「差哪一半」的信號——標識是 UUIDv7，把「存在但是個管理員」
 	// 講出來等於讓這個端點替普通帳戶目錄做枚舉，而那本該是 Root 端點才能說的話。
+	// 已刪除與已退休不在這句話裡：他們在這本目錄裡，只是每一條寫入通路都會當場拒絕，
+	// 而那一句話有自己的結論與自己的機器碼（ErrAccountDeleted／ErrAccountRetired）。
 	ErrAccountNotFound = errors.New("stdacct: 該帳戶不在普通帳戶目錄中")
 	// ErrProfileConflict 表示提交所依據的顯示名現值已不是資料庫現值（併發編輯落敗）。
 	//
@@ -50,9 +57,11 @@ var (
 // StandardProfile 是單筆普通帳戶的可展示資料（詳情與編輯結果共用同一個形狀）。
 //
 // 不含也不可能有：憑據雜湊、會話材料、login_name_key 的內部正規化產物、
-// 刪除時刻（刪除終態不在本目錄之內）、授予與角色（本目錄的定義就是「沒有伺服器級授予」，
-// 回應不描述一件不存在的事）。Type 是來源事實：普通帳戶與訪戶帳戶在這本目錄裡
-// 一律如實顯示他是哪一類，但這只讀不寫——類型不在任何白名單之內。
+// 授予與角色（本目錄的定義就是「沒有伺服器級授予」，回應不描述一件不存在的事）。
+// Type 是來源事實：普通帳戶與訪戶帳戶在這本目錄裡一律如實顯示他是哪一類，
+// 但這只讀不寫——類型不在任何白名單之內。
+// 兩個終態（deleted 與 retired）都在本目錄的讀取範圍之內：用戶批准的展示策略是
+// 「列得出、點得開、但一律只讀」，而 DeletedAt／RetiredAt 就是那句話的時間部分。
 type StandardProfile struct {
 	// AccountID 為帳戶穩定標識。
 	AccountID idgen.ID
@@ -72,6 +81,12 @@ type StandardProfile struct {
 	// 它與 Status 一同把「這個人已被誰綁走、哪一刻被綁走」講成讀得到的事實：
 	// 退休行仍在本目錄之內（刻意保留的可回溯性），而這一欄是那句話的時間部分。
 	RetiredAt time.Time
+	// DeletedAt 為進入刪除終態的時刻；不為 deleted 時恆為零值（資料庫 NULL）。
+	// 它與 Status 一同把「這個人已被刪掉、哪一刻被刪掉」講成讀得到的事實：
+	// 已刪除行仍在本目錄之內（用戶批准的刪除後展示策略，與 Root 那側同形），
+	// 而這一欄是那句話的時間部分。界面據此把這張卡轉成只讀，而不是把他當成
+	// 一個查無著落的幽靈行。
+	DeletedAt time.Time
 	// MustChangePassword 為是否仍欠首次改密（只讀展示；解除它的唯一通路是本人改密）。
 	MustChangePassword bool
 	// CreatedAt 為帳戶建立時刻。
@@ -103,14 +118,17 @@ func (s *Service) StandardAccountProfile(ctx context.Context, principal identity
 //
 // 全部寫入落在同一個交易，順序與每一跳的理由：
 //  1. 授權（NeedServerAdmin，與建號、目錄同一道閘）；
-//  2. 交易內讀帳戶（經倉儲實體校驗）並核實他在本目錄範圍內：管理員、已刪除者、
-//     幽靈標識與不存在的帳戶都是同一句話，編輯整個不發生，也絕不「先改再說」；
-//  3. CAS 更新只碰 display_name：changed=false 時回 ErrProfileConflict 並讓交易回滾，
+//  2. 交易內讀帳戶（經倉儲實體校驗）並核實他在本目錄範圍內：管理員、幽靈標識與
+//     不存在的帳戶、以及還在審批鏈門外的都是同一句話，編輯整個不發生，
+//     也絕不「先改再說」；
+//  3. requireNotTerminal：已刪除與已退休的訪戶都讀得到，但兩態一律不接受改名——
+//     退休行的每一欄都被庫釘住，少了這一道就會撞觸發器換來一個 500（判定點只有一個）；
+//  4. CAS 更新只碰 display_name：changed=false 時回 ErrProfileConflict 並讓交易回滾，
 //     一個字都不落——衝突的保存不是「部分成功」；
-//  4. 同一交易內讀回更新後的實體並追加 Root 域審計：編輯與其審計同生同滅，
+//  5. 同一交易內讀回更新後的實體並追加 Root 域審計：編輯與其審計同生同滅，
 //     「真實存在卻在 Root 審計裡查不到的改動」與「審計說有而資料庫查不到」同罪。
 //
-// 被拒的編輯（非管理員、不在目錄、併發衝突、輸入不合規）不追加審計：
+// 被拒的編輯（非管理員、不在目錄、目標是終態、併發衝突、輸入不合規）不追加審計：
 // 與被拒的建號、被拒的管理員編輯同口徑——拒絕的結論不該成為寫入放大器。
 // 成功的編輯必留審計，前後只有 display_name 一欄的舊值與新值：
 // 「必要前後摘要」不含其他個人資料，更沒有一個可能容下憑據材料的格子。
@@ -127,6 +145,9 @@ func (s *Service) UpdateStandardAccountProfile(ctx context.Context, principal id
 	err := s.db.InTx(ctx, func(tctx context.Context, tx *database.Tx) error {
 		before, err := s.readStandardProfile(tctx, tx, accountID)
 		if err != nil {
+			return err
+		}
+		if err := requireNotTerminal(before); err != nil {
 			return err
 		}
 		changed, err := s.accounts.UpdateDisplayName(tctx, tx, accountID,
@@ -158,7 +179,8 @@ func (s *Service) UpdateStandardAccountProfile(ctx context.Context, principal id
 		switch {
 		case errors.Is(err, account.ErrNotFound), errors.Is(err, grant.ErrNotFound):
 			return StandardProfile{}, ErrAccountNotFound
-		case errors.Is(err, ErrProfileConflict), errors.Is(err, ErrAccountNotFound):
+		case errors.Is(err, ErrProfileConflict), errors.Is(err, ErrAccountNotFound),
+			errors.Is(err, ErrAccountDeleted), errors.Is(err, ErrAccountRetired):
 			return StandardProfile{}, err
 		case errors.Is(err, account.ErrInvalidDisplayName):
 			// 可展示的域規則結論：傳輸層據此回 1004 並點出欄位，不進「內部故障」分支。
@@ -176,8 +198,9 @@ func (s *Service) UpdateStandardAccountProfile(ctx context.Context, principal id
 //
 // 三道範圍檢查各擋一種「不該被這條通路動到」的行的形態，順序是刻意的：
 // 先問帳戶本身存不存在（不在就不必再問他是誰），再問他是不是管理員，
-// 最後問他是不是已進入刪除終態。任何一道出局都回同一個 ErrAccountNotFound，
-// 讓呼叫端拿不到「差哪一半」的信號。
+// 最後問他是不是還在審批鏈的門外。任何一道出局都回同一個 ErrAccountNotFound，
+// 讓呼叫端拿不到「差哪一半」的信號。兩種終態不在這裡出局（讀取的範圍規則見上方註解），
+// 它們由 requireNotTerminal 在每一條寫入通路當場拒掉。
 func (s *Service) readStandardProfile(ctx context.Context, q database.Querier,
 	accountID idgen.ID) (StandardProfile, error) {
 	if accountID.IsNil() {
@@ -195,9 +218,8 @@ func (s *Service) readStandardProfile(ctx context.Context, q database.Querier,
 	} else if !errors.Is(err, grant.ErrNotFound) {
 		return StandardProfile{}, err
 	}
-	// 刪除終態與審批鏈的兩個狀態都在這裡出局，而且對它們都回同一句 ErrAccountNotFound：
-	//   - deleted：沿用既有語意（本目錄按定義不列已刪者，因此不該拿到 2015 那句
-	//     「列得到但不接受寫入」的話）；
+	// 待審批鏈的兩個狀態在這裡出局，回的是與「他是管理員」「查無此人」同一句
+	// ErrAccountNotFound：
 	//   - pending／rejected：他還在門外，本目錄沒這個人可打理。回「查無此帳戶」而不是
 	//     另發一枚「他在待審批」的碼，是因為這句話對操作者與外人意味著同一件事——
 	//     這條通路對他沒有可做的動作；待審批名冊是 internal/acctreview 那本獨立的書
@@ -205,14 +227,16 @@ func (s *Service) readStandardProfile(ctx context.Context, q database.Querier,
 	// 少這一層的後果是具體的：目錄的 WHERE 把他藏起來之後，只剩按 ID 直打這條路能碰到他，
 	// 而 SetStatus 的 CAS 會把他的 pending 當成 expected_status 之外的一種值拒掉——
 	// 那是一句「參數不合法」的內部故障而不是範圍拒絕，形體上就像後端壞了。
-	if a.Status == account.StatusDeleted || a.Status == account.StatusPending ||
-		a.Status == account.StatusRejected {
+	if a.Status == account.StatusPending || a.Status == account.StatusRejected {
 		return StandardProfile{}, ErrAccountNotFound
 	}
-	// 退休態刻意留在本目錄的讀取範圍內：那個人被綁走了，但他存在過、他的歷史指得回來，
-	// 而「這一行是綁定留痕的來源」正是操作者要看得見的事實。
-	// 它不是一個可再被寫入的目標——停用／恢復、重置、升級、再一次綁定四條通路各按
-	// 自己的 WHERE 守衛與形態判定把它拒在門外（不是靠這裡不出局來放行的）。
+	// 兩個終態刻意留在本目錄的讀取範圍內：那個人被刪掉了、或被綁走了，
+	// 但他存在過、他的歷史指得回來，而「這一行是綁定留痕的來源」「這一行已被刪於何時」
+	// 正是操作者要看得見的事實（用戶批准的刪除後展示策略）。
+	// 讀得到不等於動得了：編輯／停用／恢復／重置／升級／刪除六條寫入通路都在寫之前
+	// 經 requireNotTerminal 把兩種終態拒在門外（判定點只有一個，見 deleted.go），
+	// 而綁定那條通路用的是它自己的 blocker 記號（見 bindpreflight.go）——
+	// 沒有哪一條通路是靠「這裡不出局」來放行的。
 	return StandardProfile{
 		AccountID:          a.ID,
 		LoginName:          a.LoginName,
@@ -221,6 +245,7 @@ func (s *Service) readStandardProfile(ctx context.Context, q database.Querier,
 		Status:             a.Status,
 		DisabledAt:         a.DisabledAt,
 		RetiredAt:          a.RetiredAt,
+		DeletedAt:          a.DeletedAt,
 		MustChangePassword: a.MustChangePassword,
 		CreatedAt:          a.CreatedAt,
 		LastLoginAt:        a.LastLoginAt,

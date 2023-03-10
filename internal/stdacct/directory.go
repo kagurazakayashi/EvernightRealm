@@ -7,7 +7,7 @@
 //   - 欄位是白名單投影而非 SELECT *：登入名、顯示名、來源類型、狀態、首次改密旗標與
 //     三個時刻。password_hash、login_name_key 在語句裡根本不出現，
 //     「目錄回應裡沒有一個格子可能含憑據」因此成立在 SQL 形狀上而不是自律上；
-//   - 排除條件（不持有 server_admin 授予、未進入刪除終態）回答的是「誰在這本目錄裡」，
+//   - 排除條件（不持有 server_admin 授予、不在審批鏈門外）回答的是「誰在這本目錄裡」，
 //     不是「誰有權做這件事」。單筆詳情與編輯不共用這段 SQL：它們經 internal/account
 //     的實體讀法取真相、經 internal/grant 的公開讀法核授予，見 profile.go。
 //
@@ -16,11 +16,14 @@
 // 由 Root 的管理員目錄負責；配置 Root 根本不在 accounts 表裡，結構上不可能成為一行。
 // 「甲管理員能不能改乙管理員的顯示名」在這本目錄沒有一格可答——那是 NeedRoot 的事。
 //
-// 為什麼連刪除終態一起排掉：本步沒有任何一條已實作的通路能把普通帳戶寫成 deleted
-// （Root 的刪除通路要求目錄成員資格，也就是授予行），因此這一行今日只可能來自繞過應用層的
-// 直寫。把它排除讓「標識不合法／查無此人／不在本目錄」收斂成同一句 1001 是一句誠實的話，
-// 而不是把一個不可達狀態偽裝成需要新錯誤碼的能力。若將來開放普通帳戶刪除，
-// 那一步要同時決定「列不列」與「用哪一句話拒絕寫入」，本套件不替它預留格子。
+// 為什麼刪除終態現在列得進來（用戶批准的刪除後展示策略，與 /root/admins 那本目錄同形）：
+// 這一頁答的是「這本名冊上有哪些人、他們現在是什麼狀態」，而一個被刪掉的人仍然在名冊上——
+// 他的行保留、登入名繼續被占用、歷史指向他。把他從頁上藏起來，等於讓操作者對著一筆
+// 「当年明明在冊、如今查無此人」的記錄猜，而那正是歷史身分回溯最怕的一種形態。
+// 列得到不等於動得了：詳情讀得到，但每一條寫入通路都在交易內當場拒絕終態行，
+// 那句拒絕有自己的結論與自己的機器碼（見 deleted.go 與 internal/httpapi/adminaccounts.go）。
+// 待審批鏈的兩態仍然恆排除：那不是「一本書裡的兩種狀態」，而是另一本書的範圍規則
+// （審批看的不是這一頁，見下面那段為什麼）。
 package stdacct
 
 import (
@@ -46,7 +49,9 @@ var (
 	// ErrInvalidPageSize 表示每頁筆數不合界線（小於 1 或超過上限）。
 	ErrInvalidPageSize = errors.New("stdacct: 每頁筆數不合法")
 	// ErrInvalidStatusFilter 表示狀態篩選值不在本目錄批准的集合內。
-	// 「deleted」也在這個拒絕裡：刪除終態不屬於本目錄（見套件頭注）。
+	// 批准的集合是 all|active|disabled|deleted——「deleted」自本套件開放刪除通路起列入
+	// （用戶批准的展示策略：已刪者仍列出）；pending／rejected 仍被拒，他不在這本書裡，
+	// 拿這一頁去篩待審批的申請是一種會誤導人的用法。
 	ErrInvalidStatusFilter = errors.New("stdacct: 狀態篩選值不合法")
 	// ErrInvalidTypeFilter 表示來源類型篩選值不在帳戶域的封閉集合內。
 	ErrInvalidTypeFilter = errors.New("stdacct: 類型篩選值不合法")
@@ -76,9 +81,10 @@ type DirectoryQuery struct {
 	Page int64
 	// PageSize 為每頁筆數；1..DirectoryMaxPageSize。
 	PageSize int64
-	// StatusFilter 為狀態篩選：DirectoryFilterAll、active 或 disabled。
-	// 「不篩選」列出本目錄內的兩種可登入狀態；刪除終態由 WHERE 恆排除，
-	// 與篩選值是兩件事（不是「沒翻到」，是「不在這本目錄的語意裡」）。
+	// StatusFilter 為狀態篩選：DirectoryFilterAll、active、disabled 或 deleted。
+	// 「不篩選」列出本目錄內的一切（含已刪除者——他把行留下來正是為了被讀到）；
+	// 待審批鏈的兩態由 WHERE 恆排除，與篩選值是兩件事
+	// （不是「沒翻到」，是「不在這本目錄的語意裡」）。
 	StatusFilter string
 	// TypeFilter 為來源篩選：DirectoryFilterAll、standard 或 guest。
 	// 取值經 internal/account 的封閉集合復核，不在此另寫一份字面值清單。
@@ -109,6 +115,11 @@ type DirectoryRow struct {
 	CreatedAt time.Time
 	// LastLoginAt 為最近一次登入時刻；零值代表從未登入。
 	LastLoginAt time.Time
+	// DeletedAt 為進入刪除終態的時刻；零值代表從未刪除（資料庫 NULL）。
+	// 它與 Status 的 deleted 一同讓目錄能把「這個人已被刪除、刪於何時」講成
+	// 服務端的事實——已刪者留在這本名冊上是刻意保留的可回溯性，不是一處遺漏。
+	// 與管理員目錄同一分工：時刻的細節在目錄行與單筆回應都給，不各寫一套。
+	DeletedAt time.Time
 }
 
 // DirectoryPage 是一頁目錄與其總數。
@@ -143,7 +154,8 @@ func (s *Service) Directory(ctx context.Context, principal identity.Principal,
 			ErrInvalidPageSize, q.PageSize, DirectoryMaxPageSize)
 	}
 
-	// 範圍恆排除兩類行：刪除終態（0007 起），以及待審批與已拒絕的申請（0009 起）。
+	// 範圍恆排除一類行：待審批與已拒絕的申請（0009 起）。刪除終態不再在排除之列，
+	// 因為這個狀態如今由應用層自己的通路寫入，而界面要把「他被刪於何時」讀得到。
 	// 把 pending／rejected 排除在同一條 WHERE 裡，是這一頁最容易出事的地方，理由逐條寫清：
 	//   - 這一頁的語意是「管理員能打理的普通帳戶名冊」，而一個還沒被批准的人不是名冊上的人：
 	//     他沒有登入能力，也就沒有一件「停用／恢復」「重置口令」「改顯示名」可對他做；
@@ -154,21 +166,22 @@ func (s *Service) Directory(ctx context.Context, principal identity.Principal,
 	//     與本目錄相同，回答的卻是另一句話），本步不把這頁的 WHERE 改寬去冒充那一頁。
 	// 排除用的是狀態而不是「有沒有審核時刻」：前者是一句可讀的範圍規則，後者會把
 	// 「曾被批准、後來被停用」的人一起藏掉——那個人仍然屬於名冊。
-	where := []string{"a.status NOT IN (?, ?, ?)", "NOT EXISTS (SELECT 1 FROM account_server_roles r" +
+	where := []string{"a.status NOT IN (?, ?)", "NOT EXISTS (SELECT 1 FROM account_server_roles r" +
 		" WHERE r.account_id = a.id AND r.role = ?)"}
 	args := []any{
-		account.StatusDeleted.String(), account.StatusPending.String(),
-		account.StatusRejected.String(), identity.RoleServerAdmin.String(),
+		account.StatusPending.String(), account.StatusRejected.String(),
+		identity.RoleServerAdmin.String(),
 	}
 
 	switch q.StatusFilter {
 	case "", DirectoryFilterAll:
 		// 不篩選：不加狀態條件。注意這不等於「全部狀態」——刪除終態已由 WHERE 恆排除。
-	case account.StatusActive.String(), account.StatusDisabled.String():
+	case account.StatusActive.String(), account.StatusDisabled.String(),
+		account.StatusDeleted.String():
 		where = append(where, "a.status = ?")
 		args = append(args, q.StatusFilter)
 	default:
-		return DirectoryPage{}, fmt.Errorf("%w：%q（僅接受 all|active|disabled）",
+		return DirectoryPage{}, fmt.Errorf("%w：%q（僅接受 all|active|disabled|deleted）",
 			ErrInvalidStatusFilter, q.StatusFilter)
 	}
 
@@ -209,9 +222,11 @@ func (s *Service) Directory(ctx context.Context, principal identity.Principal,
 	offset := (q.Page - 1) * q.PageSize
 
 	// 欄位白名單見套件頭注；新增欄位必須先回答「目錄真的需要它嗎」，
-	// 而不是把 accounts 的形狀一路帶進回應。
+	// 而不是把 accounts 的形狀一路帶進回應。deleted_at 這一次要回答的是「要」：
+	// 沒有它，目錄上那一行 deleted 只能告訴界面「這個人不在了」，說不出「何時不在」。
 	rows, err := s.db.SQL().QueryContext(ctx, `SELECT a.id, a.login_name, a.display_name,
-			a.account_type, a.status, a.must_change_password, a.created_at, a.last_login_at
+			a.account_type, a.status, a.must_change_password, a.created_at, a.last_login_at,
+			a.deleted_at
 		FROM accounts a
 		WHERE `+whereSQL+`
 		ORDER BY a.created_at DESC, a.id DESC
@@ -231,12 +246,13 @@ func (s *Service) Directory(ctx context.Context, principal identity.Principal,
 		var (
 			row                     DirectoryRow
 			createdAt               int64
-			lastLoginAt             sql.NullInt64
+			lastLoginAt, deletedAt  sql.NullInt64
 			mustChange              int64
 			accountType, statusText string
 		)
 		if err := rows.Scan(&row.AccountID, &row.LoginName, &row.DisplayName,
-			&accountType, &statusText, &mustChange, &createdAt, &lastLoginAt); err != nil {
+			&accountType, &statusText, &mustChange, &createdAt, &lastLoginAt,
+			&deletedAt); err != nil {
 			return DirectoryPage{}, fmt.Errorf("stdacct: 讀取普通帳戶目錄列失敗: %w", err)
 		}
 		// 狀態與類型原字串帶出、不經實體校驗：這一層解釋的是「怎麼展示」，不是
@@ -248,6 +264,11 @@ func (s *Service) Directory(ctx context.Context, principal identity.Principal,
 		row.CreatedAt = timeutil.FromMillis(createdAt)
 		if lastLoginAt.Valid {
 			row.LastLoginAt = timeutil.FromMillis(lastLoginAt.Int64)
+		}
+		// 從未刪除為零值（資料庫 NULL）：界面要能把「他沒被刪過」與「他刪於何時」
+		// 分成兩句話，而不是拿一個零時刻冒充有效刪除。
+		if deletedAt.Valid {
+			row.DeletedAt = timeutil.FromMillis(deletedAt.Int64)
 		}
 		items = append(items, row)
 	}
