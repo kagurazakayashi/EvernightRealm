@@ -18,6 +18,7 @@ import (
 	"github.com/kagurazakayashi/EvernightRealm/internal/account"
 	"github.com/kagurazakayashi/EvernightRealm/internal/acctpolicy"
 	"github.com/kagurazakayashi/EvernightRealm/internal/acctreview"
+	"github.com/kagurazakayashi/EvernightRealm/internal/activity"
 	"github.com/kagurazakayashi/EvernightRealm/internal/adminacct"
 	"github.com/kagurazakayashi/EvernightRealm/internal/audit"
 	"github.com/kagurazakayashi/EvernightRealm/internal/auth"
@@ -727,6 +728,25 @@ func run(ctx context.Context, releaseSignals func(), args []string, out io.Write
 		lg.Error("訪客進入用例組裝失敗", "err", err)
 		return err
 	}
+	// 活動生命週期用例（建立、目錄、詳情、資料編輯、狀態轉換，與 Root 那側的管理人指派）。
+	// 帳戶、授予與審計倉儲沿用上面同一批實例：「他是誰」「他此刻還是管理員嗎」「這件事留痕在哪裡」
+	// 在整個程序裡各只有一個出口，換一份實例就會出現兩套真相而其中一套總被當成權威。
+	// 刻意不注入會話與憑據兩個依賴（見 internal/activity 的套件頭注）：管一個活動既不簽發會話、
+	// 也不動任何一枚口令；撤銷一位帳戶的伺服器級管理員資格也不會被這一層「順手」做掉——
+	// 那是授予那條通路自己的決定（本步沒有那条通路，見交接）。
+	// 少了這個用例，activity_manager_grants 就仍是一張寫得進卻沒有一條通路能讀來判定的表。
+	activityService, err := activity.New(activity.Deps{
+		DB:       db,
+		Accounts: accountsStore,
+		Grants:   grantsStore,
+		Clock:    timeutil.System(),
+		Audits:   auditStore,
+		Log:      lg.Logger,
+	})
+	if err != nil {
+		lg.Error("活動生命週期用例組裝失敗", "err", err)
+		return err
+	}
 	srv := httpapi.New(&cfg, Version, httpapi.Deps{
 		Ready:    readinessCheck(db, space),
 		Clock:    timeutil.System(),
@@ -757,6 +777,10 @@ func run(ctx context.Context, releaseSignals func(), args []string, out io.Write
 		// 訪客進入：准入（策略現讀）、嘗試計量、登入名產生、主體構造與會話簽發
 		// 都由 internal/guestacct 在自己的交易裡做，傳輸層只把暱稱與實際連線來源遞進去。
 		Guest: guestService,
+		// 活動生命週期：授權邊界（NeedServerAdmin 加上活動作用域那道閘）、現值核實與那一躍
+		// 落庫與審計都由 internal/activity 在自己的交易裡做，傳輸層只把受信主體、一欄或兩欄
+		// 白名單輸入，或一枚活動標識遞進去。
+		Activities: activityService,
 		// Root 初始化狀態的只讀來源：只查組態檔本身，不開任何寫入通路
 		// （初始化仍然只有 evernight-server init-root 這一條路）。
 		InitStatus: initStatusSource(cfg),

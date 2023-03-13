@@ -112,6 +112,16 @@ type Deps struct {
 	// 「只裝了管理端，本人的執行入口也跟著掛上」或反過來的形態——而少一邊都不該讓另一邊
 	// 看起來也壞了（同 SelfRegister 與 RegistrationReview 的分開理由）。
 	GuestBindings GuestBindClaimUseCase
+	// Activities 為「活動生命週期管理」用例的入口（internal/app 注入 *activity.Service）。
+	// 為 nil 表示本執行檔不開放這組端點：路徑、回退清單與錯誤面都和未掛載時逐字相同，
+	// 少掉的是六個端點（目錄、建立、詳情、資料編輯、狀態轉換、名冊讀寫），
+	// 不會留下一條「看得到活動但動不了」的半成品寫入口。
+	// 它與 StandardAccounts 是兩個依賴而不是同一個：那一個認的是「管理員打理跨活動的帳戶目錄」
+	// （NeedServerAdmin、動的是帳戶行），這一個認的是「管某個活動本身的資料與狀態」
+	// （NeedServerAdmin 加上 activity_manager_grants 那道活動作用域閘，動的是活動行）。
+	// 共用一個有無判定就會出現「裝了帳戶目錄就順带有了活動面」的形態。
+	// 名冊的寫法（指派與撤銷）另經 NeedRoot，與讀法分開挂在 /root 與 /admin 兩個前綴上。
+	Activities ActivityUseCase
 }
 
 // Server 為 HTTP 服務層。
@@ -168,6 +178,11 @@ type Server struct {
 	// guestBindClaimEndpoints 回空清單，/auth/guest-bindings 那一族路徑根本不掛
 	// （/auth 首段仍因登入端點屬 API，回退行為不受影響）。
 	guestBinds GuestBindClaimUseCase
+	// activities 為「活動生命週期管理」用例入口（目錄、建立、詳情、資料編輯、狀態轉換、
+	// 名冊與管理人指派；可為 nil）；nil 時 activityEndpoints 回空清單，
+	// /admin/activities 與 /root/activities 那兩族路徑根本不掛
+	// （兩個首段仍因帳戶與 Root 端點屬 API，回退行為不受影響）。
+	activities ActivityUseCase
 }
 
 // New 以組態、版本字串與外部依賴建立 HTTP 服務層。
@@ -217,6 +232,7 @@ func New(cfg *config.Config, version string, deps Deps) *Server {
 		// 綁定執行側用例為 nil 時一個端點都不掛（見 guestBindClaimEndpoints）：
 		// 「裝配了什麼就服務什麼」在這一層沒有分支。
 		guestBinds: deps.GuestBindings,
+		activities: deps.Activities,
 	}
 	s.httpSrv = &http.Server{
 		Addr:    cfg.Server.Listen,

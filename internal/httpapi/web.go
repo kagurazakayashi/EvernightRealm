@@ -93,7 +93,15 @@ func (s *Server) apiRoutes() []apiRoute {
 	// /auth 之下，不新增首段、只多掛一條路徑。與自註冊刻意分開注入——兩條都讓門外的人自行取得
 	// 主體，但建出的主體形態（有憑據的普通帳戶／無憑據的訪客）與准入依據（自註冊模式／訪客開關）
 	// 都不同，少一邊不該讓另一邊看起來也壞了。
-	return append(routes, s.guestEndpoints()...)
+	routes = append(routes, s.guestEndpoints()...)
+	// 活動生命週期端點（/admin/activities 一族與 /root/activities/{id}/managers 一族）
+	// 由自己那個依賴決定有無：兩個前綴都已被帳戶與 Root 端點帶入 API 首段，
+	// 因此不新增首段、只多掛幾條路徑。與普通帳戶端點刻意分開注入——
+	// 「打理跨活動的帳戶目錄」（NeedServerAdmin）與「管某個活動本身的資料與狀態」
+	// （NeedServerAdmin 加上活動作用域那道閘）是兩套准入邊界，
+	// 共用一個開關就會出現「裝了帳戶目錄也順手有了活動管理面」的形態。
+	// 名冊的寫法走 NeedRoot、讀法走活動作用域判定，因此各挂一個前綴，不在同一條路徑上分方法。
+	return append(routes, s.activityEndpoints()...)
 }
 
 // apiFirstSegments 從登記清單導出各端點的路徑首段集合。

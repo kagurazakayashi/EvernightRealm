@@ -482,3 +482,61 @@ func TestBindPreflightSessionCountUsesRevokeScale(t *testing.T) {
 		t.Errorf("過期行不應阻止綁定本身，實際 blockers=%v", blockerLine(pre.Blockers))
 	}
 }
+
+// TestBindPreflightActivitySoftReferencesAreNotObligations 驗收：活動落地之後綁定通路仍走得通——
+// activities.created_by_account_id 與 activity_manager_grants.account_id 是無外鍵的軟參照
+// （遷移 0012 檔頭寫明了理由），因此它們不進 unknown_references 那條整體阻止。
+//
+// 這條钉子把兩個方向都固定住：
+//   - 訪戶「創建過一場活動」不構成綁定的阻止原因：綁定要合併的是他的帳戶行，
+//     而那場活動的歷史发起人不動、不搬、不改寫（與 root_audit 同口徑）；
+//   - 一個目標帳戶「正被指派管理某場活動」也不構成阻止：指派是他名下的一項可另行撤銷的事實，
+//     不由綁定通路代為處置。
+//
+// 反過來說，若哪天有人把這兩欄配成 REFERENCES accounts，本預檢會立刻把它們當成未登記的引用
+// 並整體阻止（見上一條用例那顆探針表的手法）——邊界由實時掃描守住，不靠這段話的自我聲明。
+func TestBindPreflightActivitySoftReferencesAreNotObligations(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	admin := identitytest.Account(t, identitytest.NewID(t), identitytest.ServerAdmin())
+	guest := e.seed(t, seedInput{Login: "guest_with_activity", Display: "辦過活動的旅人",
+		Type: account.TypeGuest})
+	target := e.seed(t, seedInput{Login: "Manager.Host", Display: "管活動的受體"})
+	seedGuestSessions(t, e, guest.ID, 1)
+
+	// 種下一場由該訪戶發起的活動，並把目標帳戶指派為另一場活動的管理人。
+	// 標識用的是常值 UUID 形狀：本套件不 import internal/activity，也不該為了佈資料去依賴它。
+	if _, err := e.db.SQL().ExecContext(ctx, `INSERT INTO activities
+			(id, name, description, status, created_by_account_id, created_at, updated_at)
+		VALUES ('0192f0c4-1c9a-7000-8000-000000000a01', '旅人辦過的場', '', 'draft', ?, 1000, 1000)`,
+		guest.ID.String()); err != nil {
+		t.Fatalf("種下訪戶發起的活動失敗：%v", err)
+	}
+	if _, err := e.db.SQL().ExecContext(ctx, `INSERT INTO activities
+			(id, name, description, status, created_by_account_id, created_at, updated_at)
+		VALUES ('0192f0c4-1c9a-7000-8000-000000000a02', '受體管著的場', '', 'active', ?, 1100, 1100)`,
+		admin.AccountID().String()); err != nil {
+		t.Fatalf("種下第二場活動失敗：%v", err)
+	}
+	if _, err := e.db.SQL().ExecContext(ctx, `INSERT INTO activity_manager_grants
+			(activity_id, account_id, granted_at)
+		VALUES ('0192f0c4-1c9a-7000-8000-000000000a02', ?, 1200)`, target.ID.String()); err != nil {
+		t.Fatalf("種下目標帳戶的活動指派失敗：%v", err)
+	}
+
+	pre, err := e.service.PreflightGuestBind(ctx, admin, guest.ID, target.ID, "req-activity-refs")
+	if err != nil {
+		t.Fatalf("軟參照不該讓預檢本身失敗：%v", err)
+	}
+	if !pre.Executable || len(pre.Blockers) != 0 {
+		t.Errorf("活動的軟參照不構成阻止，實際 executable=%v blockers=%q",
+			pre.Executable, blockerLine(pre.Blockers))
+	}
+	// 兩行活動事實一個字都不動（預檢零寫入是既有合同，這裡只多驗一張新表）。
+	if got := countRows(t, e.db, "activities"); got != 2 {
+		t.Errorf("預檢不得動活動表，實際 %d 行", got)
+	}
+	if got := countRows(t, e.db, "activity_manager_grants"); got != 1 {
+		t.Errorf("預檢不得動指派表，實際 %d 行", got)
+	}
+}

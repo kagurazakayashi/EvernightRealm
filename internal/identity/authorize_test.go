@@ -32,7 +32,7 @@ func TestAuthorizeMatrix(t *testing.T) {
 		{"系統（CLI）", identitytest.System(t, identity.OriginCLI)},
 	}
 
-	// want 是三檔需求的預期錯誤：nil 表示通過。
+	// want 是三檔需求的預期錯誤：nil 表示透過。
 	want := map[string]map[identity.Need]error{
 		"匿名": {
 			identity.NeedAuthenticated: identity.ErrNotAuthenticated,
@@ -59,7 +59,7 @@ func TestAuthorizeMatrix(t *testing.T) {
 			identity.NeedServerAdmin:   nil,
 			identity.NeedRoot:          nil,
 		},
-		// 系統主體不是任何人的代理：它能通過「知道是誰」這一檔（它就是伺服器），
+		// 系統主體不是任何人的代理：它能透過「知道是誰」這一檔（它就是伺服器），
 		// 但不能頂著管理員名義執行需要授權的業務動作。
 		"系統（CLI）": {
 			identity.NeedAuthenticated: nil,
@@ -79,7 +79,7 @@ func TestAuthorizeMatrix(t *testing.T) {
 				expect := table[need]
 				if expect == nil {
 					if err != nil {
-						t.Errorf("%s / %s 應通過，實際 %v", tc.name, need, err)
+						t.Errorf("%s / %s 應透過，實際 %v", tc.name, need, err)
 					}
 					continue
 				}
@@ -104,44 +104,82 @@ func TestAuthorizeUnknownNeedIsDefect(t *testing.T) {
 	}
 }
 
-// TestAuthorizeActivityScopeIsExplicitBoundary 是「不用全局管理員檢查冒充活動隔離」的測試。
+// TestAuthorizeActivityScopeJudgesGrants 是「不用全域性管理員檢查冒充活動隔離」的測試。
 //
-// 三件事都要固定住：缺 activity 標識回報的是引數缺陷；帶了標識回報的是未實現邊界；
-// 兩個結果都不是「通過」。第三條尤其要緊——若本函式哪天回 nil，所有拿它當活動授權的
-// 呼叫端會立刻變成無條件放行，這條測試就是那個變故的警報。
-func TestAuthorizeActivityScopeIsExplicitBoundary(t *testing.T) {
+// 這一層落地之前，它固定的是「一律不放行」；落地之後它固定的是同一句話的另一半：
+// 放行只能來自指派清單，不能來自主體自帶的伺服器級角色。四件事都要固定住：
+//   - 伺服器管理員沒有被指派就是沒有——這條是整個型別存在的理由，若哪天實作改成
+//     「有 server_admin 就放行所有活動」，本測試當場紅；
+//   - 被指派的帳戶放行，指派清單為空時一律拒（漏帶授權資料不會默默變成「哪個活動都能管」）；
+//   - 缺 activity 標識回報的是引數缺陷而不是權限不足；
+//   - 系統主體不放行：它不是任何人的代理，不能替人在活動內代行管理動作。
+func TestAuthorizeActivityScopeJudgesGrants(t *testing.T) {
 	activityID := identitytest.NewID(t)
 	other := identitytest.NewID(t)
+	grantedOne := identitytest.Grants(t, activityID)
+	grantedOther := identitytest.Grants(t, other)
+	empty := identitytest.Grants(t)
 
+	cases := []struct {
+		name    string
+		p       identity.Principal
+		granted identity.ActivityGrants
+		wantErr error
+	}{
+		{"被指派的帳戶放行", identitytest.Account(t, other), grantedOne, nil},
+		{"未被指派的帳戶拒", identitytest.Account(t, other), grantedOther, identity.ErrPermissionDenied},
+		{"指派清單為空一律拒", identitytest.Account(t, other), empty, identity.ErrPermissionDenied},
+		{"伺服器管理員但未被指派仍拒", identitytest.Account(t, other, identitytest.ServerAdmin()),
+			grantedOther, identity.ErrPermissionDenied},
+		{"普通帳戶未被指派拒", identitytest.Account(t, other), grantedOther, identity.ErrPermissionDenied},
+		{"Root 跨活動放行", identitytest.Root(t, identity.OriginHTTPRequest), empty, nil},
+		{"系統主體不放行", identitytest.System(t, identity.OriginBackground), grantedOne,
+			identity.ErrPermissionDenied},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := identity.AuthorizeActivityScope(tc.p, activityID, tc.granted)
+			if tc.wantErr == nil {
+				if err != nil {
+					t.Fatalf("應放行，實際 %v", err)
+				}
+				return
+			}
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("應回報 %v，實際 %v", tc.wantErr, err)
+			}
+			// 拒絕的結論不可是「程式缺陷」：那會讓呼叫端把正常的拒絕當 500 報給操作者。
+			if errors.Is(err, identity.ErrInvalidPrincipal) ||
+				errors.Is(err, identity.ErrActivityScopeUnsupported) {
+				t.Errorf("正常的權限拒絕被報成缺陷：%v", err)
+			}
+		})
+	}
+
+	// 缺 activity 標識是引數缺陷，對每一類主體都先於作用域判定回報。
 	principals := []struct {
 		name string
 		p    identity.Principal
 	}{
-		{"普通帳戶", identitytest.Account(t, activityID)},
+		{"普通帳戶", identitytest.Account(t, other)},
 		{"伺服器管理員", identitytest.Account(t, other, identitytest.ServerAdmin())},
 		{"Root", identitytest.Root(t, identity.OriginHTTPRequest)},
 		{"系統（背景）", identitytest.System(t, identity.OriginBackground)},
 	}
 	for _, tc := range principals {
-		t.Run(tc.name+"帶活動標識", func(t *testing.T) {
-			err := identity.AuthorizeActivityScope(tc.p, activityID)
-			if !errors.Is(err, identity.ErrActivityScopeUnsupported) {
-				t.Fatalf("應回報活動作用域未實現，實際 %v", err)
-			}
-		})
 		t.Run(tc.name+"缺活動標識", func(t *testing.T) {
-			err := identity.AuthorizeActivityScope(tc.p, idgen.Nil)
+			err := identity.AuthorizeActivityScope(tc.p, idgen.Nil, grantedOne)
 			if !errors.Is(err, identity.ErrMissingActivityScope) {
 				t.Fatalf("應回報缺少 activity 標識，實際 %v", err)
 			}
-			if errors.Is(err, identity.ErrActivityScopeUnsupported) {
-				t.Error("缺引數屬呼叫端缺陷，不可與未實現混為同一個結論")
+			if errors.Is(err, identity.ErrPermissionDenied) {
+				t.Error("缺引數屬呼叫端缺陷，不可與「他沒有這個活動的管理權」混為同一個結論")
 			}
 		})
 	}
 
-	// 匿名主體先撞在「不知道是誰」上：身分問題的優先級高於作用域問題。
-	err := identity.AuthorizeActivityScope(identitytest.Anonymous(t), activityID)
+	// 匿名主體先撞在「不知道是誰」上：身分問題的優先順序高於作用域問題。
+	err := identity.AuthorizeActivityScope(identitytest.Anonymous(t), activityID, grantedOne)
 	if !errors.Is(err, identity.ErrNotAuthenticated) {
 		t.Errorf("匿名主體應先回報未認證，實際 %v", err)
 	}

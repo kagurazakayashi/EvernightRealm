@@ -246,6 +246,30 @@ var errorMessages = map[ErrorCode]map[string]string{
 		LocaleEnUS: "This guest has already been bound into another standard account and is in the retired terminal state, so this operation did not run. He was not deleted — he merged into someone else under this identity: he cannot be deleted, and no path makes him usable again. To see who he was and when he was merged, read that binding history record.",
 		LocaleJaJP: "このゲストはすでに別の正式アカウントへバインド併合され、退席（終端）状態にあるため、今回の操作は実行されませんでした。削除されたのではなく、この身份のまま他人に併されたのです。削除することも、彼を再び使えるようにする通路もありません。彼が誰で、いつどのアカウントに併されたかは、そのバインド履歴の記録を読んでください。",
 	},
+	CodeActivityArchived: {
+		LocaleZhCN: "这个活动已经归档，进入的是终态，本次写入没有执行。它还在那里、读得到，但不再接受任何新的改动：不能改名、不能改状态，也不能再增减它的管理人。归档没有出口——这不是「现在不行」，而是「这件事已经结束」。",
+		LocaleZhTW: "這個活動已經歸檔，進入的是終態，本次寫入沒有執行。它還在那裡、讀得到，但不再接受任何新的改動：不能改名、不能改狀態，也不能再增減它的管理人。歸檔沒有出口——這不是「現在不行」，而是「這件事已經結束」。",
+		LocaleEnUS: "This activity is archived — a terminal state — so this write did not run. It is still listed and readable, but it accepts no further changes: no rename, no status change, and no additions or removals among its managers. Archiving has no way back; this is not \"not right now\", it is \"this is over\".",
+		LocaleJaJP: "この活動はアーカイブ済み（終端状態）のため、今回の書き込みは実行されませんでした。記録はそのまま読めますが、今後の変更は一切受け付けません。名前も状態も変えられず、管理人の追加も削除もできません。アーカイブに戻る通路はありません。「今はできない」ではなく、「この件は終わった」ということです。",
+	},
+	CodeActivityStatusConflict: {
+		LocaleZhCN: "你依据的活动状态已经不是服务器上的现值，或它已经就是你要的那个状态，本次转换没有执行。状态一位都没改，也没有留下审计。请重新读取该活动的详情，再决定要不要按下那颗按钮。",
+		LocaleZhTW: "你依據的活動狀態已經不是伺服器上的現值，或它已經就是你要的那個狀態，本次轉換沒有執行。狀態一位都沒改，也沒有留下審計。請重新讀取該活動的詳情，再決定要不要按下那顆按鈕。",
+		LocaleEnUS: "The activity state you relied on is no longer the server's current value — or it already is the state you asked for — so this transition did not run. The status was not changed and no audit record was written. Re-read the activity's details before deciding whether to press that button again.",
+		LocaleJaJP: "あなたが前提にした活動の状態はサーバー上の現値ではなくなったか、すでに要求した状態になっています。そのためこの移行は実行されず、状態も変更されず、監査記録も残りませんでした。活動の詳細を読み直してから、そのボタンを再び押すべきか決めてください。",
+	},
+	CodeActivityTransitionInvalid: {
+		LocaleZhCN: "这两个状态之间没有这么一条路，重读现值也换不来任何结果。要改的是要做的那件事，不是画面上的数值：已批准的状态流转只有开放、停止、重新开放与归档四条。",
+		LocaleZhTW: "這兩個狀態之間沒有這麼一條路，重讀現值也換不來任何結果。要改的是要做的那件事，不是畫面上的數值：已批准的狀態流轉只有開放、停止、重新開放與歸檔四條。",
+		LocaleEnUS: "There is no path between those two states, so re-reading the current value changes nothing. What has to change is the intent, not the numbers on screen: the approved transitions are only open, stop, reopen, and archive.",
+		LocaleJaJP: "その二つの状態のあいだに通路は無く、現値を読み直しても結果は変わりません。直すのは行いたい内容であって、画面の値ではありません。承認された状態移行は「開放」「停止」「再度開放」「アーカイブ」の四つだけです。",
+	},
+	CodeActivityManagerTaken: {
+		LocaleZhCN: "这名账户已经是这个活动的管理人，本次指派没有执行——名册没有多出一行，审计也没有记。要换的是目标（另一个人），不是把同一颗按钮再按一次。",
+		LocaleZhTW: "這名帳戶已經是這個活動的管理人，本次指派沒有執行——名冊沒有多出一行，審計也沒有記。要換的是目標（另一個人），不是把同一顆按鈕再按一次。",
+		LocaleEnUS: "This account is already a manager of the activity, so this assignment did not run — the roster gained no row and no audit record was written. The thing to change is the target (someone else), not pressing the same button twice.",
+		LocaleJaJP: "このアカウントはすでにこの活動の管理人であるため、今回の指名は実行されませんでした。名簿に行は増えず、監査記録も残っていません。変えるべきは対象（別の人）であって、同じボタンをもう一度押すことではありません。",
+	},
 }
 
 // messageFor 取得錯誤碼在指定語言的使用者訊息；語言未支援或訊息為空時回退 defaultLocale。

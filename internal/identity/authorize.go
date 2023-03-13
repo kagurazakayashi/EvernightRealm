@@ -14,7 +14,9 @@ import (
 //     服務層據此回權限錯誤，未來各端點自己決定要不要另記一筆拒絕審計；
 //   - ErrInvalidPrincipal / ErrInvalidRequirement：構造或呼叫有缺陷（繞過構造函式拿到的
 //     半成品主體、未知的授權需求），不該被當成拒絕存取回報給使用者；
-//   - ErrActivityScopeUnsupported：需要活動作用域的判定，而這一層尚未落地（見 AuthorizeActivityScope）。
+//   - ErrActivityScopeUnsupported：要問的是「這個帳戶在活動內扮演誰」（玩家檔案／NPC 操作者），
+//     那一層尚未落地——它與「他是不是這個活動的管理人」不是同一件事，後者見 AuthorizeActivityScope。
+//     目前只有審計主體類別這一處回它（見 audit.go 的 AuditActor）。
 var (
 	ErrNotAuthenticated         = errors.New("identity: 主體未通過認證")
 	ErrPermissionDenied         = errors.New("identity: 權限不足")
@@ -94,18 +96,31 @@ func Authorize(p Principal, need Need) error {
 	}
 }
 
-// AuthorizeActivityScope 是活動作用域判定的邊界：一律回傳未實現錯誤。
+// AuthorizeActivityScope 是活動作用域判定的唯一入口：主體是否是「這個活動」的管理人。
 //
-// 存在的理由是把「需要活動隔離」這件事變成編譯期就存在、執行期必然失敗的顯式呼叫，
-// 而不是各端點自己拿 Authorize(p, NeedServerAdmin) 當做隔離。後者的失敗形态是沉默的：
-// 甲活動的管理員查到了乙活動的資料，程式碼看起來却有在做授權。
+// 它與 Authorize(p, NeedServerAdmin) 是兩道不一樣的閘，前後都要過：
+//   - NeedServerAdmin 回答的是「他屬於管理員這個身份面嗎」——跨活動維運的資格；
+//   - 本函式回答的是「這個資格在這個活動上認不認得他」——活動隔離本身。
+//     只過第一道就是「拿全域管理員檢查冒充活動隔離」：甲活動的管理員查得到、改得動
+//     乙活動的資料，程式碼看起來却有在做授權（R1-006 把這句話寫成警報，本函式是它的落點）。
 //
-// 引數先檢查、未實現後回：缺 activity 標識屬呼叫端漏帶引數，補上就有明確答案；
-// 「這一層還沒建」不該被那種缺陷掩蓋。
+// granted 一律由呼叫端從服務端自己查出的指派資料構造（見 internal/activity 的
+// Store.ManagedActivityIDs 與 identity.NewActivityGrants）：請求本體沒有任何格子能填它。
+// 空清單是合法輸入，語意是「他在任何活動裡都不是管理人」，因此一律拒——
+// 「漏帶授權資料」在這裡不會默默變成「哪個活動都能管」。
 //
-// 落地時本函式是唯一要改的地方：全服務所有需要活動授權的呼叫端會因此同時生效，
-// 不需要去各個端點裡找回漏寫的那幾處。
-func AuthorizeActivityScope(p Principal, activityID idgen.ID) error {
+// 規則（與 Authorize、internal/audit 同一套說法，這裡不放寬也不另立）：
+//   - Root：放行。它是伺服器級主體，不屬於任何活動、也不受活動角色制約，
+//     跨活動維運本來就是它的職責（審計側同樣是「Root 兩域可讀」）；
+//   - 系統主體（啟動、CLI、背景）：拒。它不是任何人的代理，
+//     「伺服器自己在某個活動裡做了這件事」要等到有明確的背景用例時再談；
+//   - 帳戶：只有指派清單認得這個活動時才放行；
+//   - 匿名：先撞在「不知道是誰」上，身分問題的優先級高於作用域問題。
+//
+// 主體自身不合法時一律先報缺陷（ErrInvalidPrincipal）再談權限；缺 activity 標識回報的是
+// 引數缺陷（ErrMissingActivityScope）而不是權限不足——補上標識就能往下走，
+// 而「他確實不是這個活動的管理人」補什麼都不會變。
+func AuthorizeActivityScope(p Principal, activityID idgen.ID, granted ActivityGrants) error {
 	if err := p.validate(); err != nil {
 		return err
 	}
@@ -116,6 +131,23 @@ func AuthorizeActivityScope(p Principal, activityID idgen.ID) error {
 		return fmt.Errorf("%w：%s 主體的查詢必須指定 activity_id",
 			ErrMissingActivityScope, p.Kind().String())
 	}
-	return fmt.Errorf("%w：主體類別 %s（%s）無法判定活動 %s 內的角色——請接活動身份層後改走本函式的實作",
-		ErrActivityScopeUnsupported, p.Kind().String(), string(p.origin), activityID.String())
+	switch p.Kind() {
+	case KindRoot:
+		return nil
+	case KindSystem:
+		return fmt.Errorf("%w：系統主體不是任何人的代理，不能在活動 %s 內代行管理動作",
+			ErrPermissionDenied, activityID.String())
+	case KindAccount:
+		for _, id := range granted.ids {
+			if id == activityID {
+				return nil
+			}
+		}
+		// 拒絕的訊息不說「這個活動存不存在」：指派清單查不出沒被指派的那個活動是真沒有
+		// 還是只是輪不到他，呼叫端因此也沒有多得到一枚可探測的信號。
+		return fmt.Errorf("%w：主體 %s 未被指派為活動 %s 的管理人",
+			ErrPermissionDenied, p.String(), activityID.String())
+	default:
+		return fmt.Errorf("%w：%s 主體沒有活動作用域的身分", ErrPermissionDenied, p.Kind().String())
+	}
 }
