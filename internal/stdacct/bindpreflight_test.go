@@ -495,6 +495,10 @@ func TestBindPreflightSessionCountUsesRevokeScale(t *testing.T) {
 //
 // 反過來說，若哪天有人把這兩欄配成 REFERENCES accounts，本預檢會立刻把它們當成未登記的引用
 // 並整體阻止（見上一條用例那顆探針表的手法）——邊界由實時掃描守住，不靠這段話的自我聲明。
+//
+// 0013 的 activity_factions 同樣在場（本用例種了一行）：它不帶任何帳戶標識欄，
+// 唯一的硬外鍵指向 activities，因此與「引用 accounts 的邊」這場對話完全無關——
+// 陣營落地不該、也不會成為綁定的新阻止原因。
 func TestBindPreflightActivitySoftReferencesAreNotObligations(t *testing.T) {
 	e := newEnv(t)
 	ctx := context.Background()
@@ -522,6 +526,14 @@ func TestBindPreflightActivitySoftReferencesAreNotObligations(t *testing.T) {
 			(activity_id, account_id, granted_at)
 		VALUES ('0192f0c4-1c9a-7000-8000-000000000a02', ?, 1200)`, target.ID.String()); err != nil {
 		t.Fatalf("種下目標帳戶的活動指派失敗：%v", err)
+	}
+	// 陣營表（0013）在場：它唯一的硬外鍵指向 activities，對 accounts 連軟參照都不是——
+	// 實時掃描按「引用 accounts 的邊」交談，自然不該把它認成未登記的引用。
+	if _, err := e.db.SQL().ExecContext(ctx, `INSERT INTO activity_factions
+			(id, activity_id, name, description, icon, color, sort_order, available, created_at, updated_at)
+		VALUES ('0192f0c4-1c9a-7000-8000-000000000a03', '0192f0c4-1c9a-7000-8000-000000000a02',
+		        '受體管著的組', '', '', '', 0, 1, 1300, 1300)`); err != nil {
+		t.Fatalf("種下陣營行失敗：%v", err)
 	}
 
 	pre, err := e.service.PreflightGuestBind(ctx, admin, guest.ID, target.ID, "req-activity-refs")

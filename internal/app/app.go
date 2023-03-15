@@ -781,6 +781,10 @@ func run(ctx context.Context, releaseSignals func(), args []string, out io.Write
 		// 落庫與審計都由 internal/activity 在自己的交易裡做，傳輸層只把受信主體、一欄或兩欄
 		// 白名單輸入，或一枚活動標識遞進去。
 		Activities: activityService,
+		// 活動陣營管理：同一個 *activity.Service 的陣營通路（准入沿用活動作用域那道閘，
+		// 業務寫入門禁與審計都在它自己的交易裡現讀）。依賴欄位分開是讓「裝配與否」
+		// 對兩組端點各說各話（見 internal/httpapi/factions.go 頭注）。
+		Factions: activityService,
 		// Root 初始化狀態的只讀來源：只查組態檔本身，不開任何寫入通路
 		// （初始化仍然只有 evernight-server init-root 這一條路）。
 		InitStatus: initStatusSource(cfg),

@@ -101,7 +101,8 @@ func (s *Server) apiRoutes() []apiRoute {
 	// （NeedServerAdmin 加上活動作用域那道閘）是兩套准入邊界，
 	// 共用一個開關就會出現「裝了帳戶目錄也順手有了活動管理面」的形態。
 	// 名冊的寫法走 NeedRoot、讀法走活動作用域判定，因此各挂一個前綴，不在同一條路徑上分方法。
-	return append(routes, s.activityEndpoints()...)
+	routes = append(routes, s.activityEndpoints()...)
+	return append(routes, s.factionEndpoints()...)
 }
 
 // apiFirstSegments 從登記清單導出各端點的路徑首段集合。

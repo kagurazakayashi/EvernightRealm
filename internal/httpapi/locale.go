@@ -270,6 +270,18 @@ var errorMessages = map[ErrorCode]map[string]string{
 		LocaleEnUS: "This account is already a manager of the activity, so this assignment did not run — the roster gained no row and no audit record was written. The thing to change is the target (someone else), not pressing the same button twice.",
 		LocaleJaJP: "このアカウントはすでにこの活動の管理人であるため、今回の指名は実行されませんでした。名簿に行は増えず、監査記録も残っていません。変えるべきは対象（別の人）であって、同じボタンをもう一度押すことではありません。",
 	},
+	CodeActivityClosedWrites: {
+		LocaleZhCN: "这个活动正处于停止状态，活动内的业务写入一律不接受，本次操作没有执行——什么都没改，也没有留下审计。停止不是归档：等活动重新开放之后，这里照常能写；要现在就改，请先把活动重新开放。",
+		LocaleZhTW: "這個活動正處於停止狀態，活動內的業務寫入一律不接受，本次操作沒有執行——什麼都沒改，也沒有留下審計。停止不是歸檔：等活動重新開放之後，這裡照常能寫；要現在就改，請先把活動重新開放。",
+		LocaleEnUS: "This activity is stopped, so writes inside the activity are not accepted and this operation did not run — nothing changed and no audit record was written. Stopping is not archiving: business writes resume once the activity is reopened; if you want the change now, reopen the activity first.",
+		LocaleJaJP: "この活動は停止中のため、活動内の業務書き込みは受け付けられず、今回の操作は実行されませんでした。何も変更されず、監査記録も残っていません。停止はアーカイブではありません：活動を再び開放すれば書き込めるようになります。今変更したいなら、まず活動を再開してください。",
+	},
+	CodeFactionNameTaken: {
+		LocaleZhCN: "这个活动里已经有另一个阵营用了这个名字，本次操作没有执行——没有多出新阵营，现有阵营也没被改动，审计同样没记。换一个名字再提交即可：其他活动里的同名阵营与这一本账无关。",
+		LocaleZhTW: "這個活動裡已經有另一個陣營用了這個名字，本次操作沒有執行——沒有多出新陣營，現有陣營也沒被改動，審計同樣沒記。換一個名字再提交即可：其他活動裡的同名陣營與這一本帳無關。",
+		LocaleEnUS: "Another faction in this activity already uses this name, so this operation did not run — no new faction was created, no existing one was touched, and no audit record was written. Choose another name and submit again: factions with the same name in other activities belong to a different book.",
+		LocaleJaJP: "この活動にはすでに同じ名前を使う陣営があるため、今回の操作は実行されませんでした。新しい陣営は作られず、既存の陣営も変更されず、監査記録も残っていません。別の名前を選んで再送信してください。他の活動の同名陣営はこの帳簿とは無関係です。",
+	},
 }
 
 // messageFor 取得錯誤碼在指定語言的使用者訊息；語言未支援或訊息為空時回退 defaultLocale。

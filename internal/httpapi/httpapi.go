@@ -122,6 +122,13 @@ type Deps struct {
 	// 共用一個有無判定就會出現「裝了帳戶目錄就順带有了活動面」的形態。
 	// 名冊的寫法（指派與撤銷）另經 NeedRoot，與讀法分開挂在 /root 與 /admin 兩個前綴上。
 	Activities ActivityUseCase
+	// Factions 為「活動陣營管理」用例的入口（internal/app 注入同一個 *activity.Service
+	// 的陣營通路）。為 nil 表示本執行檔不掛這組端點：路徑、回退清單與錯誤面都和未掛載時
+	// 逐字相同，少掉的是兩條路徑（列表與建立、編輯），不會留下一條「看得到陣營但動不了」
+	// 的半成品寫入口。它與 Activities 分成兩個依賴欄位（口徑同 StandardAccounts 與
+	// GuestBindings 的分離理由）：兩組端點准入同一道閘，但裝配與否各說各話——
+	// 日後若要分開灰度不必再拆碼。
+	Factions FactionUseCase
 }
 
 // Server 為 HTTP 服務層。
@@ -183,6 +190,10 @@ type Server struct {
 	// /admin/activities 與 /root/activities 那兩族路徑根本不掛
 	// （兩個首段仍因帳戶與 Root 端點屬 API，回退行為不受影響）。
 	activities ActivityUseCase
+	// factions 為「活動陣營管理」用例入口（列表與建立、編輯；可為 nil）；nil 時
+	// factionEndpoints 回空清單，/admin/activities/{activity_id}/factions 那一族路徑根本不掛
+	// （/admin 首段仍因帳戶與活動端點屬 API，回退行為不受影響）。
+	factions FactionUseCase
 }
 
 // New 以組態、版本字串與外部依賴建立 HTTP 服務層。
@@ -233,6 +244,9 @@ func New(cfg *config.Config, version string, deps Deps) *Server {
 		// 「裝配了什麼就服務什麼」在這一層沒有分支。
 		guestBinds: deps.GuestBindings,
 		activities: deps.Activities,
+		// 陣營用例為 nil 時一個端點都不掛（見 factionEndpoints）：
+		// 「裝配了什麼就服務什麼」在這一層沒有分支。
+		factions: deps.Factions,
 	}
 	s.httpSrv = &http.Server{
 		Addr:    cfg.Server.Listen,
