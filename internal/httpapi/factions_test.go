@@ -2,7 +2,8 @@
 // 一位管理員走完建立→列表→改名與停用，兩條路徑各自的權限矩陣、本體欄位白名單
 // （含「順手宣稱 available／activity_id／身分欄位」）、跨活動讀改的不可分辨、
 // 同活動重名與跨活動同名的兩副面孔、停止／歸檔兩道寫入門禁各有各的碼、
-// 非法顏色／圖標／排序逐欄點名，以及併發編輯的落敗那一句。
+// 非法顏色／圖標／排序逐欄點名，併發編輯的落敗那一句，以及停用與恢復那條通路上的
+// 派生值（accepts_new_members）與「停用只翻一欄、行仍列可讀、重複請求各有各的形状」。
 //
 // 刻意不收的東西：
 //   - 沒有替身：授權、活動作用域判定、業務門禁、重名核實與審計都跨層走真路徑；
@@ -725,6 +726,146 @@ func TestFactionEndpointForeignOriginIsRefused(t *testing.T) {
 	}
 	if got := countActivityRows(t, e.db, "activity_factions"); got != 0 {
 		t.Errorf("被來源閘擋下的請求不該落庫，實際 %d 行", got)
+	}
+}
+
+// TestFactionEndpointDisableAndRestore 驗收：停用與恢復走同一條 PUT 白名單通路，
+// 回應與列表都如實帶著「此刻還收不收新成員」這句服務端派生值；停用不藏行、不改標識、
+// 不動其他欄位；重複停用冪等、過期依據值落敗在 2013；派生那一格不可寫（1004 點名）；
+// 未授权（2011／1001）與跨活動（1001 同形）都動不了它；活動停止時連可用行的派生值
+// 也照實說「收不到新成員」，重開後同一句話翻案。
+func TestFactionEndpointDisableAndRestore(t *testing.T) {
+	e := newFactionEnv(t)
+	adminCookie := e.factionAdminCookie(t, "Faction.Disable")
+	admin := cookieHeader(adminCookie)
+	plain := cookieHeader(e.factionStandardCookie(t, adminCookie, "faction.disable_plain"))
+	stranger := cookieHeader(e.factionAdminCookie(t, "Faction.DisableStranger"))
+	id := e.createFactionActivity(t, admin, "停用取證場")
+	created := mustFactionItem(t, e.request(t, http.MethodPost, "/admin/activities/"+id+"/factions",
+		`{"name":"黎明軍","description":"開場描述","icon":"sun","color":"#F0A020"}`, admin))
+	factionID, _ := created["faction_id"].(string)
+	if created["available"] != true || created["accepts_new_members"] != true {
+		t.Fatalf("新建且活動可寫時兩者都該是真：%v／%v", created["available"], created["accepts_new_members"])
+	}
+	path := "/admin/activities/" + id + "/factions/" + factionID
+
+	disable := e.request(t, http.MethodPut, path, factionEditBody(created, map[string]any{"available": false}), admin)
+	if disable.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(disable.Body)
+		t.Fatalf("停用應回 200：%s", body)
+	}
+	disabled := mustFactionItem(t, disable)
+	if disabled["available"] != false {
+		t.Errorf("回應該帶著資料庫現值（已停用）：%v", disabled["available"])
+	}
+	if disabled["accepts_new_members"] != false {
+		t.Errorf("停用後的派生值必須是收不到新成員：%v", disabled["accepts_new_members"])
+	}
+	// 除了那一格，其餘現值逐字還在原處：停用不是刪除，也不是重置。
+	for _, key := range []string{"name", "description", "icon", "color", "sort_order", "created_at", "activity_id"} {
+		if disabled[key] != created[key] {
+			t.Errorf("停用動了 %s 這一格：%v → %v", key, created[key], disabled[key])
+		}
+	}
+	if disabled["faction_id"] != factionID {
+		t.Errorf("停用動了標識（引用會失效）：%v → %v", factionID, disabled["faction_id"])
+	}
+
+	// 仍列、可讀。
+	rows := factionList(t, e.request(t, http.MethodGet, "/admin/activities/"+id+"/factions", "", admin))
+	if len(rows) != 1 || rows[0]["available"] != false || rows[0]["accepts_new_members"] != false {
+		t.Fatalf("停用後列表仍要列出行：%+v", rows)
+	}
+
+	// 重複停用（依據值取剛讀到的現值）：整份編輯冪等成功，值一個字不動。
+	again := e.request(t, http.MethodPut, path, factionEditBody(rows[0], nil), admin)
+	if again.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(again.Body)
+		t.Fatalf("重複停用該冪等成功：%s", body)
+	}
+	if mustFactionItem(t, again)["available"] != false {
+		t.Error("重複停用後的現值仍該是停用")
+	}
+	if got := countAuditAction(t, e.db, "faction.update", id); got != 2 {
+		t.Errorf("停用與那次如實的重存各留一筆，實際 %d 筆", got)
+	}
+
+	// 拿著「當時還可用」的舊畫面再送一次：現值已不是他所見，2013 且零落地、零留痕。
+	stale := e.request(t, http.MethodPut, path, factionEditBody(created, map[string]any{"available": false}), admin)
+	if stale.StatusCode != http.StatusConflict {
+		t.Fatalf("過期依據值的重複停用應回 409：%d", stale.StatusCode)
+	}
+	if code, _ := envelope(t, stale); code != int(CodeProfileConflict) {
+		t.Errorf("過期的重複停用該沿用 2013，實際 %d", code)
+	}
+	if got := countAuditAction(t, e.db, "faction.update", id); got != 2 {
+		t.Errorf("落敗的重複請求不該留審計，實際 %d 筆", got)
+	}
+
+	// 派生那一格不是可寫欄位：想靠它宣稱「還收新成員」在協定層就撞 1004 點名。
+	injected := e.request(t, http.MethodPut, path,
+		factionEditBody(rows[0], map[string]any{"accepts_new_members": true}), admin)
+	if injected.StatusCode != http.StatusBadRequest {
+		t.Fatalf("寫派生值應回 400：%d", injected.StatusCode)
+	}
+	var envelopeBody struct {
+		Code    int            `json:"code"`
+		Details map[string]any `json:"details"`
+	}
+	body, _ := io.ReadAll(injected.Body)
+	if err := json.Unmarshal(body, &envelopeBody); err != nil {
+		t.Fatalf("解析回應失敗：%v（%s）", err, body)
+	}
+	if envelopeBody.Code != int(CodeInvalidBody) || envelopeBody.Details["field"] != "accepts_new_members" {
+		t.Errorf("該點名是這一格寫不進去：%v", envelopeBody.Details)
+	}
+
+	// 未授權與跨活動都動不了它：普通帳戶 2011，外人管理員與幽靈標識同碼同文。
+	if code, _ := envelope(t, e.request(t, http.MethodPut, path,
+		factionEditBody(rows[0], map[string]any{"available": true}), plain)); code != int(CodePermissionDenied) {
+		t.Errorf("普通帳戶的停用請求應回 2011，實際 %d", code)
+	}
+	outsider := e.request(t, http.MethodPut, "/admin/activities/"+id+"/factions/"+factionID,
+		factionEditBody(rows[0], map[string]any{"available": true}), stranger)
+	ghost := e.request(t, http.MethodPut, "/admin/activities/"+id+"/factions/"+factionGhostFactionID,
+		factionEditBody(rows[0], map[string]any{"available": true}), admin)
+	outsiderCode, outsiderMessage := envelope(t, outsider)
+	ghostCode, ghostMessage := envelope(t, ghost)
+	if outsiderCode != int(CodeNotFound) || ghostCode != int(CodeNotFound) || outsiderMessage != ghostMessage {
+		t.Errorf("外人停用與幽靈停用都該收斂成同一句：%d/%q vs %d/%q",
+			outsiderCode, outsiderMessage, ghostCode, ghostMessage)
+	}
+	stillRejected := factionList(t, e.request(t, http.MethodGet, "/admin/activities/"+id+"/factions", "", admin))
+	if len(stillRejected) != 1 || stillRejected[0]["available"] != false {
+		t.Errorf("被拒的恢復請求動了現值：%+v", stillRejected)
+	}
+
+	// 活動停止時：連還開著的陣營也收不到新成員，這一句由服務端派生值說出來。
+	restored := mustFactionItem(t, e.request(t, http.MethodPut, path,
+		factionEditBody(rows[0], map[string]any{"available": true}), admin))
+	if restored["available"] != true || restored["accepts_new_members"] != true {
+		t.Fatalf("重新啟用後兩者都該是真：%v／%v", restored["available"], restored["accepts_new_members"])
+	}
+	if status := e.request(t, http.MethodPut, "/admin/activities/"+id+"/status",
+		`{"status":"closed"}`, admin); status.StatusCode != http.StatusOK {
+		statusBody, _ := io.ReadAll(status.Body)
+		t.Fatalf("停止活動應成功：%s", statusBody)
+	}
+	closedRows := factionList(t, e.request(t, http.MethodGet, "/admin/activities/"+id+"/factions", "", admin))
+	if len(closedRows) != 1 || closedRows[0]["available"] != true || closedRows[0]["accepts_new_members"] != false {
+		t.Errorf("停止活動裡的可用陣營該派生成收不到新成員：%+v", closedRows)
+	}
+	if code, _ := envelope(t, e.request(t, http.MethodPut, path,
+		factionEditBody(restored, map[string]any{"available": false}), admin)); code != int(CodeActivityClosedWrites) {
+		t.Errorf("停止態的停用請求該拿到 2033（等重開）那一句，實際 %d", code)
+	}
+	if status := e.request(t, http.MethodPut, "/admin/activities/"+id+"/status",
+		`{"status":"active"}`, admin); status.StatusCode != http.StatusOK {
+		t.Fatalf("重開活動應成功：%d", status.StatusCode)
+	}
+	reopened := factionList(t, e.request(t, http.MethodGet, "/admin/activities/"+id+"/factions", "", admin))
+	if reopened[0]["available"] != true || reopened[0]["accepts_new_members"] != true {
+		t.Errorf("重開後同一句派生值必須翻案回來：%+v", reopened[0])
 	}
 }
 

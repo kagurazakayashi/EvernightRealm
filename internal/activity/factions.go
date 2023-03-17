@@ -1,4 +1,5 @@
-// factions.go 是「打理一個活動裡的陣營」的三条用例：建立、列表、編輯。
+// factions.go 是「打理一個活動裡的陣營」的三条用例：建立、列表、編輯，
+// 外加留給日後分配通路複用的「這個陣營此刻還收不收新成員」判定。
 //
 // 這一層把本步批准的四件事湮成同一条通路：
 //   - 准入沿用活動管理權的現讀口徑（NeedServerAdmin 加上這個活動的一行指派，
@@ -15,6 +16,11 @@
 // 「建出來先停用」的意圖走建好之後的一跳編輯即可表達，請求裡因此不設可用性那一格。
 // 未帶排序值時排到最後一格：由服務層在交易內現算 max+1，呼叫端代填的數字只能是建議，
 // 不能是事實。
+//
+// 停用與恢復都走那條六欄白名單編輯，不另發通路（用戶批准於陣營管理那一步）：可用性是
+// 旗標而不是狀態機，因此不套用「同態重複即拒」那條狀態規則——把一份「仍然停用」的整份
+// 編輯再存一次，是一次如實的重存（值沒翻轉、updated_at 前進、審計記下 available 前後同值）。
+// 界面因此必須把「當前狀態」與「本次操作結果」分開講：沒有翻轉時不得念成「已停用這個陣營」。
 package activity
 
 import (
@@ -106,7 +112,8 @@ func (s *Service) CreateFaction(ctx context.Context, principal identity.Principa
 		if err := s.requireActivityScope(tctx, tx, principal, activityID, "faction_create"); err != nil {
 			return err
 		}
-		if _, err := s.EnsureBusinessWritesAllowed(tctx, tx, activityID); err != nil {
+		gate, err := s.EnsureBusinessWritesAllowed(tctx, tx, activityID)
+		if err != nil {
 			return err
 		}
 		taken, err := s.store.FactionNameTaken(tctx, tx, activityID, checkedName, idgen.ID{})
@@ -140,6 +147,8 @@ func (s *Service) CreateFaction(ctx context.Context, principal identity.Principa
 		if err != nil {
 			return err
 		}
+		// 門禁剛在同一个快照裡放行，因此這一格的派生值是可信的：新建即可用、活動又可寫。
+		stored = withMemberAcceptance(stored, gate.Status)
 		rec, err := s.activityRecord(principal, activityID, "faction.create", "faction",
 			stored.ID.String(), "管理員經已認證會話建立活動陣營", requestID,
 			auditChange("name", "", stored.Name),
@@ -184,13 +193,19 @@ func (s *Service) Factions(ctx context.Context, principal identity.Principal,
 	if err := s.requireActivityScope(ctx, q, principal, activityID, "faction_list"); err != nil {
 		return nil, err
 	}
-	if _, err := s.readActivity(ctx, q, activityID); err != nil {
+	gate, err := s.readActivity(ctx, q, activityID)
+	if err != nil {
 		return nil, err
 	}
 	rows, err := s.store.Factions(ctx, q, activityID)
 	if err != nil {
 		s.log.Error("讀取陣營列表失敗", "activity", activityID.String(), "err", err)
 		return nil, fmt.Errorf("activity: 讀取陣營列表失敗: %w", err)
+	}
+	// 停止與歸檔的活動裡，連 available 仍為真的陣營也收不到新成員：這一句由服務端
+	// 說出來（同一個快照讀到的活動狀態），而不是讓介面去猜兩個欄位的組合。
+	for i, row := range rows {
+		rows[i] = withMemberAcceptance(row, gate.Status)
 	}
 	return rows, nil
 }
@@ -208,6 +223,9 @@ func (s *Service) Factions(ctx context.Context, principal identity.Principal,
 //  7. 同一交易內讀回更新後的實體並追加活動域審計——前後只有這六欄。
 //
 // 被拒的編輯（無權、門禁攔下、跨活動、撞名、併發衝突、輸入不合規）不追加審計。
+//
+// 停用與恢復就是這一條通路上「available 那一欄翻轉」的編輯：除了那一欄與 updated_at，
+// 一個字都不該動——尤其不會動任何人的歸屬（今日還沒有歸屬可動，日後也不准借這一跳清人）。
 func (s *Service) UpdateFaction(ctx context.Context, principal identity.Principal,
 	activityID, factionID idgen.ID, edit FactionEdit, requestID string) (Faction, error) {
 	checkedName, err := validateName(edit.Name)
@@ -236,7 +254,8 @@ func (s *Service) UpdateFaction(ctx context.Context, principal identity.Principa
 		if err := s.requireActivityScope(tctx, tx, principal, activityID, "faction_update"); err != nil {
 			return err
 		}
-		if _, err := s.EnsureBusinessWritesAllowed(tctx, tx, activityID); err != nil {
+		gate, err := s.EnsureBusinessWritesAllowed(tctx, tx, activityID)
+		if err != nil {
 			return err
 		}
 		before, err := s.store.FactionByID(tctx, tx, factionID)
@@ -271,6 +290,7 @@ func (s *Service) UpdateFaction(ctx context.Context, principal identity.Principa
 		if err != nil {
 			return err
 		}
+		after = withMemberAcceptance(after, gate.Status)
 		rec, err := s.factionUpdateRecord(principal, before, after, requestID)
 		if err != nil {
 			return err
@@ -307,10 +327,14 @@ func (s *Service) UpdateFaction(ctx context.Context, principal identity.Principa
 // 口徑與活動資料編輯同源——actor 只能經 principal.AuditActor() 換得，換不出就讓
 // 整筆編輯回滾；狀態的變化不進這條句子（陣營沒有狀態機，available 是白名單的一欄，
 // 它的前後值在這裡就是它的全部事實）。
+//
+// 原因句子按可用性是否翻轉分岔：查審計的人要能一眼分辨「這一次動的是收不收新成員」
+// 還是「這一次只是改資料」。兩句都只描述服務端已經發生的事，不寫操作者自報的意圖
+// （請求本體裡沒有一格能填原因，也不准填——口徑同帳戶停用與活動狀態轉換）。
 func (s *Service) factionUpdateRecord(principal identity.Principal, before, after Faction,
 	requestID string) (audit.Record, error) {
 	return s.activityRecord(principal, after.ActivityID, "faction.update", "faction",
-		after.ID.String(), "管理員經已認證會話編輯活動陣營", requestID,
+		after.ID.String(), factionEditReason(before, after), requestID,
 		auditChange("name", before.Name, after.Name),
 		auditChange("description", before.Description, after.Description),
 		auditChange("icon", before.Icon, after.Icon),
@@ -318,3 +342,60 @@ func (s *Service) factionUpdateRecord(principal identity.Principal, before, afte
 		auditChange("sort_order", fmt.Sprint(before.SortOrder), fmt.Sprint(after.SortOrder)),
 		auditChange("available", fmt.Sprint(before.Available), fmt.Sprint(after.Available)))
 }
+
+// factionEditReason 換出那一筆審計的原因句子（含可用性翻轉與否兩種）。
+func factionEditReason(before, after Faction) string {
+	switch {
+	case before.Available && !after.Available:
+		return "管理員經已認證會話停用活動陣營：自此不再接收新分配，既有歸屬與歷史保留"
+	case !before.Available && after.Available:
+		return "管理員經已認證會話重新啟用活動陣營：恢復接收新分配，不改寫任何人既有歸屬"
+	default:
+		return "管理員經已認證會話編輯活動陣營"
+	}
+}
+
+// EnsureFactionAcceptsNewMembers 是留給「把玩家分進陣營」那一步的可復用判定：
+// 在呼叫端的寫入交易內現讀，回報這個陣營此刻能不能接收新成員。
+//
+// 三件事依次判定，前一件不過就停在那一句話上（順序與陣營的建／改兩條通路一致）：
+//  1. 所屬活動的業務寫入門禁（停止與歸檔各有各的句子）；
+//  2. 按標識讀回陣營，並核實它確實屬於這個活動——不属于時與「從未存在」同一句話，
+//     分配通路不能把「那個陣營在另一場活動裡」變成一枚可探測的信號；
+//  3. 可用性旗標：停用即 ErrFactionNotAcceptingMembers。
+//
+// 簽名刻意收 *database.Tx 而不是任何 Querier，也刻意在自己的寫入交易內檢查：
+// 「先在一个交易查可用，再在另一个無保護的交易寫入」是這個判定存在的理由要防的那件事——
+// 中間那一跳裡停用可以照常發生，於是分配把玩家分進了一個已停用的陣營。
+// 收 *Tx 之後，拿 db.SQL() 或唯讀交易來呼叫連編譯／啟動檢查都過不了（唯讀交易在
+// 這裡直接回報內部錯誤，不降級成「可以分配」）。SQLite 只有一個寫入者，於是
+// 「判定時的現值」與「同一交易內隨後那筆分配寫入」看見的是同一個快照：
+// 要插入的分配與要停用這一行的那一次編輯必然串行，不會各寫各的。
+//
+// 它不做授權判定（呼叫端本來就要先過 requireActivityScope 那道閘），也不發任何
+// 對外錯誤碼：今日還沒有分配端點，那一步落地時才決定這一句對映成哪一枚碼。
+func (s *Service) EnsureFactionAcceptsNewMembers(ctx context.Context, tx *database.Tx,
+	activityID, factionID idgen.ID) (Faction, error) {
+	if tx == nil || tx.ReadOnly() {
+		return Faction{}, errFactionGuardNeedsWriteTx
+	}
+	gate, err := s.EnsureBusinessWritesAllowed(ctx, tx, activityID)
+	if err != nil {
+		return Faction{}, err
+	}
+	faction, err := s.store.FactionByID(ctx, tx, factionID)
+	if err != nil {
+		return Faction{}, err
+	}
+	if faction.ActivityID != activityID {
+		return Faction{}, ErrFactionNotFound
+	}
+	if !faction.Available {
+		return Faction{}, ErrFactionNotAcceptingMembers
+	}
+	return withMemberAcceptance(faction, gate.Status), nil
+}
+
+// errFactionGuardNeedsWriteTx 是呼叫端用法錯誤，不是業務結論：把判定挪到交易外
+// （或挪到唯讀交易裡）得到的答案隨時可能被別人改掉，因此不給它一條「湊合著用」的出口。
+var errFactionGuardNeedsWriteTx = errors.New("activity: 陣營可分配判定必須在呼叫端自己的寫入交易內執行")

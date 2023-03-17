@@ -24,7 +24,10 @@
 // 因此這一族路徑上不存在 DELETE，也沒有任何方法能改變歸屬。
 //
 // 回應本體不含任何憑據材料、會話材料或帳戶內部欄位：一行陣營帶的就是它的六欄白名單
-// 資料、標識、歸屬活動與兩個時刻。可用性是旗標：停用不藏行，列表照樣列（仍列、可讀）。
+// 資料、標識、歸屬活動與兩個時刻，外加一格服務端派生的「此刻還收不收新成員」。
+// 可用性是旗標：停用不藏行，列表照樣列（仍列、可讀），停用與恢復都走 PUT 那一條
+// 六欄白名單通路（用戶批准：不另設狀態子資源），這一族因此不存在 DELETE，
+// 也沒有一格能填「原因」——留痕的原因句子由服務端按可用性是否翻轉換得。
 package httpapi
 
 import (
@@ -91,6 +94,11 @@ type updateFactionRequest struct {
 }
 
 // factionItem 是列表行、建立回顯與編輯結果共用的形狀（同一筆資料在不同回應裡的形狀必須同源）。
+//
+// accepts_new_members 是服務端派生的只讀欄（只增不删的兼容演進）：available 且所屬活動
+// 此刻接受業務寫入時才為真。它不是第七格可寫資料——PUT 的本體白名單裡沒有這一格，
+// 帶著它來的請求在協定層就被 1004 殺掉，於是「介面以為改了这一格就改了可用性」
+// 無處可犯；介面顯示的「此刻收不收新成員」與日後分配通路的判定同源，不用自己拼兩個欄位。
 type factionItem struct {
 	FactionID   string `json:"faction_id"`
 	ActivityID  string `json:"activity_id"`
@@ -100,8 +108,10 @@ type factionItem struct {
 	Color       string `json:"color"`
 	SortOrder   int64  `json:"sort_order"`
 	Available   bool   `json:"available"`
-	CreatedAt   string `json:"created_at"`
-	UpdatedAt   string `json:"updated_at"`
+	// AcceptsNewMembers 是派生現值，寫入通路不接受它（見上方說明）。
+	AcceptsNewMembers bool   `json:"accepts_new_members"`
+	CreatedAt         string `json:"created_at"`
+	UpdatedAt         string `json:"updated_at"`
 }
 
 // factionListResponse 是 GET／HEAD 列表的回應本體。
@@ -252,19 +262,21 @@ func (s *Server) handleFactionProfile(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// factionRow 把一筆陣營換成回應本體（欄位白名單見 internal/activity/factionstore.go 的讀法）。
+// factionRow 把一筆陣營換成回應本體（欄位白名單見 internal/activity/factionstore.go 的讀法；
+// accepts_new_members 是用例蓋上的派生值，這一層不再自己算一遍，免得兩處各講一套）。
 func factionRow(f activity.Faction) factionItem {
 	return factionItem{
-		FactionID:   f.ID.String(),
-		ActivityID:  f.ActivityID.String(),
-		Name:        f.Name,
-		Description: f.Description,
-		Icon:        f.Icon,
-		Color:       f.Color,
-		SortOrder:   f.SortOrder,
-		Available:   f.Available,
-		CreatedAt:   timeutil.FormatUTC(f.CreatedAt),
-		UpdatedAt:   timeutil.FormatUTC(f.UpdatedAt),
+		FactionID:         f.ID.String(),
+		ActivityID:        f.ActivityID.String(),
+		Name:              f.Name,
+		Description:       f.Description,
+		Icon:              f.Icon,
+		Color:             f.Color,
+		SortOrder:         f.SortOrder,
+		Available:         f.Available,
+		AcceptsNewMembers: f.AcceptsNewMembers,
+		CreatedAt:         timeutil.FormatUTC(f.CreatedAt),
+		UpdatedAt:         timeutil.FormatUTC(f.UpdatedAt),
 	}
 }
 
