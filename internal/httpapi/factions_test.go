@@ -43,8 +43,8 @@ import (
 // factionGhostActivityID 是一個合法形狀但從未存在的活動標識（不可分辨性要比對它）。
 const factionGhostActivityID = "0192f0c4-1c9a-7000-8000-000000000fef"
 
-// factionEnv 是本次測試專屬的現場：與 activityEnv 同一批真組件，並把陣營用例
-// 一起注入（兩個依賴欄位都餵同一個 *activity.Service，與 internal/app 的裝配同形）。
+// factionEnv 是本次測試專屬的現場：與 activityEnv 同一批真組件，並把陣營與成員用例
+// 一起注入（三個依賴欄位都餵同一個 *activity.Service，與 internal/app 的裝配同形）。
 type factionEnv struct {
 	ts    *httptest.Server
 	db    *database.DB
@@ -122,7 +122,10 @@ func newFactionEnv(t *testing.T) *factionEnv {
 	srv := New(&cfg, testVersion, Deps{
 		Auth: authService, Admins: adminService, StandardAccounts: standardService,
 		AccountPolicy: policyService, Activities: activityService, Factions: activityService,
-		Clock: clock,
+		// 成員用例與陣營用例共用同一個 *activity.Service（口徑同 internal/app 的裝配）：
+		// 這一組現場因此能同時跑陣營與名冊兩族端點。
+		Members: activityService,
+		Clock:   clock,
 	})
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)

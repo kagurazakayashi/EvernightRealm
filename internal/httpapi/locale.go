@@ -282,6 +282,12 @@ var errorMessages = map[ErrorCode]map[string]string{
 		LocaleEnUS: "Another faction in this activity already uses this name, so this operation did not run — no new faction was created, no existing one was touched, and no audit record was written. Choose another name and submit again: factions with the same name in other activities belong to a different book.",
 		LocaleJaJP: "この活動にはすでに同じ名前を使う陣営があるため、今回の操作は実行されませんでした。新しい陣営は作られず、既存の陣営も変更されず、監査記録も残っていません。別の名前を選んで再送信してください。他の活動の同名陣営はこの帳簿とは無関係です。",
 	},
+	CodeActivityMemberTaken: {
+		LocaleZhCN: "这个账户在这个活动里已经有一份成员档案了，本次建立没有执行——名册没有多出一行，原有档案也没被覆盖，审计同样没记。要改那份既有档案就去编辑它，而不是再建一次：同一个人在同一场活动里只有一份档案。",
+		LocaleZhTW: "這個帳戶在這個活動裡已經有一份成員檔案了，本次建立沒有執行——名冊沒有多出一行，原有檔案也沒被覆蓋，審計同樣沒記。要改那份既有檔案就去編輯它，而不是再建一次：同一個人在同一場活動裡只有一份檔案。",
+		LocaleEnUS: "This account already has a member profile in this activity, so this creation did not run — the roster gained no row, the existing profile was not overwritten, and no audit record was written. Edit that existing profile instead of creating a second one: one person has exactly one profile per activity.",
+		LocaleJaJP: "このアカウントはこの活動にすでにメンバー档案があるため、今回の作成は実行されませんでした。名簿に行は増えず、既存の档案も上書きされず、監査記録も残っていません。もう一度作成するのではなく、その既存の档案を編集してください。一人のメンバー档案は一つの活動につき一通です。",
+	},
 }
 
 // messageFor 取得錯誤碼在指定語言的使用者訊息；語言未支援或訊息為空時回退 defaultLocale。

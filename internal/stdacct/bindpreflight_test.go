@@ -106,7 +106,7 @@ func TestBindPreflightHappyPathAndZeroMutation(t *testing.T) {
 		t.Errorf("資料版本應與 migrate.Current 一致，基準 %d／回應 %d", wantVersion, pre.SchemaVersion)
 	}
 	if pre.ConsentMode != BindConsentModeTargetSelfInitiated {
-		t.Errorf("同意形態應恆為目標端自助发起，實際 %q", pre.ConsentMode)
+		t.Errorf("同意形態應恆為目標端自助發起，實際 %q", pre.ConsentMode)
 	}
 	if pre.Source.AccountID != guest.ID || pre.Source.Type != account.TypeGuest {
 		t.Errorf("來源投影應是該訪戶本人，實際 %+v", pre.Source)
@@ -282,7 +282,7 @@ func errBlockerDump(pre GuestBindPreflight) string {
 // 對持授予者本來就只有一個答案，與停用／重置／升級同句），而不是多發一枚
 // 「他身上有授予」的新信號；現行 CHECK（role IN ('server_admin')）之下壞角色值
 // 根本寫不進去，故 source_has_grants 記號要等角色封閉集合擴大後才可達——它與
-// Roles() 的復核一同留在那一天接住形態缺陷，今天的证据就是這個方向本身。
+// Roles() 的復核一同留在那一天接住形態缺陷，今天的证據就是這個方向本身。
 func TestBindPreflightExternalGrantTamperingFailClosed(t *testing.T) {
 	e := newEnv(t)
 	ctx := context.Background()
@@ -291,7 +291,7 @@ func TestBindPreflightExternalGrantTamperingFailClosed(t *testing.T) {
 		Type: account.TypeGuest})
 	target := e.seed(t, seedInput{Login: "Tamper.Host", Display: "受體"})
 
-	// 只有外部握著資料庫把防呆觸發器拆了才走得到這裡；預檢的職責是把那種现场的
+	// 只有外部握著資料庫把防呆觸發器拆了才走得到這裡；預檢的職責是把那種現场的
 	// 處置方向釘住，而不是假裝它不存在。
 	if _, err := e.db.SQL().ExecContext(ctx, `DROP TRIGGER account_server_roles_guest_no_role`); err != nil {
 		t.Fatalf("移除測試觸發器失敗：%v", err)
@@ -489,7 +489,7 @@ func TestBindPreflightSessionCountUsesRevokeScale(t *testing.T) {
 //
 // 這條钉子把兩個方向都固定住：
 //   - 訪戶「創建過一場活動」不構成綁定的阻止原因：綁定要合併的是他的帳戶行，
-//     而那場活動的歷史发起人不動、不搬、不改寫（與 root_audit 同口徑）；
+//     而那場活動的歷史發起人不動、不搬、不改寫（與 root_audit 同口徑）；
 //   - 一個目標帳戶「正被指派管理某場活動」也不構成阻止：指派是他名下的一項可另行撤銷的事實，
 //     不由綁定通路代為處置。
 //
@@ -499,6 +499,10 @@ func TestBindPreflightSessionCountUsesRevokeScale(t *testing.T) {
 // 0013 的 activity_factions 同樣在場（本用例種了一行）：它不帶任何帳戶標識欄，
 // 唯一的硬外鍵指向 activities，因此與「引用 accounts 的邊」這場對話完全無關——
 // 陣營落地不該、也不會成為綁定的新阻止原因。
+//
+// 0014 的 activity_members 也在場，而且來源與目標各占一行：它的 account_id 是無外鍵的
+// 軟參照（口徑同 0012 那兩欄），實時掃描看不見這種邊，所以它既進不了 unknown_references，
+// 也不該被誰「順手搬走」——本用例把兩行的帳戶指向逐字讀回，釘住「預檢不改寫成員歸屬」這句話。
 func TestBindPreflightActivitySoftReferencesAreNotObligations(t *testing.T) {
 	e := newEnv(t)
 	ctx := context.Background()
@@ -536,6 +540,23 @@ func TestBindPreflightActivitySoftReferencesAreNotObligations(t *testing.T) {
 		t.Fatalf("種下陣營行失敗：%v", err)
 	}
 
+	// 成員表（0014）在場，而且両側各有一行：account_id 是無外鍵的軟參照（同 0012 那兩欄），
+	// 實時掃描看不見它，因此既不構成 unknown_references，也不構成新的阻止原因。
+	// 綁定之後這一行的處置是「不搬不改寫」：來源那一行仍指向原標識，未來的歸屬另有其人
+	// （見 BindImpactMovesFutureAttribution 那句已批准合同）。
+	if _, err := e.db.SQL().ExecContext(ctx, `INSERT INTO activity_members
+			(id, activity_id, account_id, nickname, created_at, updated_at)
+		VALUES ('0192f0c4-1c9a-7000-8000-000000000a04', '0192f0c4-1c9a-7000-8000-000000000a01', ?, ?, 1400, 1400)`,
+		guest.ID.String(), "0192f0c4-1c9a-7000-8000-000000000a11"); err != nil {
+		t.Fatalf("種下來源訪戶的成員行失敗：%v", err)
+	}
+	if _, err := e.db.SQL().ExecContext(ctx, `INSERT INTO activity_members
+			(id, activity_id, account_id, nickname, created_at, updated_at)
+		VALUES ('0192f0c4-1c9a-7000-8000-000000000a05', '0192f0c4-1c9a-7000-8000-000000000a02', ?, ?, 1500, 1500)`,
+		target.ID.String(), "0192f0c4-1c9a-7000-8000-000000000a12"); err != nil {
+		t.Fatalf("種下目標帳戶的成員行失敗：%v", err)
+	}
+
 	pre, err := e.service.PreflightGuestBind(ctx, admin, guest.ID, target.ID, "req-activity-refs")
 	if err != nil {
 		t.Fatalf("軟參照不該讓預檢本身失敗：%v", err)
@@ -544,11 +565,31 @@ func TestBindPreflightActivitySoftReferencesAreNotObligations(t *testing.T) {
 		t.Errorf("活動的軟參照不構成阻止，實際 executable=%v blockers=%q",
 			pre.Executable, blockerLine(pre.Blockers))
 	}
-	// 兩行活動事實一個字都不動（預檢零寫入是既有合同，這裡只多驗一張新表）。
+	// 兩行活動事實一個字都不動（預檢零寫入是既有合同，這裡只多驗兩張新表）。
 	if got := countRows(t, e.db, "activities"); got != 2 {
 		t.Errorf("預檢不得動活動表，實際 %d 行", got)
 	}
 	if got := countRows(t, e.db, "activity_manager_grants"); got != 1 {
 		t.Errorf("預檢不得動指派表，實際 %d 行", got)
+	}
+	if got := countRows(t, e.db, "activity_factions"); got != 1 {
+		t.Errorf("預檢不得動陣營表，實際 %d 行", got)
+	}
+	// 兩行成員原樣在場，而且各自仍指向原來那個人：綁定預檢不把來源的成員身份搬給目標，
+	// 也不替任何人預先抹掉一份檔案。
+	if got := countRows(t, e.db, "activity_members"); got != 2 {
+		t.Fatalf("預檢不得動成員表，實際 %d 行", got)
+	}
+	var sourceStill, targetStill string
+	if err := e.db.SQL().QueryRowContext(ctx, `SELECT account_id FROM activity_members
+			WHERE id = '0192f0c4-1c9a-7000-8000-000000000a04'`).Scan(&sourceStill); err != nil {
+		t.Fatalf("讀回來源的成員行失敗：%v", err)
+	}
+	if err := e.db.SQL().QueryRowContext(ctx, `SELECT account_id FROM activity_members
+			WHERE id = '0192f0c4-1c9a-7000-8000-000000000a05'`).Scan(&targetStill); err != nil {
+		t.Fatalf("讀回目標的成員行失敗：%v", err)
+	}
+	if sourceStill != guest.ID.String() || targetStill != target.ID.String() {
+		t.Errorf("成員行的帳戶指向不得被預檢搬動（來源 %q／目標 %q）", sourceStill, targetStill)
 	}
 }

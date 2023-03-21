@@ -785,6 +785,10 @@ func run(ctx context.Context, releaseSignals func(), args []string, out io.Write
 		// 業務寫入門禁與審計都在它自己的交易裡現讀）。依賴欄位分開是讓「裝配與否」
 		// 對兩組端點各說各話（見 internal/httpapi/factions.go 頭注）。
 		Factions: activityService,
+		// 活動成員與唯一檔案：同一個 *activity.Service 的成員通路（准入同那道閘，
+		// 目標帳戶資格與審計都在它自己的交易裡現讀）。依賴欄位分開的理由同陣營
+		// （見 internal/httpapi/members.go 頭注）。
+		Members: activityService,
 		// Root 初始化狀態的只讀來源：只查組態檔本身，不開任何寫入通路
 		// （初始化仍然只有 evernight-server init-root 這一條路）。
 		InitStatus: initStatusSource(cfg),

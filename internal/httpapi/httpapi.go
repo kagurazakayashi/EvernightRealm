@@ -129,6 +129,11 @@ type Deps struct {
 	// GuestBindings 的分離理由）：兩組端點准入同一道閘，但裝配與否各說各話——
 	// 日後若要分開灰度不必再拆碼。
 	Factions FactionUseCase
+	// Members 為「活動成員與唯一檔案」用例的入口（internal/app 注入同一個 *activity.Service
+	// 的成員通路）。為 nil 表示本執行檔不掛這組端點：路徑、回退清單與錯誤面都和未掛載時
+	// 逐字相同，少掉的是兩條路徑（名冊與建立、暱稱編輯），不會留下一條「看得到名冊但動不了」
+	// 的半成品寫入口。分欄理由同 Factions：准入同一道閘，裝配與否各說各話。
+	Members MemberUseCase
 }
 
 // Server 為 HTTP 服務層。
@@ -194,6 +199,10 @@ type Server struct {
 	// factionEndpoints 回空清單，/admin/activities/{activity_id}/factions 那一族路徑根本不掛
 	// （/admin 首段仍因帳戶與活動端點屬 API，回退行為不受影響）。
 	factions FactionUseCase
+	// members 為「活動成員與唯一檔案」用例入口（名冊與建立、暱稱編輯；可為 nil）；nil 時
+	// memberEndpoints 回空清單，/admin/activities/{activity_id}/members 那一族路徑根本不掛
+	// （/admin 首段仍因帳戶、活動與陣營端點屬 API，回退行為不受影響）。
+	members MemberUseCase
 }
 
 // New 以組態、版本字串與外部依賴建立 HTTP 服務層。
@@ -247,6 +256,9 @@ func New(cfg *config.Config, version string, deps Deps) *Server {
 		// 陣營用例為 nil 時一個端點都不掛（見 factionEndpoints）：
 		// 「裝配了什麼就服務什麼」在這一層沒有分支。
 		factions: deps.Factions,
+		// 成員用例為 nil 時一個端點都不掛（見 memberEndpoints）：
+		// 「裝配了什麼就服務什麼」在這一層沒有分支。
+		members: deps.Members,
 	}
 	s.httpSrv = &http.Server{
 		Addr:    cfg.Server.Listen,

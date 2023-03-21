@@ -102,7 +102,8 @@ func (s *Server) apiRoutes() []apiRoute {
 	// 共用一個開關就會出現「裝了帳戶目錄也順手有了活動管理面」的形態。
 	// 名冊的寫法走 NeedRoot、讀法走活動作用域判定，因此各挂一個前綴，不在同一條路徑上分方法。
 	routes = append(routes, s.activityEndpoints()...)
-	return append(routes, s.factionEndpoints()...)
+	routes = append(routes, s.factionEndpoints()...)
+	return append(routes, s.memberEndpoints()...)
 }
 
 // apiFirstSegments 從登記清單導出各端點的路徑首段集合。
