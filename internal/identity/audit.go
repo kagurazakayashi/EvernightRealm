@@ -46,7 +46,10 @@ func RootSubjectID() (idgen.ID, error) {
 //   - 系統主體 → ActorSystem（無標識，語意就是伺服器自身）；
 //   - Root → ActorRoot 帶保留標識；
 //   - 持有伺服器級管理權限的帳戶 → ActorAdmin 帶帳戶標識；
-//   - 其他帳戶 → ErrActivityScopeUnsupported：玩家／NPC 是活動內身份，未落地前不猜；
+//   - 其他帳戶 → ErrActivityScopeUnsupported：玩家／NPC 是活動內身份，未落地前不猜。
+//     「他在這場活動裡是誰」由活動域自己現讀，並經 AuditActorAsActivityMember 落成
+//     ActorPlayer（見下方那個函式的理由）——本函式不認得活動，也不會去猜一整個
+//     帳戶「在某場活動裡」是哪一個人。
 //   - 匿名 → ErrNotAuthenticated。
 func (p Principal) AuditActor() (audit.Actor, error) {
 	if err := p.validate(); err != nil {
@@ -70,6 +73,44 @@ func (p Principal) AuditActor() (audit.Actor, error) {
 	default:
 		return audit.Actor{}, fmt.Errorf("%w：匿名主體不可作為審計操作者", ErrNotAuthenticated)
 	}
+}
+
+// AuditActorAsActivityMember 把「已認證帳戶主體 ＋ 服務端現讀到的成員標識」換成
+// 活動域審計所需的玩家操作者表示（ActorPlayer）。
+//
+// 它與 AuditActor 是分開的兩句話，而且理由不同於「還沒實作」：
+//   - AuditActor 回答的是「這個主體在伺服器級是哪一類身分」——Root、系統、
+//     持有伺服器級授予的帳戶；查不出類別時它回未實現邊界，不降級成 system；
+//   - 本函式回答的是「這一次動作是以哪個活動內的玩家身份發生的」。玩家在活動內的
+//     穩定標識屬 activity_members，不在 Principal 裡，所以標識必須由呼叫端從資料庫
+//     現讀後交進來，而不是由主體自報。
+//
+// 三條約束把這件事釘成「不能自報」而不是「多了一個入口」：
+//   - memberID 只能是呼叫端（internal/activity 的自選通路）在同一個寫入交易內
+//     按（活動, 本次會話的帳戶）讀回的那一行的主鍵。請求本體沒有任何格子能填它，
+//     因此介面層拿不到可以偽造的途徑；
+//   - 零值標識一律拒：它會落地成 NULL，而 internal/audit 的校驗把「非 system 主體
+//     必須帶 actor.id」當硬規則，拿零值構造等於偽造一條查不出誰的記錄；
+//   - 只有帳戶主體有活動內的玩家身份：Root 不在 accounts 表裡、系統主體不是任何人的
+//     代理，兩者都沒有可指向的成員行。
+//
+// 一個持有 server_admin 的帳戶也可以是成員，他在這條通路上做的動作記的是玩家身份
+// 而不是管理人身份——這是誠實的映射：那次寫入動的是他自己在活動內的歸屬，
+// 而追溯得回「他是誰」由那一行的 account_id 完成（口徑同 §7「Account 是穩定帳戶身份，
+// 活動玩家身份是活動內的」）。
+func (p Principal) AuditActorAsActivityMember(memberID idgen.ID) (audit.Actor, error) {
+	if err := p.validate(); err != nil {
+		return audit.Actor{}, err
+	}
+	if memberID.IsNil() {
+		return audit.Actor{}, fmt.Errorf("%w：活動內玩家身份必須有非零值的成員標識",
+			ErrInvalidPrincipal)
+	}
+	if p.Kind() != KindAccount {
+		return audit.Actor{}, fmt.Errorf("%w：主體 %s 不是帳戶主體，沒有可指向的活動內玩家身份",
+			ErrPermissionDenied, p.String())
+	}
+	return audit.Actor{Kind: audit.ActorPlayer, ID: memberID}, nil
 }
 
 // ActivityGrants 是「這個帳戶在哪些活動裡是管理員」的可信清單。

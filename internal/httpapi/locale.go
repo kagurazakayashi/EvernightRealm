@@ -288,6 +288,30 @@ var errorMessages = map[ErrorCode]map[string]string{
 		LocaleEnUS: "This account already has a member profile in this activity, so this creation did not run — the roster gained no row, the existing profile was not overwritten, and no audit record was written. Edit that existing profile instead of creating a second one: one person has exactly one profile per activity.",
 		LocaleJaJP: "このアカウントはこの活動にすでにメンバー档案があるため、今回の作成は実行されませんでした。名簿に行は増えず、既存の档案も上書きされず、監査記録も残っていません。もう一度作成するのではなく、その既存の档案を編集してください。一人のメンバー档案は一つの活動につき一通です。",
 	},
+	CodeFactionNotAcceptingMembers: {
+		LocaleZhCN: "这个阵营已经停用，不再接收新成员，本次操作没有执行——你的归属没被改动，审计同样没记。换一个还在接收成员的阵营再试，或请活动的管理人把它重新启用：停用只会关掉新分配，既有成员的归属一律保留。",
+		LocaleZhTW: "這個陣營已經停用，不再接收新成員，本次操作沒有執行——你的歸屬沒被改動，審計同樣沒記。換一個還在接收成員的陣營再試，或請活動的管理人把它重新啟用：停用只會關掉新分配，既有成員的歸屬一律保留。",
+		LocaleEnUS: "This faction is disabled and no longer takes new members, so this operation did not run — your affiliation was not changed and no audit record was written. Pick another faction that is still open, or ask an activity manager to re-enable this one: disabling only closes new assignments and keeps every existing affiliation.",
+		LocaleJaJP: "この陣営は停止済みで新しいメンバーを受け付けないため、今回の操作は実行されませんでした。あなたの所属は変更されず、監査記録も残っていません。まだ受け付け中の別の陣営を選ぶか、活動の管理者に再有効化を依頼してください。停止は新規割り当てだけを止め、既存の所属はすべて保持されます。",
+	},
+	CodeFactionSelectDisabled: {
+		LocaleZhCN: "这场活动目前没有开放玩家自己选阵营，本次操作没有执行——什么都没改动，审计也没记。这一栏开关由该活动的管理人在活动配置里决定；在此之前，你的归属只能由管理侧的安排来改变。",
+		LocaleZhTW: "這場活動目前沒有開放玩家自己選陣營，本次操作沒有執行——什麼都沒改動，審計也沒記。這一欄開關由該活動的管理人在活動配置裡決定；在此之前，你的歸屬只能由管理側的安排來改變。",
+		LocaleEnUS: "This activity does not currently let players choose their own faction, so this operation did not run — nothing was changed and no audit record was written. That switch lives in the activity's configuration and is decided by its managers; until it is on, your affiliation changes only through the management side.",
+		LocaleJaJP: "この活動は現在、プレイヤー自身の陣営選択を開放していないため、今回の操作は実行されませんでした。何も変更されず、監査記録も残っていません。このスイッチはその活動の設定で管理者が決定します。オンになるまで、あなたの所属は管理側の操作でのみ変わります。",
+	},
+	CodeFactionSelectNotOpen: {
+		LocaleZhCN: "这场活动还在草稿阶段，尚未开放，因此现在还轮不到玩家自己选阵营——本次操作没有执行，什么都没改动。等活动开放之后再来即可；草稿期间管理人仍可为活动准备阵营与名单。",
+		LocaleZhTW: "這場活動還在草稿階段，尚未開放，因此還輪不到玩家自己選陣營——本次操作沒有執行，什麼都沒改動。等活動開放之後再來即可；草稿期間管理人仍可為活動準備陣營與名單。",
+		LocaleEnUS: "This activity is still a draft and has not opened, so player-side faction selection is not its turn yet — this operation did not run and nothing was changed. Come back once the activity opens; managers can still prepare factions and rosters during the draft.",
+		LocaleJaJP: "この活動はまだ下書き段階で開放されていないため、プレイヤー側の陣営選択の番ではありません。今回の操作は実行されず、何も変更されませんでした。活動が開放されてから再度お試しください。下書き期間でも管理者は陣営と名簿の準備ができます。",
+	},
+	CodeFactionSelectLockedIn: {
+		LocaleZhCN: "这场活动只允许玩家自己选第一次，而你已经选过阵营了，本次操作没有执行——你现在的归属保持原样，审计也没记。重读自己的现值也不会改变这个结论：要改动已经定下的归属，得由管理侧的通路处理。",
+		LocaleZhTW: "這場活動只允許玩家自己選第一次，而你已經選過陣營了，本次操作沒有執行——你現在的歸屬保持原樣，審計也沒記。重讀自己的現值也不會改變這個結論：要改動已經定下的歸屬，得由管理側的通路處理。",
+		LocaleEnUS: "This activity lets players choose only their first faction, and you have already chosen, so this operation did not run — your current affiliation stays as it is and no audit record was written. Re-reading your own state will not change that outcome: altering a settled affiliation belongs to the management side.",
+		LocaleJaJP: "この活動はプレイヤーの初回の陣営選択だけを認めていて、あなたはすでに選択済みです。そのため今回の操作は実行されず、現在の所属はそのまま、監査記録も残っていません。自分の現状を読み直してもこの結論は変わりません。確定した所属の変更は管理側の経路で行われます。",
+	},
 }
 
 // messageFor 取得錯誤碼在指定語言的使用者訊息；語言未支援或訊息為空時回退 defaultLocale。

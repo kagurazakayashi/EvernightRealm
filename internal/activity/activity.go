@@ -146,6 +146,10 @@ type Activity struct {
 	Description string
 	// Status 為當前生命週期狀態。
 	Status Status
+	// FactionSelectMode 為「這場活動允不允許玩家自己在陣營間選」的配置現值（遷移 0015）。
+	// 出廠值是 disabled：新功能不未經批準就向既有活動開放。它是活動的一欄配置，
+	// 既不是生命週期狀態，也不承載任何人的權限——玩家側通路在寫入交易內現讀它再判定。
+	FactionSelectMode FactionSelectMode
 	// CreatedByAccountID 為建立者的帳戶標識（無外鍵軟參照，口徑同審計表）。
 	// Root 建立的活動這一格是零值：Root 不在 accounts 表裡，不拿保留標識冒充帳戶。
 	CreatedByAccountID idgen.ID

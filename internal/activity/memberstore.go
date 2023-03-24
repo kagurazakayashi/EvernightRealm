@@ -222,6 +222,86 @@ func (s *Store) MemberExistsForAccount(ctx context.Context, q database.Querier,
 	return exists > 0, nil
 }
 
+// MembersByAccount 按帳戶讀回他在各場活動裡的成員行（依加入時刻倒序、標識破平）。
+//
+// 它是「我參加了哪些活動」這一讀的唯一來源：走 UNIQUE (activity_id, account_id) 的左側，
+// 一個帳戶在一場活動裡至多一行，因此這份清單裡不會出現同一個活動兩次。
+// 刻意不 JOIN activities 帶出活動名稱與狀態：那些屬活動那一張表的事實，由服務層逐行
+// 經現成的單筆讀法讀回（見 selfselect.go），於是「目錄讀到的活動」與「玩家讀到的活動」
+// 是同一份解析，不會因為這裡抄了一份欄位清單而漂移。加入時刻倒序的理由與名冊正向排相反：
+// 這一讀的場景是「我最近被拉進哪場活動」，最近的在前才不用翻。
+func (s *Store) MembersByAccount(ctx context.Context, q database.Querier,
+	accountID idgen.ID) ([]Member, error) {
+	if q == nil {
+		return nil, errors.New("member: 需要可用的資料庫連線或交易")
+	}
+	if accountID.IsNil() {
+		return nil, ErrMemberNotFound
+	}
+	rows, err := q.QueryContext(ctx, `SELECT `+memberColumns+` FROM activity_members
+		WHERE account_id = ?
+		ORDER BY created_at DESC, id DESC`, accountID.String())
+	if err != nil {
+		return nil, fmt.Errorf("member: 讀取本人成員身份失敗: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]Member, 0)
+	for rows.Next() {
+		member, err := scanMemberRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, member)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("member: 讀取本人成員身份失敗: %w", err)
+	}
+	return out, nil
+}
+
+// UpdateMemberFaction 以比較-and-set 方式編輯一個成員此刻的陣營歸屬。
+//
+// UPDATE 語句裡只出現 faction_id 與 updated_at 兩欄：身分三欄（id、activity_id、
+// account_id）、暱稱與建立時刻連一個格子都沒有，因此「換組不會順手改名或搬身份」
+// 成立在 SQL 形狀上（口徑同 UpdateMemberNickname 只碰暱稱一欄）。
+// 目標恆為非零值標識：自選通路沒有「清空歸屬」這一步（用戶批準於本步），
+// 把歸屬改回 NULL 屬管理側分配通路，今日不存在。
+// 依據值用 `IS ?` 做 NULL 安全比對：出生那一份檔案的歸屬是 NULL，
+// 「我以為他還沒分組」要能比對得動，而 `= ?` 在兩側都是 NULL 時永遠不成立。
+// 歸屬核實也寫在 WHERE 裡（activity_id）：呼叫端交來的活動與這一行所屬活動不符時
+// RowsAffected 是 0，寫入不發生——跨活動改他人的歸屬因此拿不到任何可探測的差異。
+// changed 為 false 表示現值已不是呼叫端所依據的那份（併發落敗或結果不明的補發），
+// 此時一個字都沒落，也不會留下第二條審計。
+func (s *Store) UpdateMemberFaction(ctx context.Context, q database.Querier,
+	id, activityID, factionID, expectedFactionID idgen.ID) (bool, error) {
+	if q == nil {
+		return false, errors.New("member: 需要可用的資料庫連線或交易")
+	}
+	if id.IsNil() || activityID.IsNil() || factionID.IsNil() {
+		return false, ErrMemberNotFound
+	}
+	// 零值依據值綁成 NULL：SQLite 的 IS 把 NULL 當成可比對的值，
+	// 「此刻尚未分組」與「此刻已分組」兩態才共用同一條語句。
+	var expected any
+	if !expectedFactionID.IsNil() {
+		expected = expectedFactionID.String()
+	}
+	res, err := q.ExecContext(ctx, `UPDATE activity_members
+		SET faction_id = ?, updated_at = ?
+		WHERE id = ? AND activity_id = ? AND faction_id IS ?`,
+		factionID.String(), timeutil.ToMillis(s.clock.Now()), id.String(), activityID.String(),
+		expected)
+	if err != nil {
+		return false, fmt.Errorf("member: 玩家自選陣營失敗: %w", err)
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("member: 玩家自選陣營後確認寫入筆數失敗: %w", err)
+	}
+	return affected == 1, nil
+}
+
 // UpdateMemberNickname 以比較-and-set 方式編輯成員的活動內暱稱。
 //
 // UPDATE 語句裡只出現 nickname 與 updated_at 兩欄：id、activity_id、account_id、

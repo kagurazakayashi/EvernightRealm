@@ -134,6 +134,15 @@ type Deps struct {
 	// 逐字相同，少掉的是兩條路徑（名冊與建立、暱稱編輯），不會留下一條「看得到名冊但動不了」
 	// 的半成品寫入口。分欄理由同 Factions：准入同一道閘，裝配與否各說各話。
 	Members MemberUseCase
+	// FactionSelect 為「玩家自選陣營與活動開關」用例的入口（internal/app 注入同一個
+	// *activity.Service 的自選通路）。為 nil 表示本執行檔不掛這組端點：路徑、回退清單
+	// 與錯誤面都和未掛載時逐字相同，少掉的是配置編輯那一條與玩家那三條，不會留下一條
+	// 「看得到開關但玩家還是自己選不了」的半成品寫入口。
+	// 分欄理由同 Factions 與 Members，但這一組裡兩側準入邊界本就不同：
+	// 配置那一條走活動管理面那道閘（NeedServerAdmin 加上這個活動的一行指派），
+	// 玩家那三條只認「這次請求的憑據換出的是哪一個帳戶」——同一個服務實例、
+	// 兩套判定，共用一個依賴欄位只是讓「裝配與否」有一個來源。
+	FactionSelect FactionSelectUseCase
 }
 
 // Server 為 HTTP 服務層。
@@ -203,6 +212,11 @@ type Server struct {
 	// memberEndpoints 回空清單，/admin/activities/{activity_id}/members 那一族路徑根本不掛
 	// （/admin 首段仍因帳戶、活動與陣營端點屬 API，回退行為不受影響）。
 	members MemberUseCase
+	// factionSelect 為「玩家自選陣營與活動開關」用例入口（配置編輯一條與玩家三條；可為 nil）；
+	// nil 時 factionSelectEndpoints 回空清單，/admin/activities/{activity_id}/faction-select 與
+	// /player/activities 那一族路徑根本不掛——/player 這個首段因此只在端點掛上時才屬於 API，
+	// 深連結回退（前端玩家端的路由名稱是 /player-surface，不同形）不受影響。
+	factionSelect FactionSelectUseCase
 }
 
 // New 以組態、版本字串與外部依賴建立 HTTP 服務層。
@@ -259,6 +273,9 @@ func New(cfg *config.Config, version string, deps Deps) *Server {
 		// 成員用例為 nil 時一個端點都不掛（見 memberEndpoints）：
 		// 「裝配了什麼就服務什麼」在這一層沒有分支。
 		members: deps.Members,
+		// 自選陣營用例為 nil 時一個端點都不掛（見 factionSelectEndpoints）：
+		// 「裝配了什麼就服務什麼」在這一層沒有分支。
+		factionSelect: deps.FactionSelect,
 	}
 	s.httpSrv = &http.Server{
 		Addr:    cfg.Server.Listen,

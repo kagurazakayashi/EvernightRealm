@@ -789,6 +789,11 @@ func run(ctx context.Context, releaseSignals func(), args []string, out io.Write
 		// 目標帳戶資格與審計都在它自己的交易裡現讀）。依賴欄位分開的理由同陣營
 		// （見 internal/httpapi/members.go 頭注）。
 		Members: activityService,
+		// 玩家自選陣營與活動開關：同一個 *activity.Service 的自選通路（管理側那一欄配置
+		// 走活動作用域那道閘，本人那三條走「憑據換出的那一個帳戶」＋自己的成員行）。
+		// 依賴欄位分開的理由同陣營與成員：裝配與否各說各話，少注入一邊就少那一組端點
+		// （見 internal/httpapi/factionselect.go 頭注）。
+		FactionSelect: activityService,
 		// Root 初始化狀態的只讀來源：只查組態檔本身，不開任何寫入通路
 		// （初始化仍然只有 evernight-server init-root 這一條路）。
 		InitStatus: initStatusSource(cfg),

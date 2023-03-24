@@ -125,7 +125,10 @@ func newFactionEnv(t *testing.T) *factionEnv {
 		// 成員用例與陣營用例共用同一個 *activity.Service（口徑同 internal/app 的裝配）：
 		// 這一組現場因此能同時跑陣營與名冊兩族端點。
 		Members: activityService,
-		Clock:   clock,
+		// 自選陣營一族同樣注入這一個實例（factionselect_test.go 的現場依賴這一欄：
+		// 沒注入時 /player 那三條路徑根本不掛，斷言會變成在測 404 而不是在測準入）。
+		FactionSelect: activityService,
+		Clock:         clock,
 	})
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)

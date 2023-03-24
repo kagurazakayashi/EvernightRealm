@@ -130,15 +130,20 @@ type revokeActivityManagerRequest struct{}
 // created_by_account_id 與 archived_at 走 omitempty：缺席是事實的缺席
 // （由 Root 建立而 Root 沒有帳戶標識／還沒歸檔），不拿一個讀不回任何人的標識或 1970 年冒充。
 type activityItem struct {
-	ActivityID   string `json:"activity_id"`
-	Name         string `json:"name"`
-	Description  string `json:"description"`
-	Status       string `json:"status"`
-	CreatedBy    string `json:"created_by_account_id,omitempty"`
-	ManagerCount int64  `json:"manager_count"`
-	CreatedAt    string `json:"created_at"`
-	UpdatedAt    string `json:"updated_at"`
-	ArchivedAt   string `json:"archived_at,omitempty"`
+	ActivityID  string `json:"activity_id"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Status      string `json:"status"`
+	// FactionSelectMode 是「這場活動允不允許玩家自己選陣營」的配置現值
+	// （disabled|first_only|free，出廠 disabled）。它是只增不刪的相容演進欄位：
+	// 舊版介面讀不懂它就當沒有這一格，而寫入側的通路一律由服務層現讀這一欄來判定，
+	// 不採信任何請求本體對它的宣稱（這一格在請求裡只出現在配置編輯那一條通路的依據值上）。
+	FactionSelectMode string `json:"faction_select_mode"`
+	CreatedBy         string `json:"created_by_account_id,omitempty"`
+	ManagerCount      int64  `json:"manager_count"`
+	CreatedAt         string `json:"created_at"`
+	UpdatedAt         string `json:"updated_at"`
+	ArchivedAt        string `json:"archived_at,omitempty"`
 }
 
 // activityDirectoryResponse 是 GET／HEAD /admin/activities 的回應本體。
@@ -484,13 +489,14 @@ func (s *Server) handleActivityManagerRevoke(w http.ResponseWriter, r *http.Requ
 // activityRow 把一筆活動換成回應本體（欄位白名單見 internal/activity/store.go 的讀法）。
 func activityRow(a activity.Activity) activityItem {
 	item := activityItem{
-		ActivityID:   a.ID.String(),
-		Name:         a.Name,
-		Description:  a.Description,
-		Status:       a.Status.String(),
-		ManagerCount: a.ManagerCount,
-		CreatedAt:    timeutil.FormatUTC(a.CreatedAt),
-		UpdatedAt:    timeutil.FormatUTC(a.UpdatedAt),
+		ActivityID:        a.ID.String(),
+		Name:              a.Name,
+		Description:       a.Description,
+		Status:            a.Status.String(),
+		FactionSelectMode: a.FactionSelectMode.String(),
+		ManagerCount:      a.ManagerCount,
+		CreatedAt:         timeutil.FormatUTC(a.CreatedAt),
+		UpdatedAt:         timeutil.FormatUTC(a.UpdatedAt),
 	}
 	if !a.CreatedByAccountID.IsNil() {
 		item.CreatedBy = a.CreatedByAccountID.String()

@@ -66,7 +66,8 @@ type CreateInput struct {
 
 // rowColumns 是 activities 的共用讀取欄位順序：任何一條讀法都從這裡長出來，
 // 於是「詳情讀到的」與「目錄讀到的」不可能各說各話。
-const rowColumns = `a.id, a.name, a.description, a.status, a.created_by_account_id,
+const rowColumns = `a.id, a.name, a.description, a.status, a.faction_select_mode,
+		a.created_by_account_id,
 		a.created_at, a.updated_at, a.archived_at,
 		(SELECT COUNT(*) FROM activity_manager_grants g WHERE g.activity_id = a.id)`
 
@@ -82,12 +83,13 @@ type rowScanner interface {
 func scanRow(rows rowScanner) (Activity, error) {
 	var (
 		idText, name, description, statusText string
+		modeText                              string
 		createdBy                             sql.NullString
 		createdAt, updatedAt                  int64
 		archivedAt                            sql.NullInt64
 		managers                              int64
 	)
-	if err := rows.Scan(&idText, &name, &description, &statusText, &createdBy,
+	if err := rows.Scan(&idText, &name, &description, &statusText, &modeText, &createdBy,
 		&createdAt, &updatedAt, &archivedAt, &managers); err != nil {
 		return Activity{}, fmt.Errorf("activity: 解析活動行失敗: %w", err)
 	}
@@ -100,6 +102,14 @@ func scanRow(rows rowScanner) (Activity, error) {
 		// 資料庫裡出現封閉集合之外的狀態屬資料缺陷，不能降級成「當成草稿處理」：
 		// 後者會讓一個被外部工具改壞的行繼續接受寫入。
 		return Activity{}, fmt.Errorf("%w：活動 %s 的狀態 %q 不認識: %w", ErrNotFound, idText, statusText, err)
+	}
+	mode, err := ParseFactionSelectMode(modeText)
+	if err != nil {
+		// 同上：集合外的自選模式屬資料缺陷，不能降級成「當成沒開放」——
+		// 後者會讓一個被外部工具改壞的行在玩家側既寫不進去又讀不懂，而界面會把它唸成
+		// 「管理人還沒開」，那是把資料缺陷誤報成配置現值。
+		return Activity{}, fmt.Errorf("%w：活動 %s 的自選模式 %q 不認識: %w",
+			ErrNotFound, idText, modeText, err)
 	}
 	// 建立者是軟參照：Root 建的活動這一格是 NULL（語意是「帳戶層沒有發起人」，
 	// 不是「發起人標識讀壞了」），其餘行必須讀得出正規標識——讀不出屬資料缺陷。
@@ -115,6 +125,7 @@ func scanRow(rows rowScanner) (Activity, error) {
 		Name:               name,
 		Description:        description,
 		Status:             status,
+		FactionSelectMode:  mode,
 		CreatedByAccountID: creator,
 		ManagerCount:       managers,
 		CreatedAt:          timeutil.FromMillis(createdAt),
@@ -126,7 +137,9 @@ func scanRow(rows rowScanner) (Activity, error) {
 	return a, nil
 }
 
-// Create 寫入一個新活動並回讀它。狀態恆為草稿，時刻恆為注入時鐘。
+// Create 寫入一個新活動並回讀它。狀態恆為草稿，時刻恆為注入時鐘，
+// 自選陣營模式恆為出廠值 disabled——它不在 INSERT 的欄位清單裡，走遷移 0015 的 DEFAULT：
+// 「新建的活動也不會未經批準就向玩家開放自選」與「既有活動不被自動開放」因此同一個來源。
 func (s *Store) Create(ctx context.Context, q database.Querier, in CreateInput) (Activity, error) {
 	if q == nil {
 		return Activity{}, errors.New("activity: 需要可用的資料庫連線或交易")
@@ -321,6 +334,35 @@ func (s *Store) UpdateStatus(ctx context.Context, q database.Querier, id idgen.I
 	affected, err := res.RowsAffected()
 	if err != nil {
 		return false, fmt.Errorf("activity: 轉換活動狀態後確認寫入筆數失敗: %w", err)
+	}
+	return affected == 1, nil
+}
+
+// UpdateFactionSelectMode 以比較-and-set 方式編輯活動的「玩家自選陣營」那一欄配置。
+//
+// UPDATE 語句裡只出現 faction_select_mode 與 updated_at 兩欄：狀態、名稱、描述、
+// 建立者與兩個時刻連一個格子都沒有，「改開關不會順手把活動改名或把它推到另一個狀態」
+// 成立在 SQL 形狀上（口徑同 UpdateProfile 的白名單理由）。
+// 依據值是呼叫端讀到的模式現值：兩個人對著同一份畫面先後保存配置時，落敗的那一個
+// 拿到可判別的衝突而不是「又保存了一次」——後者會在審計裡記下一件沒發生過的事。
+func (s *Store) UpdateFactionSelectMode(ctx context.Context, q database.Querier,
+	id idgen.ID, mode, expectedMode FactionSelectMode) (bool, error) {
+	if q == nil {
+		return false, errors.New("activity: 需要可用的資料庫連線或交易")
+	}
+	if id.IsNil() {
+		return false, ErrNotFound
+	}
+	res, err := q.ExecContext(ctx, `UPDATE activities
+		SET faction_select_mode = ?, updated_at = ?
+		WHERE id = ? AND faction_select_mode = ?`,
+		string(mode), timeutil.ToMillis(s.clock.Now()), id.String(), string(expectedMode))
+	if err != nil {
+		return false, fmt.Errorf("activity: 編輯自選陣營配置失敗: %w", err)
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("activity: 編輯自選陣營配置後確認寫入筆數失敗: %w", err)
 	}
 	return affected == 1, nil
 }

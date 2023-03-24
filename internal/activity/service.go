@@ -117,7 +117,8 @@ func requireNotArchived(a Activity) error {
 
 // activityRecord 產生一筆活動域的審計記錄。
 //
-// actor 只能經 principal.AuditActor() 換得，換不出就讓整個動作回滾——
+// actor 只能經 identity 那兩句話換得（Principal.AuditActor 與
+// Principal.AuditActorAsActivityMember），換不出就讓整個動作回滾——
 // 把一個換不出身分的動作記成「伺服器自己做的」，這條記錄從此失去追查價值，
 // 而且看起來像有記錄（與 internal/adminacct 的 creationRecord 同一口徑）。
 //
@@ -131,6 +132,19 @@ func (s *Service) activityRecord(principal identity.Principal, activityID idgen.
 	if err != nil {
 		return audit.Record{}, fmt.Errorf("activity: 主體無法換得審計操作者: %w", err)
 	}
+	return activityRecordWith(actor, activityID, action, targetKind, targetID, reason,
+		requestID, changes...), nil
+}
+
+// activityRecordWith 用已經換好的操作者表示湊一筆活動域審計記錄。
+//
+// 它與 activityRecord 共用同一份形狀，只差「操作者從哪句話換來」：
+// 管理人那幾條通路問的是 AuditActor（伺服器級身分），玩家自選那一條問的是
+// AuditActorAsActivityMember（活動內的玩家身分）。兩邊各自換完都彙到這裡，
+// 於是 scope、目標、原因與 changes 的構造只有一套，不會出現某一條通路的記錄少帶一欄。
+func activityRecordWith(actor audit.Actor, activityID idgen.ID,
+	action, targetKind, targetID, reason, requestID string,
+	changes ...audit.Change) audit.Record {
 	return audit.Record{
 		Scope:      audit.ScopeActivity,
 		ActivityID: activityID,
@@ -140,7 +154,7 @@ func (s *Service) activityRecord(principal identity.Principal, activityID idgen.
 		Reason:     reason,
 		RequestID:  trimRequestID(requestID),
 		Changes:    changes,
-	}, nil
+	}
 }
 
 // auditChange 湊一筆前／後摘要。

@@ -103,7 +103,11 @@ func (s *Server) apiRoutes() []apiRoute {
 	// 名冊的寫法走 NeedRoot、讀法走活動作用域判定，因此各挂一個前綴，不在同一條路徑上分方法。
 	routes = append(routes, s.activityEndpoints()...)
 	routes = append(routes, s.factionEndpoints()...)
-	return append(routes, s.memberEndpoints()...)
+	routes = append(routes, s.memberEndpoints()...)
+	// 玩家自選陣營一族（管理側那一欄配置一條、本人那三條）由自己那個依賴決定有無：
+	// /admin 首段已被帳戶與活動端點帶入 API，而 /player 是本步新增的首段，
+	// 只在這一組端點真的掛上時才屬於 API——未注入時玩家端的深連結仍照樣回退到應用外殼。
+	return append(routes, s.factionSelectEndpoints()...)
 }
 
 // apiFirstSegments 從登記清單導出各端點的路徑首段集合。
