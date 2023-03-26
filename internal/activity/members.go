@@ -189,6 +189,14 @@ func (s *Service) Members(ctx context.Context, principal identity.Principal,
 	out := make([]Member, 0, len(rows))
 	for _, row := range rows {
 		member := row
+		// 「他此刻是不是管理員身分」與顯示名、帳戶狀態同屬投影：由 internal/grant 現讀盖上，
+		// 不是 activity_members 的一欄。名冊把這一格帶出來，管理人才能看懂
+		// all_players_except_admin 那一態此刻收起來的是誰；玩家側的目錄投影從不帶它。
+		admin, err := s.adminIdentityOf(ctx, q, row.AccountID)
+		if err != nil {
+			return nil, err
+		}
+		member.AdminIdentity = admin
 		a, err := s.accounts.ByID(ctx, q, row.AccountID)
 		if err != nil {
 			if !errors.Is(err, account.ErrNotFound) {

@@ -150,6 +150,10 @@ type Activity struct {
 	// 出廠值是 disabled：新功能不未經批準就向既有活動開放。它是活動的一欄配置，
 	// 既不是生命週期狀態，也不承載任何人的權限——玩家側通路在寫入交易內現讀它再判定。
 	FactionSelectMode FactionSelectMode
+	// MemberDirectoryMode 為「這場活動的玩家目錄開放多大範圍」的配置現值（遷移 0016）。
+	// 出廠值是 hidden，與 FactionSelectMode 同一條相容規則：升級不讓任何一場舊活動裡的人
+	// 突然變得可被搜尋到。它與生命週期無關，也不約束管理視角（判定見 dirmode.go）。
+	MemberDirectoryMode DirectoryMode
 	// CreatedByAccountID 為建立者的帳戶標識（無外鍵軟參照，口徑同審計表）。
 	// Root 建立的活動這一格是零值：Root 不在 accounts 表裡，不拿保留標識冒充帳戶。
 	CreatedByAccountID idgen.ID

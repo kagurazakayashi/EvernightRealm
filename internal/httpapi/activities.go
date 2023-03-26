@@ -139,11 +139,16 @@ type activityItem struct {
 	// 舊版介面讀不懂它就當沒有這一格，而寫入側的通路一律由服務層現讀這一欄來判定，
 	// 不採信任何請求本體對它的宣稱（這一格在請求裡只出現在配置編輯那一條通路的依據值上）。
 	FactionSelectMode string `json:"faction_select_mode"`
-	CreatedBy         string `json:"created_by_account_id,omitempty"`
-	ManagerCount      int64  `json:"manager_count"`
-	CreatedAt         string `json:"created_at"`
-	UpdatedAt         string `json:"updated_at"`
-	ArchivedAt        string `json:"archived_at,omitempty"`
+	// MemberDirectoryMode 是「這場活動的玩家目錄開放多大範圍」的配置現值
+	// （hidden|same_faction_only|all_players_except_admin|all_members，出廠 hidden）。
+	// 與上一格同一條只增不刪的相容演進：舊版介面讀不懂它就當沒有這一格，
+	// 而目錄那一側的判定一律由服務層現讀這一欄來做，不採信任何請求對它的宣稱。
+	MemberDirectoryMode string `json:"member_directory_mode"`
+	CreatedBy           string `json:"created_by_account_id,omitempty"`
+	ManagerCount        int64  `json:"manager_count"`
+	CreatedAt           string `json:"created_at"`
+	UpdatedAt           string `json:"updated_at"`
+	ArchivedAt          string `json:"archived_at,omitempty"`
 }
 
 // activityDirectoryResponse 是 GET／HEAD /admin/activities 的回應本體。
@@ -489,14 +494,15 @@ func (s *Server) handleActivityManagerRevoke(w http.ResponseWriter, r *http.Requ
 // activityRow 把一筆活動換成回應本體（欄位白名單見 internal/activity/store.go 的讀法）。
 func activityRow(a activity.Activity) activityItem {
 	item := activityItem{
-		ActivityID:        a.ID.String(),
-		Name:              a.Name,
-		Description:       a.Description,
-		Status:            a.Status.String(),
-		FactionSelectMode: a.FactionSelectMode.String(),
-		ManagerCount:      a.ManagerCount,
-		CreatedAt:         timeutil.FormatUTC(a.CreatedAt),
-		UpdatedAt:         timeutil.FormatUTC(a.UpdatedAt),
+		ActivityID:          a.ID.String(),
+		Name:                a.Name,
+		Description:         a.Description,
+		Status:              a.Status.String(),
+		FactionSelectMode:   a.FactionSelectMode.String(),
+		MemberDirectoryMode: a.MemberDirectoryMode.String(),
+		ManagerCount:        a.ManagerCount,
+		CreatedAt:           timeutil.FormatUTC(a.CreatedAt),
+		UpdatedAt:           timeutil.FormatUTC(a.UpdatedAt),
 	}
 	if !a.CreatedByAccountID.IsNil() {
 		item.CreatedBy = a.CreatedByAccountID.String()

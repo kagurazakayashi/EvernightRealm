@@ -794,6 +794,12 @@ func run(ctx context.Context, releaseSignals func(), args []string, out io.Write
 		// 依賴欄位分開的理由同陣營與成員：裝配與否各說各話，少注入一邊就少那一組端點
 		// （見 internal/httpapi/factionselect.go 頭注）。
 		FactionSelect: activityService,
+		// 玩家目錄可見性：同一個 *activity.Service 的目錄通路（管理側的配置與覆蓋走
+		// 活動作用域那道閘，玩家的目錄、單筆直查與本人投影走「憑據換出的那一個帳戶」
+		// 加上服務端現讀的可見範圍）。依賴欄位分開的理由同陣營、成員與自選：
+		// 裝配與否各說各話，少注入一邊就少那一組端點
+		// （見 internal/httpapi/memberdirectory.go 頭注）。
+		MemberDirectory: activityService,
 		// Root 初始化狀態的只讀來源：只查組態檔本身，不開任何寫入通路
 		// （初始化仍然只有 evernight-server init-root 這一條路）。
 		InitStatus: initStatusSource(cfg),

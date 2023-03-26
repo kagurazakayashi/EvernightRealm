@@ -94,6 +94,14 @@ type memberItem struct {
 	// internal/activity/memberstore.go 的讀法說明）；兩者同時為空表示那一行已讀不回。
 	DisplayName   string `json:"display_name"`
 	AccountStatus string `json:"account_status"`
+	// DirectoryVisibility 是這一行的目錄覆蓋現值（inherit|hidden，出廠 inherit）。
+	// 它屬只增不刪的相容演進欄位：管理名冊把它帶出來，管理人才能看懂自己刚收起來的是哪一行；
+	// 玩家側的目錄投影從不帶它（見 internal/httpapi/memberdirectory.go 的白名單理由）。
+	DirectoryVisibility string `json:"directory_visibility"`
+	// AdminIdentity 是「這個帳戶此刻持有 server_admin 授予」的服務端現讀投影：
+	// 判據只有 internal/grant，不是暱稱或任何前端標記。它只在管理面出現，
+	// 對 all_players_except_admin 那一態而言，這一格回答的正是「被收起來的是誰」。
+	AdminIdentity bool   `json:"admin_identity"`
 	JoinedAt      string `json:"joined_at"`
 	UpdatedAt     string `json:"updated_at"`
 }
@@ -251,8 +259,11 @@ func memberRow(m activity.Member) memberItem {
 		FactionID:     factionID,
 		DisplayName:   m.DisplayName,
 		AccountStatus: m.AccountStatus.String(),
-		JoinedAt:      timeutil.FormatUTC(m.JoinedAt),
-		UpdatedAt:     timeutil.FormatUTC(m.UpdatedAt),
+		// 兩格都是服務端現讀的投影，請求本體沒有格子能填它們（帶了就在寫入通路撞 1004）。
+		DirectoryVisibility: m.DirectoryVisibility.String(),
+		AdminIdentity:       m.AdminIdentity,
+		JoinedAt:            timeutil.FormatUTC(m.JoinedAt),
+		UpdatedAt:           timeutil.FormatUTC(m.UpdatedAt),
 	}
 }
 

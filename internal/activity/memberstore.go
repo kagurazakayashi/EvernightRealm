@@ -36,7 +36,7 @@ import (
 // 逐行蓋上（見 members.go）。倉儲不 JOIN accounts，否則「指向的帳戶行已被物理清理」
 // 這種形態會被 SQL 的 INNER 語意默默吞成一筆少掉的行，而它恰恰是需要如實說出來的事。
 const memberColumns = `id, activity_id, account_id, nickname, faction_id,
-		created_at, updated_at`
+		directory_visibility, created_at, updated_at`
 
 // scanMemberRow 把一列 activity_members 讀成 Member（DisplayName／AccountStatus 留空，
 // 由服務層投影時蓋上）。
@@ -44,15 +44,19 @@ const memberColumns = `id, activity_id, account_id, nickname, faction_id,
 // faction_id 是可空欄：NULL 讀成零值標識，語意是「尚未分組」而不是「讀坏了」。
 // 反之，非 NULL 卻解析不出正規標識屬資料缺陷，不降級成「當成無陣營」——後者會把
 // 一次寫壞的行讀成一個合法的分組狀態。
+// directory_visibility 不是可空欄，但同一個道理成立：集合外取值屬資料缺陷，
+// 不降級成 inherit——後者會讓一個被外部工具改壞的行自己說話把這個玩家擴大成可見，
+// 而那恰恰是這一欄唯一被允許的方向的反面。
 func scanMemberRow(rows interface{ Scan(dest ...any) error }) (Member, error) {
 	var (
 		idText, activityIDText, accountIDText string
 		nickname                              string
+		visibilityText                        string
 		factionID                             sql.NullString
 		joinedAt, updatedAt                   int64
 	)
 	if err := rows.Scan(&idText, &activityIDText, &accountIDText, &nickname,
-		&factionID, &joinedAt, &updatedAt); err != nil {
+		&factionID, &visibilityText, &joinedAt, &updatedAt); err != nil {
 		return Member{}, fmt.Errorf("member: 解析成員行失敗: %w", err)
 	}
 	id, err := idgen.Parse(idText)
@@ -74,6 +78,12 @@ func scanMemberRow(rows interface{ Scan(dest ...any) error }) (Member, error) {
 		JoinedAt:  timeutil.FromMillis(joinedAt),
 		UpdatedAt: timeutil.FromMillis(updatedAt),
 	}
+	visibility, err := ParseDirectoryVisibility(visibilityText)
+	if err != nil {
+		return Member{}, fmt.Errorf("member: 成員行 %s 的目錄覆蓋 %q 不認識: %w",
+			idText, visibilityText, err)
+	}
+	member.DirectoryVisibility = visibility
 	if factionID.Valid {
 		faction, err := idgen.Parse(factionID.String)
 		if err != nil {
@@ -114,6 +124,8 @@ func (s *Store) CreateMember(ctx context.Context, q database.Querier,
 	}
 	now := timeutil.ToMillis(s.clock.Now())
 	// faction_id 不出現在欄位清單裡：讓它走 DEFAULT NULL，出生形態因此只有一個答案。
+	// directory_visibility 同理走 DEFAULT 'inherit'：一行成員出生時不帶任何覆蓋，
+	// 「新加入的人不會一出生就被誰藏起來，也不會一出生就繞過活動規則」兩句同時成立。
 	_, err = q.ExecContext(ctx, `INSERT INTO activity_members
 			(id, activity_id, account_id, nickname, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?)`,
@@ -298,6 +310,40 @@ func (s *Store) UpdateMemberFaction(ctx context.Context, q database.Querier,
 	affected, err := res.RowsAffected()
 	if err != nil {
 		return false, fmt.Errorf("member: 玩家自選陣營後確認寫入筆數失敗: %w", err)
+	}
+	return affected == 1, nil
+}
+
+// UpdateMemberDirectoryVisibility 以比較-and-set 方式編輯一行成員的目錄覆蓋。
+//
+// UPDATE 語句裡只出現 directory_visibility 與 updated_at 兩欄：身分三欄（id、activity_id、
+// account_id）、暱稱、陣營歸屬與建立時刻連一個格子都沒有，因此「把人收進目錄的暗處不會
+// 順手把他改名、換組或搬到別人名下」成立在 SQL 形狀上（口徑同 UpdateMemberNickname）。
+// 取值集合只有 inherit|hidden 兩態（見 dirmode.go），放寬活動規則的那一格在倉儲層就無處可填；
+// 而它也不是靠呼叫端自律——0016 的 CHECK 擋下任何繞過應用層的直寫。
+// 歸屬核實寫在 WHERE 裡（activity_id）：拿另一場活動的成員標識拼在這裡時 RowsAffected 是 0，
+// 一個字都不落，跨活動操作因此拿不到任何可探測的差異。
+// changed 為 false 表示現值已不是呼叫端所依據的那份（併發落敗或結果不明的補發），
+// 此時不會有第二條審計。
+func (s *Store) UpdateMemberDirectoryVisibility(ctx context.Context, q database.Querier,
+	id, activityID idgen.ID, visibility, expectedVisibility DirectoryVisibility) (bool, error) {
+	if q == nil {
+		return false, errors.New("member: 需要可用的資料庫連線或交易")
+	}
+	if id.IsNil() || activityID.IsNil() {
+		return false, ErrMemberNotFound
+	}
+	res, err := q.ExecContext(ctx, `UPDATE activity_members
+		SET directory_visibility = ?, updated_at = ?
+		WHERE id = ? AND activity_id = ? AND directory_visibility = ?`,
+		string(visibility), timeutil.ToMillis(s.clock.Now()), id.String(), activityID.String(),
+		string(expectedVisibility))
+	if err != nil {
+		return false, fmt.Errorf("member: 編輯成員目錄覆蓋失敗: %w", err)
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("member: 編輯成員目錄覆蓋後確認寫入筆數失敗: %w", err)
 	}
 	return affected == 1, nil
 }

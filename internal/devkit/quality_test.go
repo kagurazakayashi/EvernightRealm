@@ -82,9 +82,22 @@ func TestFrontendCheckCommand(t *testing.T) {
 	})
 }
 
+// shellStatement 把「一句殼層命令」換成該平台上真的會被整句執行的引數清單。
+//
+// 兩個殼層吃法不同：cmd 的 /c 把其餘內容當成一行命令文字，POSIX 的 -c 只取第一個操作數當
+// 命令、後面的操作數變成 $0/$1。所以 `prefix + ["exit","3"]` 在 Linux 上實際跑的是 `exit`
+// （無參，退出碼 0），測試會假通過；這裡依平台交「一句話」而不是兩個字，兩側驗的都是
+// 同一件事：非零退出碼要被寫進錯誤訊息。
+func shellStatement(prefix []string, statement string) []string {
+	args := append([]string{}, prefix...)
+	if runtime.GOOS == "windows" {
+		return append(args, strings.Fields(statement)...)
+	}
+	return append(args, statement)
+}
+
 func TestCommandRun(t *testing.T) {
 	ctx := context.Background()
-
 	// 用各平台必然存在的殼層命令當受測對象：這裡要驗的是「轉接與退出碼判定」，
 	// 不是某個真實工具鏈的行為。
 	shell := func() (string, []string) {
@@ -111,7 +124,7 @@ func TestCommandRun(t *testing.T) {
 
 	t.Run("非零退出碼寫進錯誤訊息", func(t *testing.T) {
 		exe, prefix := shell()
-		cmd := Command{Desc: "回傳 3", Exe: exe, Args: append(prefix, "exit", "3")}
+		cmd := Command{Desc: "回傳 3", Exe: exe, Args: shellStatement(prefix, "exit 3")}
 		err := cmd.Run(ctx, t.TempDir(), os.Stdout, os.Stderr)
 		if err == nil {
 			t.Fatal("非零退出碼應回傳錯誤")

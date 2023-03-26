@@ -576,21 +576,36 @@ func TestCreateIsDeterministicAcrossRuns(t *testing.T) {
 // TestCreateWritesManifestLast：清單是最後一個被寫入的檔案，
 // 因此「包裡有清單」就等於「包內其他檔案都已經就位」。
 func TestCreateWritesManifestLast(t *testing.T) {
+	// 比的是「同一個時鐘下的兩個檔案」，不是「檔案與程式內的 time.Now()」：
+	// 核心把 inode 時間戳取自它快取的粗粒度時鐘，而這台主機上那個值会比程序內的牆鐘
+	// 落後數毫秒（實測 6ms 級），於是清單明明後寫，mtime 卻可能早於刚才那次 time.Now()——
+	// 那是計時來源不同造成的假倒序，不是被測的那條順序規則壞了。兩個檔案同用一個來源，
+	// 「清單不早於快照」（同刻度時允许相等）才是這條不變式真正要說的話。
 	f := newFixture(t)
 	opts := f.options(t)
-	var order []time.Time
+	var snapshotPath string
 	opts.Snapshot = func(_ context.Context, target string) error {
-		order = append(order, time.Now())
+		snapshotPath = target
 		return os.WriteFile(target, []byte(fakeSnapshotBytes), 0o644)
 	}
 	if _, err := Create(context.Background(), opts); err != nil {
 		t.Fatal(err)
 	}
-	st, err := os.Stat(filepath.Join(f.outDir, opts.Name, ManifestName))
+	pkg := filepath.Join(f.outDir, opts.Name)
+	manifest, err := os.Stat(filepath.Join(pkg, ManifestName))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st.ModTime().Before(order[0]) {
-		t.Error("清單比快照還早寫好，代表清單可能描述著還不存在的檔案")
+	// 快照檔在發布時随暂存目錄一起改名，因此按包内的最終路徑讀它（刻意不用回調交來的旧路徑）。
+	snapshot, err := os.Stat(filepath.Join(pkg, filepath.FromSlash(DatabaseRel)))
+	if err != nil {
+		t.Fatalf("讀取包内快照失敗：%v", err)
+	}
+	if snapshotPath == "" {
+		t.Fatal("快照回調沒被叫到，這條取證沒問到順序")
+	}
+	if manifest.ModTime().Before(snapshot.ModTime()) {
+		t.Errorf("清單比快照還早寫好，代表清單可能描述著還不存在的檔案（清單 %v／快照 %v）",
+			manifest.ModTime(), snapshot.ModTime())
 	}
 }

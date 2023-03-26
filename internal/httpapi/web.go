@@ -105,9 +105,14 @@ func (s *Server) apiRoutes() []apiRoute {
 	routes = append(routes, s.factionEndpoints()...)
 	routes = append(routes, s.memberEndpoints()...)
 	// 玩家自選陣營一族（管理側那一欄配置一條、本人那三條）由自己那個依賴決定有無：
-	// /admin 首段已被帳戶與活動端點帶入 API，而 /player 是本步新增的首段，
+	// /admin 首段已被帳戶與活動端點帶入 API，而 /player 是上一步新增的首段，
 	// 只在這一組端點真的掛上時才屬於 API——未注入時玩家端的深連結仍照樣回退到應用外殼。
-	return append(routes, s.factionSelectEndpoints()...)
+	routes = append(routes, s.factionSelectEndpoints()...)
+	// 玩家目錄可見性一族（管理側的配置與覆蓋各一條、玩家的目錄／單筆直查／本人投影三條）
+	// 由自己那個依賴決定有無：兩個首段都已被上一行帶入 API，因此不新增首段、只多掛幾條路徑。
+	// 與自選那組分開注入的理由同前——同一個服務實例、兩套准入邊界，
+	// 共用一個開關就會出現「只裝配置卡也順手掛上玩家目錄讀法」的形態。
+	return append(routes, s.memberDirectoryEndpoints()...)
 }
 
 // apiFirstSegments 從登記清單導出各端點的路徑首段集合。

@@ -81,6 +81,39 @@ func ResolveFlutter(explicit string) (string, error) {
 	return "", fmt.Errorf("%w；請以 --flutter 指定路徑（查過：%s）", err, strings.Join(candidates, "、"))
 }
 
+// splitLastSegment 把路徑拆成「前綴（含尾端分隔字元）」與最後一段，兩種分隔字元都認。
+//
+// 為什麼不用 filepath.Split：本檔推導的是「同一個目錄裡另一個可執行檔」，而呼叫端交來的
+// 路徑可能屬於另一個平台——Windows 上以 --flutter 指到 /opt/flutter/bin/flutter，或
+// 在 Linux 上核對一份 Windows 工具鏈路徑（測試與跨機器的建置腳本都會這樣）。filepath 只認
+// 本平台那一種分隔字元，跨平台時整串會被當成檔名，推導就靜默失效：不報錯，只是回一個
+// 空字串或錯路徑，最後表現成「找不到 dart／gofmt，退回 PATH」，查起來像環境問題。
+func splitLastSegment(path string) (dir, base string) {
+	if i := strings.LastIndexAny(path, `/\`); i >= 0 {
+		return path[:i+1], path[i+1:]
+	}
+	return "", path
+}
+
+// extOfBase 取最後一段的副檔名（含點）；沒有點、或點在開頭（如 .hidden）時回空字串，
+// 與 filepath.Ext 的取值一致——差的部分只有「跨平台路徑也算得出來」。
+func extOfBase(base string) string {
+	if i := strings.LastIndexByte(base, '.'); i > 0 {
+		return base[i:]
+	}
+	return ""
+}
+
+// LastPathSegment 取路徑的最後一段（不含任何目錄），兩種分隔字元都認。
+//
+// 匯出的理由：進度列只要顯示「go.exe test ./...」這樣一行可複製的命令，不需要把呼叫端
+// 給的絕對路徑整串撐進去；那個需求與本套件的 dart／gofmt 同目錄推導是同一句拆法，
+// 因此在這裡只寫一份，而不是各入口自己再切一次字串。
+func LastPathSegment(path string) string {
+	_, base := splitLastSegment(path)
+	return base
+}
+
 // DartExecutable 取得與 flutter 同套工具鏈的 dart 可執行檔。
 //
 // 不直接用 PATH 上的 dart：那可能是另一套 SDK 的 dart，品質閘的結果就會和建置結果來自
@@ -104,9 +137,10 @@ func DartExecutable(flutterExe string) (string, error) {
 //
 // 保留原檔名的其他前後綴與副檔名，是為兼容 flutter／flutter.bat／flutter.exe 三種寫法。
 // 推不出來（檔名不是 flutter 開頭）時回傳空字串，交回呼叫端退回 PATH。
+// 拆路徑用 splitLastSegment 而不是 filepath.Split：見該函數頭注的跨平台理由。
 func dartAlongside(flutterExe string) string {
-	dir, base := filepath.Split(flutterExe)
-	ext := filepath.Ext(base)
+	dir, base := splitLastSegment(flutterExe)
+	ext := extOfBase(base)
 	name := strings.TrimSuffix(base, ext)
 
 	switch {
@@ -167,11 +201,12 @@ func GoFmtExecutable(goExe string) (string, error) {
 // gofmtAlongside 由 go 可執行檔路徑推得同目錄的 gofmt 路徑（純函數，便於測試）。
 //
 // 檔名不是 go 時（例如自 PATH 查出的 go1.27.1.exe，或絕對路徑寫到 bin 目錄）仍取同目錄，
-// 因為 go 與 gofmt 必在同一個 bin 裡。
+// 因為 go 與 gofmt 必在同一個 bin 裡。副檔名沿用來源那一段的寫法（.exe 或無副檔名），
+// 拆法同 dartAlongside：兩種分隔字元都要算得出來，否則跨平台時會靜默退回 PATH。
 func gofmtAlongside(goExe string) string {
-	dir, base := filepath.Split(goExe)
+	dir, base := splitLastSegment(goExe)
 	if dir == "" && base == "" {
 		return ""
 	}
-	return dir + "gofmt" + filepath.Ext(base)
+	return dir + "gofmt" + extOfBase(base)
 }

@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"path/filepath"
 	"strings"
 
 	"github.com/kagurazakayashi/EvernightRealm/internal/devkit"
@@ -83,7 +82,10 @@ func makePlan(in invocation) ([]planStep, []string, error) {
 // 撈到確切的引數比重新拼一次可靠。只取檔名，避免整列被絕對路徑撐開。
 func commandLine(cmd devkit.Command) string {
 	parts := make([]string, 0, len(cmd.Args)+1)
-	parts = append(parts, filepath.Base(cmd.Exe))
+	// 取最後一段而不是 filepath.Base：--go 可能指到另一種平台的寫法（Windows 的
+	// D:\SDK\go\bin\go.exe 或 /usr/local/go/bin/go），Base 只認本平台分隔字元時會把整串
+	// 絕對路徑塞進度列，跨平台的輸出寬度就會抖動——同一句拆法已在 devkit 有一份，這裡復用它。
+	parts = append(parts, devkit.LastPathSegment(cmd.Exe))
 	parts = append(parts, cmd.Args...)
 	return strings.Join(parts, " ")
 }

@@ -34,6 +34,7 @@ import (
 	"github.com/kagurazakayashi/EvernightRealm/internal/database/migrate"
 	"github.com/kagurazakayashi/EvernightRealm/internal/devkit"
 	"github.com/kagurazakayashi/EvernightRealm/internal/grant"
+	"github.com/kagurazakayashi/EvernightRealm/internal/guestacct"
 	"github.com/kagurazakayashi/EvernightRealm/internal/guestbind"
 	"github.com/kagurazakayashi/EvernightRealm/internal/session"
 	"github.com/kagurazakayashi/EvernightRealm/internal/stdacct"
@@ -115,6 +116,23 @@ func newFactionEnv(t *testing.T) *factionEnv {
 	if err != nil {
 		t.Fatalf("建立活動用例失敗：%v", err)
 	}
+	// 訪客進入用例：目錄那一族的現場需要一位「訪戶成員」（參加不是權限），
+	// 因此這條共用現場也注入它（口徑同 guest_test.go 的現場；守衛用寬閾值，
+	// 本檔不測頻率限制，不能让測試自己先撞在守衛上）。
+	guestGuard, err := auth.NewLoginGuard(auth.GuardConfig{
+		FailLimit: 10000, Window: time.Second, Cooldown: time.Second,
+		SourceFailLimit: 10000, MaxEntries: 100000,
+	}, clock)
+	if err != nil {
+		t.Fatalf("建立訪客守衛失敗：%v", err)
+	}
+	guestService, err := guestacct.New(guestacct.Deps{
+		DB: db, Accounts: accountsStore, Policy: policyStore, Sessions: sessions,
+		Audits: auditStore, Guard: guestGuard,
+	})
+	if err != nil {
+		t.Fatalf("建立訪客用例失敗：%v", err)
+	}
 	cfg := config.Default()
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("組態不合法：%v", err)
@@ -122,13 +140,20 @@ func newFactionEnv(t *testing.T) *factionEnv {
 	srv := New(&cfg, testVersion, Deps{
 		Auth: authService, Admins: adminService, StandardAccounts: standardService,
 		AccountPolicy: policyService, Activities: activityService, Factions: activityService,
+		// 訪客通路只在這一組現場需要（目錄要有一位訪戶成員）；注入它不改變其他檔的行為，
+		// 因為 /auth/guest 這條路徑本來就只由這一欄決定掛不掛。
+		Guest: guestService,
 		// 成員用例與陣營用例共用同一個 *activity.Service（口徑同 internal/app 的裝配）：
 		// 這一組現場因此能同時跑陣營與名冊兩族端點。
 		Members: activityService,
 		// 自選陣營一族同樣注入這一個實例（factionselect_test.go 的現場依賴這一欄：
 		// 沒注入時 /player 那三條路徑根本不掛，斷言會變成在測 404 而不是在測準入）。
 		FactionSelect: activityService,
-		Clock:         clock,
+		// 玩家目錄一族（管理側的配置與覆蓋、玩家側的目錄／直查／本人投影）同樣注入這一個
+		// 實例（memberdirectory_test.go 的現場依賴這一欄）：沒注入時 /player 那一族與
+		// /admin/.../member-directory 根本不掛，斷言會變成在測 404 而不是在測準入。
+		MemberDirectory: activityService,
+		Clock:           clock,
 	})
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)

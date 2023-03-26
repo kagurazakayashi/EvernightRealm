@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"testing"
@@ -531,8 +532,18 @@ func TestExecuteRejectsBundleThatDoesNotFit(t *testing.T) {
 }
 
 func TestExecuteRejectsPathOutsideTargetFromBundleConfig(t *testing.T) {
+	// 用「../ 逃出目標目錄」這個形態取證：兩個平台都會算出同一個越界結論。
+	// 早先這裡寫的是 `D:\\other-machine\\media`——那在 Windows 上是另一個卷（該拒），
+	// 在 Linux 上只是一段含反斜線的相對檔名（落在目標之內，本就不該拒），
+	// 於是同一條規則只在一個平台被問到。跨平台的寫法把兩件事分開：
+	// 相對逃出兩平台都測，卷標差異那一條分支只在 Windows 意義成立（見下方子測試）。
+	// 目標之外的絕對路徑（同一個磁碟、由本次測試自己的另一個 TempDir 推出來）：
+	// 兩平台都會被「逃出目標目錄」那條判定拒掉。相對的 ../ 寫法輪不到——它在 config
+	// 那一側就先被「路徑穿越拒絕」擋下，是另一條規則的另一句話。
+	// 正斜線寫法兩平台的 filepath.IsAbs 都認（Windows 也接受 C:/… 這種形態）。
+	mediaOut := filepath.ToSlash(filepath.Join(t.TempDir(), "outside-machine-media"))
 	bundle, manifest := writeBundle(t, bundleSpec{
-		ConfigYAML: "server:\n  data_dir: \".\"\nmedia: \"D:\\\\other-machine\\\\media\"\n",
+		ConfigYAML: "server:\n  data_dir: \".\"\nmedia: \"" + mediaOut + "\"\n",
 	})
 	_, err := Execute(context.Background(), options(bundle, newTarget(t, "restored"), manifest))
 	if !errors.Is(err, ErrPathOutsideTarget) {
@@ -541,6 +552,19 @@ func TestExecuteRejectsPathOutsideTargetFromBundleConfig(t *testing.T) {
 	if !strings.Contains(err.Error(), backup.ConfigRel) {
 		t.Errorf("錯誤要說出該改哪一份檔案，實際：%v", err)
 	}
+
+	t.Run("另一個卷標的絕對路徑", func(t *testing.T) {
+		if runtime.GOOS != "windows" {
+			t.Skip("卷標（D:\\）這個概念只在 Windows 存在；本平台的同一字串不是絕對路徑，\"落在目標之外\"這句話根本不成立")
+		}
+		wBundle, wManifest := writeBundle(t, bundleSpec{
+			ConfigYAML: "server:\n  data_dir: \".\"\nmedia: \"D:\\\\other-machine\\\\media\"\n",
+		})
+		if _, err := Execute(context.Background(),
+			options(wBundle, newTarget(t, "restored"), wManifest)); !errors.Is(err, ErrPathOutsideTarget) {
+			t.Fatalf("指向另一個卷的絕對路徑必須被拒，實際錯誤：%v", err)
+		}
+	})
 }
 
 func TestExecuteRejectsLandingCollision(t *testing.T) {

@@ -17,6 +17,10 @@
 //     本步沒有分配端點，因此今日所有行的這一格都是無陣營；「遷出到無陣營」同屬那一步的合同。
 //   - 訪戶也可以是成員：參加不是權限。持有 server_admin 的帳戶也可以是成員，
 //     因為成員身份從不賦予任何伺服器級權限，兩套判定各問各的來源。
+//   - 目錄覆蓋是這一行的第五欄事實（遷移 0016）：directory_visibility 只回答
+//     「其他普通玩家讀不讀得到這一行的投影」，而且只能往收緊的方向覆蓋活動那一側的
+//     模式；它不是身份、不是陣營歸屬，也永遠不構成一格能放寬活動規則的開關
+//     （判定只在 dirmode.go 那一句純函式裡，別處不重寫）。
 //
 // 一行成員不承載帳戶的事實：暱稱是活動內的展示名，登入名、口令形態、可用性一律屬
 // internal/account；名冊讀回時額外蓋上的顯示名與帳戶狀態只是「此刻那一個人的投影」，
@@ -87,6 +91,10 @@ type Member struct {
 	// 本步沒有分配端點，所有行的這一格都是零值；它存在是為了讓名冊能如實說出「沒有陣營」，
 	// 而不是讓介面把缺席讀成「讀不到」。
 	FactionID idgen.ID
+	// DirectoryVisibility 是這一行的目錄覆蓋現值（遷移 0016；出廠 inherit）。
+	// 它只往「更看不見」的方向覆蓋活動那一側的模式，永不放寬，也不約束管理視角與本人
+	// （見 dirmode.go 的第四、五條規定）。名冊與目錄的判定都讀它，因此不會有第二個來源。
+	DirectoryVisibility DirectoryVisibility
 	// DisplayName 為該帳戶此刻的顯示名（經名冊讀法從 internal/account 蓋上，非本表欄位）。
 	// 空字串是事實的缺席：軟參照指向的行已被物理清理，介面據此顯示通用句而不編造名字。
 	DisplayName string
@@ -94,6 +102,13 @@ type Member struct {
 	// 管理人名冊同一句：終態的行仍列、仍可讀，介面要能如實標示「這一行指向一個已被刪除
 	// 的帳戶」，而不是把它藏起來讓人以為查無此人。空值表示那一行已讀不回。
 	AccountStatus account.Status
+	// AdminIdentity 是該帳戶此刻是否持有 server_admin 授予的投影（經 internal/grant 現讀
+	// 盖上，非本表欄位；兩條讀法見 members.go 與 memberdirectory.go 的 adminIdentityOf）。
+	//
+	// 它是「管理員身分」在活動目錄上唯一的可判讀形態，而且判據不是暱稱、顯示名或任何
+	// 前端標記。玩家側的目錄投影從不把這一格帶出去：它只在管理名冊與 all_players_except_admin
+	// 那一句判定裡出現，否則就等于讓普通玩家多得到一枚「誰是後台的人」的可列舉信號。
+	AdminIdentity bool
 	// JoinedAt 為成員身份建立的時刻（注入時鐘；UTC）。
 	JoinedAt time.Time
 	// UpdatedAt 為最後一次改動時刻（今日只有暱稱編輯會推進；UTC）。

@@ -200,6 +200,19 @@ func testShell(t *testing.T) (string, []string) {
 	return "/bin/sh", []string{"-c"}
 }
 
+// shellStatement 把「一句殼層命令」換成該平台上真的會被整句執行的引數清單。
+//
+// cmd 的 /c 把其餘內容當成一行命令，POSIX 的 -c 只取第一個操作數當命令、其餘是 $0/$1；
+// 於是 `prefix + ["exit","7"]` 在 Linux 上跑的是無參的 `exit`（退出碼 0），測試會假通過。
+// 兩側交出去的必须是同一句話，退出碼判定才真的被問到。
+func shellStatement(prefix []string, statement string) []string {
+	args := append([]string{}, prefix...)
+	if runtime.GOOS == "windows" {
+		return append(args, strings.Fields(statement)...)
+	}
+	return append(args, statement)
+}
+
 func TestRunStepJudgesFormatGateByOutput(t *testing.T) {
 	shell, prefix := testShell(t)
 
@@ -250,7 +263,7 @@ func TestRunStepJudgesFormatGateByOutput(t *testing.T) {
 
 	t.Run("非零退出碼一律未過", func(t *testing.T) {
 		var stdout, stderr strings.Builder
-		args := append(append([]string{}, prefix...), "exit", "7")
+		args := shellStatement(prefix, "exit 7")
 		step := planStep{
 			cmd:          devkit.Command{Desc: gateFmtDesc, Exe: shell, Args: args},
 			dir:          t.TempDir(),

@@ -5,15 +5,60 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"syscall"
 	"testing"
 	"time"
 )
 
-// busyErr 造出一個判定為「占用類」的錯誤，與 Windows 實測到的 os.RemoveAll
-// 失敗同形（*PathError 包 syscall.Errno）。
+// busyErrno 回傳「本平台真的會被判定為占用類」的那個 errno。
+//
+// 兩個平台的占用是不同的數值：Windows 上刪除進行中的檔案回報原生錯誤碼 32
+// （ERROR_SHARING_VIOLATION），UNIX 上則是 ENOTEMPTY。同一個數值在另一平台上是完全
+// 不相干的 errno（POSIX 的 32 是 EPIPE），拿錯的那個造替身會得到一個詭異的結果：
+// 替身被當成「真實錯誤」直接回傳，重試路徑一步都没走到，而失敗看起來像實作壞了。
+func busyErrno() syscall.Errno {
+	if runtime.GOOS == "windows" {
+		return syscall.Errno(32)
+	}
+	return syscall.ENOTEMPTY
+}
+
+// busyErr 造出一個判定為「占用類」的錯誤，與實測到的 os.RemoveAll 失敗同形
+// （*PathError 包 syscall.Errno）。
 func busyErr(dir string) error {
-	return &os.PathError{Op: "remove", Path: dir, Err: syscall.Errno(32)}
+	return &os.PathError{Op: "remove", Path: dir, Err: busyErrno()}
+}
+
+// TestIsBusyErrorClassification 釘住「哪些錯誤算占用、哪些算真實錯誤」這道分類本身。
+//
+// 分類是 RemoveAllWithRetry 全部行為的前提：判錯方向的代價不是慢一點，而是把權限問題
+// 當成占用一直重試（拖慢並掩蓋真實錯誤），或把占用當成真實錯誤一次性報出去。
+func TestIsBusyErrorClassification(t *testing.T) {
+	for _, busy := range []syscall.Errno{syscall.EBUSY, syscall.ENOTEMPTY} {
+		if !isBusyError(&os.PathError{Op: "remove", Path: "/tmp/x", Err: busy}) {
+			t.Errorf("%v 必須算占用類（稍後重試有機會成功）", busy)
+		}
+	}
+	for _, real := range []syscall.Errno{syscall.EACCES, syscall.EPERM, syscall.EINVAL} {
+		if isBusyError(&os.PathError{Op: "remove", Path: "/tmp/x", Err: real}) {
+			t.Errorf("%v 是真實錯誤，不得被當成占用重試", real)
+		}
+	}
+	if !isBusyError(busyErr("/tmp/x")) {
+		t.Errorf("本平台自造的那枚占用錯誤必須被自己認出（替身與實測同形的保證）")
+	}
+
+	t.Run("Windows 原生共享與鎖違反碼", func(t *testing.T) {
+		if runtime.GOOS != "windows" {
+			t.Skip("32／33 這兩個原生錯誤碼只在 Windows 意義成立；本平台同樣的數字是別的 errno")
+		}
+		for _, native := range []syscall.Errno{syscall.Errno(32), syscall.Errno(33)} {
+			if !isBusyError(&os.PathError{Op: "remove", Path: `D:\x\y`, Err: native}) {
+				t.Errorf("Windows 的 %d 必須算占用類", native)
+			}
+		}
+	})
 }
 
 // TestRemoveAllWithRetryFirstSuccess 首次即成功的正常路徑：只呼叫一次 remove。
@@ -73,7 +118,7 @@ func TestRemoveAllWithRetryExhausted(t *testing.T) {
 	if calls != 4 {
 		t.Errorf("重試次數應止於上限 4，實際 %d", calls)
 	}
-	if !errors.Is(err, syscall.Errno(32)) {
+	if !errors.Is(err, busyErrno()) {
 		t.Errorf("錯誤鏈應保留最後一次占用原因，實際 %v", err)
 	}
 	// 目錄本體仍在（替身沒真的刪）：殘留路徑由呼叫端報告，這裡確認不被吞。
