@@ -112,7 +112,12 @@ func (s *Server) apiRoutes() []apiRoute {
 	// 由自己那個依賴決定有無：兩個首段都已被上一行帶入 API，因此不新增首段、只多掛幾條路徑。
 	// 與自選那組分開注入的理由同前——同一個服務實例、兩套准入邊界，
 	// 共用一個開關就會出現「只裝配置卡也順手掛上玩家目錄讀法」的形態。
-	return append(routes, s.memberDirectoryEndpoints()...)
+	routes = append(routes, s.memberDirectoryEndpoints()...)
+	// 活動標籤定義一族（管理側的列表／建立與單筆編輯各一條、玩家的公開定義清單與單笔直查
+	// 各一條）由自己那個依賴決定有無：兩個首段都已被上面幾行帶入 API，因此不新增首段、
+	// 只多掛幾條路徑。與目錄那組分開注入的理由同前——同一個服務實例、兩套准入邊界
+	// 與兩份輸出白名單，共用一個開關就會出現「只裝標籤配置也順手掛上玩家側投影」的形態。
+	return append(routes, s.tagEndpoints()...)
 }
 
 // apiFirstSegments 從登記清單導出各端點的路徑首段集合。

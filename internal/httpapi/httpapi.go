@@ -151,6 +151,14 @@ type Deps struct {
 	// 玩家那三條只認「這次請求的憑據換出的是哪一個帳戶」，可見範圍由服務端現讀判定——
 	// 同一個服務實例、兩套判定，共用一個依賴欄位只是讓「裝配與否」有一個來源。
 	MemberDirectory MemberDirectoryUseCase
+	// Tags 為「活動標籤定義與公開範圍」用例的入口（internal/app 注入同一個
+	// *activity.Service 的標籤通路）。為 nil 表示本執行檔不掛這組端點：路徑、回退清單
+	// 與錯誤面都和未掛載時逐字相同，少掉的是管理面那兩條與玩家那兩條。
+	// 分欄理由同 MemberDirectory，而且邊界差異更明顯：
+	// 管理那一族走活動管理面那道閘（NeedServerAdmin 加上這個活動的一行指派），
+	// 玩家那一族只認「這次請求的憑據換出的是哪一個帳戶」，而且輸出是另一份白名單投影——
+	// 同一個服務實例、兩套判定與兩份 DTO，共用一個依賴欄位只是讓「裝配與否」有一個來源。
+	Tags TagUseCase
 }
 
 // Server 為 HTTP 服務層。
@@ -230,6 +238,11 @@ type Server struct {
 	// .../members/{member_id}/directory-visibility 與 /player/activities/{activity_id}/members
 	// 那一族根本不掛。/player 首段是否屬於 API 仍只看「有沒有端點真的掛上」這一處來源。
 	memberDirectory MemberDirectoryUseCase
+	// tags 為「活動標籤定義與公開範圍」用例入口（管理面兩條與玩家兩條；可為 nil）；
+	// nil 時 tagEndpoints 回空清單，/admin/activities/{activity_id}/tags 那一族與
+	// /player/activities/{activity_id}/tags 那一族根本不掛。/player 首段是否屬於 API
+	// 仍只看「有沒有端點真的掛上」這一處來源。
+	tags TagUseCase
 }
 
 // New 以組態、版本字串與外部依賴建立 HTTP 服務層。
@@ -292,6 +305,9 @@ func New(cfg *config.Config, version string, deps Deps) *Server {
 		// 目錄用例為 nil 時一個端點都不掛（見 memberDirectoryEndpoints）：
 		// 「裝配了什麼就服務什麼」在這一層沒有分支。
 		memberDirectory: deps.MemberDirectory,
+		// 標籤用例為 nil 時一個端點都不掛（見 tagEndpoints）：
+		// 「裝配了什麼就服務什麼」在這一層沒有分支。
+		tags: deps.Tags,
 	}
 	s.httpSrv = &http.Server{
 		Addr:    cfg.Server.Listen,

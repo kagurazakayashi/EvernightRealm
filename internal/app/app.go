@@ -800,6 +800,12 @@ func run(ctx context.Context, releaseSignals func(), args []string, out io.Write
 		// 裝配與否各說各話，少注入一邊就少那一組端點
 		// （見 internal/httpapi/memberdirectory.go 頭注）。
 		MemberDirectory: activityService,
+		// 活動標籤定義與公開範圍：同一個 *activity.Service 的標籤通路（管理側的列表、
+		// 建立與編輯走活動作用域那道閘，玩家那一族的清單與單笔直查走「憑據換出的那一個帳戶」
+		// 加上服務端現讀的公開篩選）。依賴欄位分開的理由同陣營、成員、自選與目錄：
+		// 裝配與否各說各話，少注入一邊就少那一組端點
+		// （見 internal/httpapi/tags.go 頭注）。
+		Tags: activityService,
 		// Root 初始化狀態的只讀來源：只查組態檔本身，不開任何寫入通路
 		// （初始化仍然只有 evernight-server init-root 這一條路）。
 		InitStatus: initStatusSource(cfg),

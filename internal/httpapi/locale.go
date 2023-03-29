@@ -312,6 +312,12 @@ var errorMessages = map[ErrorCode]map[string]string{
 		LocaleEnUS: "This activity lets players choose only their first faction, and you have already chosen, so this operation did not run — your current affiliation stays as it is and no audit record was written. Re-reading your own state will not change that outcome: altering a settled affiliation belongs to the management side.",
 		LocaleJaJP: "この活動はプレイヤーの初回の陣営選択だけを認めていて、あなたはすでに選択済みです。そのため今回の操作は実行されず、現在の所属はそのまま、監査記録も残っていません。自分の現状を読み直してもこの結論は変わりません。確定した所属の変更は管理側の経路で行われます。",
 	},
+	CodeTagNameTaken: {
+		LocaleZhCN: "这场活动里已经有一枚同名的标签，本次操作没有执行——标签列表没有多出一行，原有标签也没被改动，审计同样没记。换一个名字再试即可：标签的名称只是给人看的展示值，跨活动同名互不相干，同活动内不重名是给管理人的防呆。",
+		LocaleZhTW: "這場活動裡已經有一枚同名的標籤，本次操作沒有執行——標籤列表沒有多出一行，原有標籤也沒被改動，審計同樣沒記。換一個名字再試即可：標籤的名稱只是給人看的展示值，跨活動同名互不相干，同活動內不重名是給管理人的防呆。",
+		LocaleEnUS: "Another tag in this activity already uses that name, so this operation did not run — the tag list gained no row, the existing tag was not changed, and no audit record was written. Choose a different name: a tag's name is only a display value, the same name across activities is fine, and the per-activity uniqueness exists to spare managers two indistinguishable tags.",
+		LocaleJaJP: "この活動にはすでに同じ名前のタグがあるため、今回の操作は実行されませんでした。タグ一覧に行は増えず、既存のタグも変更されず、監査記録も残っていません。別の名前をお試しください。タグの名前は表示用の値にすぎず、活動をまたいだ同名は有効で、活動内の重複禁止は管理者のための予防線です。",
+	},
 }
 
 // messageFor 取得錯誤碼在指定語言的使用者訊息；語言未支援或訊息為空時回退 defaultLocale。

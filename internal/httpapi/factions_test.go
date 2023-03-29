@@ -143,6 +143,10 @@ func newFactionEnv(t *testing.T) *factionEnv {
 		// 訪客通路只在這一組現場需要（目錄要有一位訪戶成員）；注入它不改變其他檔的行為，
 		// 因為 /auth/guest 這條路徑本來就只由這一欄決定掛不掛。
 		Guest: guestService,
+		// 訪戶綁定的三段通路（預檢／憑證／本人核銷）也要在同一組現場可用：
+		// 這一組需要反證「成員行帶著陣營歸屬時，綁定既不把歸屬搬走也不留下懸空身份」，
+		// 少注入這一欄時 /auth/guest-bindings 那一族根本不掛，斷言會變成在測 404 而不是在測邊界。
+		GuestBindings: standardService,
 		// 成員用例與陣營用例共用同一個 *activity.Service（口徑同 internal/app 的裝配）：
 		// 這一組現場因此能同時跑陣營與名冊兩族端點。
 		Members: activityService,
@@ -153,7 +157,11 @@ func newFactionEnv(t *testing.T) *factionEnv {
 		// 實例（memberdirectory_test.go 的現場依賴這一欄）：沒注入時 /player 那一族與
 		// /admin/.../member-directory 根本不掛，斷言會變成在測 404 而不是在測準入。
 		MemberDirectory: activityService,
-		Clock:           clock,
+		// 標籤定義一族（管理側的列表／建立／編輯與玩家側的公開清單／單笔直查）同樣注入這一個
+		// 實例：沒注入時 /admin/.../tags 與 /player/.../tags 根本不掛，斷言會變成在測 404
+		// 而不是在測準入（口徑同上面那幾欄）。
+		Tags:  activityService,
+		Clock: clock,
 	})
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
