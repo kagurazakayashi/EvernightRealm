@@ -95,6 +95,21 @@ type Member struct {
 	// 它只往「更看不見」的方向覆蓋活動那一側的模式，永不放寬，也不約束管理視角與本人
 	// （見 dirmode.go 的第四、五條規定）。名冊與目錄的判定都讀它，因此不會有第二個來源。
 	DirectoryVisibility DirectoryVisibility
+	// BusinessStatus 是成員此刻的業務狀態（七個內建穩定值之一；出廠 normal）。
+	// 它不是連線狀態：沒有任何 HTTP 活躍度、頁面開啟或心跳會自動改寫它。
+	BusinessStatus BusinessStatus
+	// CustomStatusID 是 business_status 為 custom 時所指的自訂狀態定義標識；
+	// 其餘六個內建狀態時為零值。成對關係由資料庫觸發器與倉儲讀法共同釘住。
+	CustomStatusID idgen.ID
+	// CustomStatusName 是自訂定義此刻的名稱投影（非本表欄位）；非 custom 狀態或定義讀不到時為空。
+	// 它是顯示值；改名不會改變 CustomStatusID，也不會改寫任何歷史引用。
+	CustomStatusName string
+	// StatusDisplayName 是業務狀態的顯示名稱現值：內建狀態取活動層級覆蓋（空字串＝使用四語言
+	// 預設文案），自訂狀態取定義名稱（定義讀不到時為空）。它永遠不是內部值。
+	StatusDisplayName string
+	// StatusAvailable 是這個狀態此刻是否仍可被選用：內建狀態恆為真；自訂狀態取定義的
+	// available 現值（定義讀不到時為假，介面據此顯示通用句而不是編一個名稱）。
+	StatusAvailable bool
 	// DisplayName 為該帳戶此刻的顯示名（經名冊讀法從 internal/account 蓋上，非本表欄位）。
 	// 空字串是事實的缺席：軟參照指向的行已被物理清理，介面據此顯示通用句而不編造名字。
 	DisplayName string

@@ -90,6 +90,9 @@ func (s *Service) CreateMember(ctx context.Context, principal identity.Principal
 		// 帳戶事實由剛才那次現讀蓋上：名冊行與建立回顯因此同一來源，而不是呼叫端的說法。
 		stored.DisplayName = target.DisplayName
 		stored.AccountStatus = target.Status
+		if err := s.fillMemberStatus(tctx, tx, []*Member{&stored}); err != nil {
+			return err
+		}
 		rec, err := s.activityRecord(principal, activityID, "member.create", "member",
 			stored.ID.String(), "管理員經已認證會話在活動內建立成員身份", requestID,
 			auditChange("account", "", accountID.String()),
@@ -213,6 +216,13 @@ func (s *Service) Members(ctx context.Context, principal identity.Principal,
 		member.AccountStatus = a.Status
 		out = append(out, member)
 	}
+	pointers := make([]*Member, len(out))
+	for i := range out {
+		pointers[i] = &out[i]
+	}
+	if err := s.fillMemberStatus(ctx, q, pointers); err != nil {
+		return nil, err
+	}
 	return out, nil
 }
 
@@ -271,6 +281,9 @@ func (s *Service) UpdateMemberNickname(ctx context.Context, principal identity.P
 			after.DisplayName = a.DisplayName
 			after.AccountStatus = a.Status
 		} else if !errors.Is(err, account.ErrNotFound) {
+			return err
+		}
+		if err := s.fillMemberStatus(tctx, tx, []*Member{&after}); err != nil {
 			return err
 		}
 		rec, err := s.activityRecord(principal, activityID, "member.update", "member",

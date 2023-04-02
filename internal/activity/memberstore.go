@@ -36,7 +36,7 @@ import (
 // 逐行蓋上（見 members.go）。倉儲不 JOIN accounts，否則「指向的帳戶行已被物理清理」
 // 這種形態會被 SQL 的 INNER 語意默默吞成一筆少掉的行，而它恰恰是需要如實說出來的事。
 const memberColumns = `id, activity_id, account_id, nickname, faction_id,
-		directory_visibility, created_at, updated_at`
+		directory_visibility, business_status, business_status_custom_id, created_at, updated_at`
 
 // scanMemberRow 把一列 activity_members 讀成 Member（DisplayName／AccountStatus 留空，
 // 由服務層投影時蓋上）。
@@ -52,11 +52,14 @@ func scanMemberRow(rows interface{ Scan(dest ...any) error }) (Member, error) {
 		idText, activityIDText, accountIDText string
 		nickname                              string
 		visibilityText                        string
+		businessStatusText                    string
+		customStatusID                        sql.NullString
 		factionID                             sql.NullString
 		joinedAt, updatedAt                   int64
 	)
 	if err := rows.Scan(&idText, &activityIDText, &accountIDText, &nickname,
-		&factionID, &visibilityText, &joinedAt, &updatedAt); err != nil {
+		&factionID, &visibilityText, &businessStatusText, &customStatusID,
+		&joinedAt, &updatedAt); err != nil {
 		return Member{}, fmt.Errorf("member: 解析成員行失敗: %w", err)
 	}
 	id, err := idgen.Parse(idText)
@@ -84,6 +87,31 @@ func scanMemberRow(rows interface{ Scan(dest ...any) error }) (Member, error) {
 			idText, visibilityText, err)
 	}
 	member.DirectoryVisibility = visibility
+	status, err := parseBusinessStatus(businessStatusText)
+	if err != nil {
+		// 集合外取值屬資料缺陷，不降級成 normal：後者會把一次寫壞的行讀成一個合法的預設狀態。
+		return Member{}, fmt.Errorf("member: 成員行 %s 的業務狀態 %q 不認識: %w",
+			idText, businessStatusText, err)
+	}
+	member.BusinessStatus = status
+	if customStatusID.Valid {
+		customStatus, err := idgen.Parse(customStatusID.String)
+		if err != nil {
+			return Member{}, fmt.Errorf("member: 成員行 %s 的自訂狀態標識 %q 不合法: %w",
+				idText, customStatusID.String, err)
+		}
+		member.CustomStatusID = customStatus
+	}
+	// custom 與自訂標識的成對關係在資料庫由觸發器釘住；讀到違反形態的行屬資料缺陷，
+	// 不猜一個合理值把它補平。
+	if member.BusinessStatus.IsCustom() && member.CustomStatusID.IsNil() {
+		return Member{}, fmt.Errorf("member: 成員行 %s 的業務狀態為 custom 卻沒有自訂狀態標識", idText)
+	}
+	if !member.BusinessStatus.IsCustom() && !member.CustomStatusID.IsNil() {
+		return Member{}, fmt.Errorf("member: 成員行 %s 的業務狀態不是 custom 卻帶自訂狀態標識", idText)
+	}
+	// 內建狀態在本步永遠可用；自訂狀態的可用性由服務層讀定義後覆蓋。
+	member.StatusAvailable = !member.BusinessStatus.IsCustom()
 	if factionID.Valid {
 		faction, err := idgen.Parse(factionID.String)
 		if err != nil {

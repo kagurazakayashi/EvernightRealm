@@ -117,7 +117,12 @@ func (s *Server) apiRoutes() []apiRoute {
 	// 各一條）由自己那個依賴決定有無：兩個首段都已被上面幾行帶入 API，因此不新增首段、
 	// 只多掛幾條路徑。與目錄那組分開注入的理由同前——同一個服務實例、兩套准入邊界
 	// 與兩份輸出白名單，共用一個開關就會出現「只裝標籤配置也順手掛上玩家側投影」的形態。
-	return append(routes, s.tagEndpoints()...)
+	routes = append(routes, s.tagEndpoints()...)
+	// 玩家業務狀態一族（狀態目錄、建立與編輯自訂定義、編輯內建顯示名稱、變更成員目前狀態）
+	// 由自己那個依賴決定有無：/admin 首段已被帳戶與活動端點帶入 API，因此不新增首段、
+	// 只多掛四條路徑。與名冊那組分開注入——名冊管的是暱稱與身份，這一組管的是業務狀態
+	// 與狀態定義；裝配了誰就服務誰。
+	return append(routes, s.playerStatusEndpoints()...)
 }
 
 // apiFirstSegments 從登記清單導出各端點的路徑首段集合。

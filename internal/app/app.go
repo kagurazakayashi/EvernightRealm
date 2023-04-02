@@ -806,6 +806,11 @@ func run(ctx context.Context, releaseSignals func(), args []string, out io.Write
 		// 裝配與否各說各話，少注入一邊就少那一組端點
 		// （見 internal/httpapi/tags.go 頭注）。
 		Tags: activityService,
+		// 玩家業務狀態與顯示名稱：同一個 *activity.Service 的狀態通路（狀態目錄、
+		// 自訂定義、內建顯示名稱與成員目前狀態變更都走活動管理作用域那道閘）。
+		// 依賴欄位分開的理由同名冊與標籤：裝配與否各說各話，少注入一邊就少那一組端點
+		// （見 internal/httpapi/playerstatus.go 頭注）。
+		PlayerStatus: activityService,
 		// Root 初始化狀態的只讀來源：只查組態檔本身，不開任何寫入通路
 		// （初始化仍然只有 evernight-server init-root 這一條路）。
 		InitStatus: initStatusSource(cfg),

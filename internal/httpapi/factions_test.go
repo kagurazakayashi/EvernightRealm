@@ -160,8 +160,12 @@ func newFactionEnv(t *testing.T) *factionEnv {
 		// 標籤定義一族（管理側的列表／建立／編輯與玩家側的公開清單／單笔直查）同樣注入這一個
 		// 實例：沒注入時 /admin/.../tags 與 /player/.../tags 根本不掛，斷言會變成在測 404
 		// 而不是在測準入（口徑同上面那幾欄）。
-		Tags:  activityService,
-		Clock: clock,
+		Tags: activityService,
+		// 玩家業務狀態一族（狀態目錄、自訂定義、顯示名稱與成員狀態變更）同樣注入這一個
+		// 實例：沒注入時 /admin/.../player-statuses 那一族根本不掛，斷言會變成在測 404
+		// 而不是在測準入（口徑同上面那幾欄）。
+		PlayerStatus: activityService,
+		Clock:        clock,
 	})
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)

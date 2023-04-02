@@ -107,7 +107,16 @@ type directoryMemberItem struct {
 	FactionIcon      string `json:"faction_icon"`
 	FactionColor     string `json:"faction_color"`
 	FactionAvailable bool   `json:"faction_available"`
-	JoinedAt         string `json:"joined_at"`
+	// BusinessStatus 是成員此刻的業務狀態內部值；它與連線在線狀態無關。
+	BusinessStatus string `json:"business_status"`
+	// CustomStatusID／CustomStatusName 只在 custom 狀態時有內容；其餘狀態為空字串。
+	CustomStatusID   string `json:"custom_status_id"`
+	CustomStatusName string `json:"custom_status_name"`
+	// StatusDisplayName 是展示用名稱（內建狀態可能為空，代表使用四語言預設文案）；
+	// StatusAvailable 是自訂狀態是否仍可用（內建恆為真）。
+	StatusDisplayName string `json:"status_display_name"`
+	StatusAvailable   bool   `json:"status_available"`
+	JoinedAt          string `json:"joined_at"`
 }
 
 // directoryFacetItem 是篩選候選的一項（計數與列表同源，見 internal/activity 的 directoryFacets）。
@@ -161,8 +170,15 @@ type ownMemberProfileResponse struct {
 	FactionColor        string `json:"faction_color"`
 	FactionAvailable    bool   `json:"faction_available"`
 	DirectoryVisibility string `json:"directory_visibility"`
-	JoinedAt            string `json:"joined_at"`
-	RequestID           string `json:"request_id"`
+	// 玩家自己的業務狀態投影：內部值、自訂標識與名稱、展示名稱、可用性。
+	// 它與連線在線狀態無關；本人資料通路不因目錄收起而隱藏這一組。
+	BusinessStatus    string `json:"business_status"`
+	CustomStatusID    string `json:"custom_status_id"`
+	CustomStatusName  string `json:"custom_status_name"`
+	StatusDisplayName string `json:"status_display_name"`
+	StatusAvailable   bool   `json:"status_available"`
+	JoinedAt          string `json:"joined_at"`
+	RequestID         string `json:"request_id"`
 }
 
 // memberDirectoryEndpoints 回傳目錄端點的登記清單；未注入用例時為空。
@@ -366,6 +382,11 @@ func (s *Server) handleOwnMemberProfile(w http.ResponseWriter, r *http.Request) 
 		FactionColor:        view.Item.FactionColor,
 		FactionAvailable:    view.Item.FactionAvailable,
 		DirectoryVisibility: view.Member.DirectoryVisibility.String(),
+		BusinessStatus:      view.Member.BusinessStatus.String(),
+		CustomStatusID:      statusIDOrEmpty(view.Member.CustomStatusID),
+		CustomStatusName:    view.Member.CustomStatusName,
+		StatusDisplayName:   view.Member.StatusDisplayName,
+		StatusAvailable:     view.Member.StatusAvailable,
 		JoinedAt:            timeutil.FormatUTC(view.Member.JoinedAt),
 		RequestID:           requestIDFromRequest(r),
 	})
@@ -401,14 +422,19 @@ func memberDirectoryPayload(page activity.DirectoryMemberPage,
 // directoryMemberRow 把一行目錄投影換成回應本體。
 func directoryMemberRow(item activity.DirectoryMember) directoryMemberItem {
 	return directoryMemberItem{
-		MemberID:         item.MemberID.String(),
-		Nickname:         item.Nickname,
-		FactionID:        factionIDOrEmpty(item.FactionID),
-		FactionName:      item.FactionName,
-		FactionIcon:      item.FactionIcon,
-		FactionColor:     item.FactionColor,
-		FactionAvailable: item.FactionAvailable,
-		JoinedAt:         timeutil.FormatUTC(item.JoinedAt),
+		MemberID:          item.MemberID.String(),
+		Nickname:          item.Nickname,
+		FactionID:         factionIDOrEmpty(item.FactionID),
+		FactionName:       item.FactionName,
+		FactionIcon:       item.FactionIcon,
+		FactionColor:      item.FactionColor,
+		FactionAvailable:  item.FactionAvailable,
+		BusinessStatus:    item.BusinessStatus.String(),
+		CustomStatusID:    statusIDOrEmpty(item.CustomStatusID),
+		CustomStatusName:  item.CustomStatusName,
+		StatusDisplayName: item.StatusDisplayName,
+		StatusAvailable:   item.StatusAvailable,
+		JoinedAt:          timeutil.FormatUTC(item.JoinedAt),
 	}
 }
 

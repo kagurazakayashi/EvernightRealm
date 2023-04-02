@@ -159,6 +159,12 @@ type Deps struct {
 	// 玩家那一族只認「這次請求的憑據換出的是哪一個帳戶」，而且輸出是另一份白名單投影——
 	// 同一個服務實例、兩套判定與兩份 DTO，共用一個依賴欄位只是讓「裝配與否」有一個來源。
 	Tags TagUseCase
+	// PlayerStatus 為「玩家業務狀態與顯示名稱」用例的入口（internal/app 注入同一個
+	// *activity.Service 的狀態通路）。為 nil 表示本執行檔不掛這組端點：路徑、回退清單
+	// 與錯誤面都和未掛載時逐字相同，少掉的是管理面的狀態目錄、自訂定義、顯示名稱與
+	// 成員狀態變更四組入口。它與 Members 分開：那一個管成員名冊與暱稱，這一個管業務狀態
+	// 與狀態定義；裝配了誰就服務誰，不讓一組缺注入時另一組默默多出能力。
+	PlayerStatus PlayerStatusUseCase
 }
 
 // Server 為 HTTP 服務層。
@@ -243,6 +249,10 @@ type Server struct {
 	// /player/activities/{activity_id}/tags 那一族根本不掛。/player 首段是否屬於 API
 	// 仍只看「有沒有端點真的掛上」這一處來源。
 	tags TagUseCase
+	// playerStatus 為「玩家業務狀態與顯示名稱」用例入口（管理面四組；可為 nil）；
+	// nil 時 playerStatusEndpoints 回空清單，狀態目錄、自訂定義、顯示名稱與成員狀態變更
+	// 四條路徑根本不掛。/admin 首段是否屬於 API 仍只看「有沒有端點真的掛上」這一處來源。
+	playerStatus PlayerStatusUseCase
 }
 
 // New 以組態、版本字串與外部依賴建立 HTTP 服務層。
@@ -308,6 +318,9 @@ func New(cfg *config.Config, version string, deps Deps) *Server {
 		// 標籤用例為 nil 時一個端點都不掛（見 tagEndpoints）：
 		// 「裝配了什麼就服務什麼」在這一層沒有分支。
 		tags: deps.Tags,
+		// 玩家狀態用例為 nil 時一個端點都不掛（見 playerStatusEndpoints）：
+		// 「裝配了什麼就服務什麼」在這一層沒有分支。
+		playerStatus: deps.PlayerStatus,
 	}
 	s.httpSrv = &http.Server{
 		Addr:    cfg.Server.Listen,

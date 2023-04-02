@@ -318,6 +318,18 @@ var errorMessages = map[ErrorCode]map[string]string{
 		LocaleEnUS: "Another tag in this activity already uses that name, so this operation did not run — the tag list gained no row, the existing tag was not changed, and no audit record was written. Choose a different name: a tag's name is only a display value, the same name across activities is fine, and the per-activity uniqueness exists to spare managers two indistinguishable tags.",
 		LocaleJaJP: "この活動にはすでに同じ名前のタグがあるため、今回の操作は実行されませんでした。タグ一覧に行は増えず、既存のタグも変更されず、監査記録も残っていません。別の名前をお試しください。タグの名前は表示用の値にすぎず、活動をまたいだ同名は有効で、活動内の重複禁止は管理者のための予防線です。",
 	},
+	CodePlayerStatusUnavailable: {
+		LocaleZhCN: "所选的自定义玩家状态已停用，不能再用于新的状态变更。既有成员保留原状态不变；若要改用别的状态，请重新读取状态列表后另选一个仍可用的状态。",
+		LocaleZhTW: "所選的自訂玩家狀態已停用，不能再用于新的狀態變更。既有成員保留原狀態不變；若要改用別的狀態，請重新讀取狀態列表後另選一個仍可用的狀態。",
+		LocaleEnUS: "The selected custom player status is disabled and cannot be used for a new status change. Existing members keep their current status; reload the status list and choose one that is still available.",
+		LocaleJaJP: "選択したカスタムプレイヤー状態は無効化されているため、新しい状態変更には使用できません。既存のメンバーは現在の状態を保持します。状態一覧を読み直し、まだ利用できる状態を選んでください。",
+	},
+	CodePlayerStatusNameTaken: {
+		LocaleZhCN: "这场活动里已经有一个同名的自定义玩家状态，本次操作没有执行——状态定义列表没有多出一行，原有定义也没被改动，审计同样没记。换一个名字再试即可：名称只是展示值，同活动内不重名是给管理人的防呆。",
+		LocaleZhTW: "這場活動裡已經有一個同名的自訂玩家狀態，本次操作沒有執行——狀態定義列表沒有多出一行，原有定義也沒被改動，審計同樣沒記。換一個名字再試即可：名稱只是展示值，同活動內不重名是給管理人的防呆。",
+		LocaleEnUS: "Another custom player status in this activity already uses that name, so this operation did not run — the definition list gained no row, the existing definition was not changed, and no audit record was written. Choose a different name: the name is only a display value, and per-activity uniqueness is a guard for managers.",
+		LocaleJaJP: "この活動にはすでに同じ名前のカスタムプレイヤー状態があるため、今回の操作は実行されませんでした。定義一覧に行は増えず、既存の定義も変更されず、監査記録も残っていません。別の名前をお試しください。名前は表示用の値にすぎず、活動内の重複禁止は管理者のための予防線です。",
+	},
 }
 
 // messageFor 取得錯誤碼在指定語言的使用者訊息；語言未支援或訊息為空時回退 defaultLocale。

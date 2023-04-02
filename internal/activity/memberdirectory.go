@@ -91,6 +91,18 @@ type DirectoryMember struct {
 	FactionAvailable bool
 	// JoinedAt 是他取得成員身份的時刻（活動內事實，非帳戶資料）。
 	JoinedAt time.Time
+	// BusinessStatus 是他此刻的業務狀態內部值（七個內建鍵之一）。
+	// 它不是連線狀態，也不會隨 HTTP 活躍度自行改變。
+	BusinessStatus BusinessStatus
+	// CustomStatusID 是自訂狀態定義的穩定標識；非 custom 狀態時為零值。
+	CustomStatusID idgen.ID
+	// CustomStatusName 是自訂定義此刻的名稱（非 custom 或定義讀不到時為空）。
+	CustomStatusName string
+	// StatusDisplayName 是展示用名稱：內建狀態取活動覆蓋（空字串＝用戶端四語言預設），
+	// 自訂狀態取定義名稱。它是顯示值，不是內部身份。
+	StatusDisplayName string
+	// StatusAvailable 是這個狀態此刻是否仍可被選用：內建恆為真，自訂取定義現值。
+	StatusAvailable bool
 }
 
 // DirectoryFacet 是篩選候選的一項：一個陣營與「此刻這個觀看者在他那邊看得见幾個人」。
@@ -300,6 +312,9 @@ func (s *Service) OwnMemberProfile(ctx context.Context, principal identity.Princ
 	q := s.db.SQL()
 	member, err := s.store.MemberByAccount(ctx, q, activityID, accountID)
 	if err != nil {
+		return OwnMemberProfileView{}, err
+	}
+	if err := s.fillMemberStatus(ctx, q, []*Member{&member}); err != nil {
 		return OwnMemberProfileView{}, err
 	}
 	a, err := s.readActivity(ctx, q, member.ActivityID)
@@ -565,6 +580,15 @@ func (s *Service) memberDirectorySnapshot(ctx context.Context, q database.Querie
 		}
 		candidates = append(candidates, candidate)
 	}
+	// 狀態投影與名冊、本人資料共用同一份填寫：顯示名稱覆蓋與自訂定義一次讀齊，
+	// 於是列表那一行與點進去那一份不可能各說一套。
+	pointers := make([]*Member, len(candidates))
+	for i := range candidates {
+		pointers[i] = &candidates[i].subject.Member
+	}
+	if err := s.fillMemberStatus(ctx, q, pointers); err != nil {
+		return memberDirectorySnapshot{}, err
+	}
 	return memberDirectorySnapshot{
 		viewer: viewer, activity: a, candidates: candidates, factions: factions,
 	}, nil
@@ -672,10 +696,15 @@ func (c memberDirectoryCandidate) item() DirectoryMember {
 // 與任何帳戶內部形態都不在清單內（管理面要那些走 /admin 名冊，那道閘不同）。
 func directoryItemOf(member Member) DirectoryMember {
 	return DirectoryMember{
-		MemberID:  member.ID,
-		Nickname:  member.Nickname,
-		FactionID: member.FactionID,
-		JoinedAt:  member.JoinedAt,
+		MemberID:          member.ID,
+		Nickname:          member.Nickname,
+		FactionID:         member.FactionID,
+		JoinedAt:          member.JoinedAt,
+		BusinessStatus:    member.BusinessStatus,
+		CustomStatusID:    member.CustomStatusID,
+		CustomStatusName:  member.CustomStatusName,
+		StatusDisplayName: member.StatusDisplayName,
+		StatusAvailable:   member.StatusAvailable,
 	}
 }
 

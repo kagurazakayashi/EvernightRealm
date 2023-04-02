@@ -101,9 +101,21 @@ type memberItem struct {
 	// AdminIdentity 是「這個帳戶此刻持有 server_admin 授予」的服務端現讀投影：
 	// 判據只有 internal/grant，不是暱稱或任何前端標記。它只在管理面出現，
 	// 對 all_players_except_admin 那一態而言，這一格回答的正是「被收起來的是誰」。
-	AdminIdentity bool   `json:"admin_identity"`
-	JoinedAt      string `json:"joined_at"`
-	UpdatedAt     string `json:"updated_at"`
+	AdminIdentity bool `json:"admin_identity"`
+	// BusinessStatus 是成員此刻的業務狀態內部值（七個內建鍵之一；出廠 normal）。
+	// 它與連線在線狀態無關：沒有任何請求、頁面開啟或心跳會自動改寫它。
+	BusinessStatus string `json:"business_status"`
+	// CustomStatusID 是自訂狀態定義的穩定標識；非 custom 狀態時為空字串。
+	CustomStatusID string `json:"custom_status_id"`
+	// CustomStatusName 是自訂定義此刻的名稱；非 custom 或讀不到定義時為空字串。
+	CustomStatusName string `json:"custom_status_name"`
+	// StatusDisplayName 是展示用名稱：內建狀態取活動覆蓋（空字串＝用戶端四語言預設），
+	// 自訂狀態取定義名稱。它是顯示值，不是內部身份，也不得被前端當成 HTML。
+	StatusDisplayName string `json:"status_display_name"`
+	// StatusAvailable 表示這個狀態此刻是否仍可被選用（內建恆為真，自訂取定義現值）。
+	StatusAvailable bool   `json:"status_available"`
+	JoinedAt        string `json:"joined_at"`
+	UpdatedAt       string `json:"updated_at"`
 }
 
 // memberListResponse 是 GET／HEAD 名冊的回應本體。
@@ -262,6 +274,11 @@ func memberRow(m activity.Member) memberItem {
 		// 兩格都是服務端現讀的投影，請求本體沒有格子能填它們（帶了就在寫入通路撞 1004）。
 		DirectoryVisibility: m.DirectoryVisibility.String(),
 		AdminIdentity:       m.AdminIdentity,
+		BusinessStatus:      m.BusinessStatus.String(),
+		CustomStatusID:      statusIDOrEmpty(m.CustomStatusID),
+		CustomStatusName:    m.CustomStatusName,
+		StatusDisplayName:   m.StatusDisplayName,
+		StatusAvailable:     m.StatusAvailable,
 		JoinedAt:            timeutil.FormatUTC(m.JoinedAt),
 		UpdatedAt:           timeutil.FormatUTC(m.UpdatedAt),
 	}
