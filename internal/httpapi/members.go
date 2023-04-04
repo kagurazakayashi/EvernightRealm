@@ -113,9 +113,18 @@ type memberItem struct {
 	// 自訂狀態取定義名稱。它是顯示值，不是內部身份，也不得被前端當成 HTML。
 	StatusDisplayName string `json:"status_display_name"`
 	// StatusAvailable 表示這個狀態此刻是否仍可被選用（內建恆為真，自訂取定義現值）。
-	StatusAvailable bool   `json:"status_available"`
-	JoinedAt        string `json:"joined_at"`
-	UpdatedAt       string `json:"updated_at"`
+	StatusAvailable bool `json:"status_available"`
+	// 六枚分項限制旗標的現值（遷移 0019，出廠恆為假）：只在管理面出現，
+	// 玩家目錄與本人資料投影從不帶它們（見 memberrestrictions.go 的白名單理由）。
+	// 每欄恆在回應、絕在請求——編輯走自己那條 restricts 通路的逐對白名單。
+	RestrictLogin       bool   `json:"restrict_login"`
+	RestrictChat        bool   `json:"restrict_chat"`
+	RestrictPrivateChat bool   `json:"restrict_private_chat"`
+	RestrictTrade       bool   `json:"restrict_trade"`
+	RestrictTransfer    bool   `json:"restrict_transfer"`
+	RestrictItemUse     bool   `json:"restrict_item_use"`
+	JoinedAt            string `json:"joined_at"`
+	UpdatedAt           string `json:"updated_at"`
 }
 
 // memberListResponse 是 GET／HEAD 名冊的回應本體。
@@ -279,6 +288,13 @@ func memberRow(m activity.Member) memberItem {
 		CustomStatusName:    m.CustomStatusName,
 		StatusDisplayName:   m.StatusDisplayName,
 		StatusAvailable:     m.StatusAvailable,
+		// 六枚限制旗標逐欄原樣出去：現值不是派生推測，管理人也才能拿它們當依據值。
+		RestrictLogin:       m.RestrictLogin,
+		RestrictChat:        m.RestrictChat,
+		RestrictPrivateChat: m.RestrictPrivateChat,
+		RestrictTrade:       m.RestrictTrade,
+		RestrictTransfer:    m.RestrictTransfer,
+		RestrictItemUse:     m.RestrictItemUse,
 		JoinedAt:            timeutil.FormatUTC(m.JoinedAt),
 		UpdatedAt:           timeutil.FormatUTC(m.UpdatedAt),
 	}

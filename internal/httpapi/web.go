@@ -122,7 +122,12 @@ func (s *Server) apiRoutes() []apiRoute {
 	// 由自己那個依賴決定有無：/admin 首段已被帳戶與活動端點帶入 API，因此不新增首段、
 	// 只多掛四條路徑。與名冊那組分開注入——名冊管的是暱稱與身份，這一組管的是業務狀態
 	// 與狀態定義；裝配了誰就服務誰。
-	return append(routes, s.playerStatusEndpoints()...)
+	routes = append(routes, s.playerStatusEndpoints()...)
+	// 玩家分項限制一族（管理側逐欄編輯一條、玩家側本人查閱一條）由自己那個依賴決定有無：
+	// 兩個首段都已被上面幾行帶入 API，因此不新增首段、只多掛兩條路徑。與狀態那組分開注入
+	// 的理由同前——同一個服務實例、兩套准入邊界；而「禁止登入」對其餘玩家通路的擋
+	// 不依賴這兩條端點存在：判定在服務層的既有讀法內，裝配邊界只圈住編輯與查閱。
+	return append(routes, s.memberRestrictionsEndpoints()...)
 }
 
 // apiFirstSegments 從登記清單導出各端點的路徑首段集合。

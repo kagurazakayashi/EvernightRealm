@@ -314,6 +314,12 @@ func (s *Service) OwnMemberProfile(ctx context.Context, principal identity.Princ
 	if err != nil {
 		return OwnMemberProfileView{}, err
 	}
+	// 本人投影也是「繼續使用該活動訪問資格」的一環：被禁止登入的人讀得到自己的
+	// 六欄限制（OwnMemberRestrictions），讀不到這份活動內資料——那一條通路是本步
+	// 為「本人獲准查看有效結果」留的唯一例外，除此之外這一族一律按現值擋下。
+	if err := checkMemberActivityAccess(member); err != nil {
+		return OwnMemberProfileView{}, err
+	}
 	if err := s.fillMemberStatus(ctx, q, []*Member{&member}); err != nil {
 		return OwnMemberProfileView{}, err
 	}
@@ -539,6 +545,12 @@ func (s *Service) memberDirectorySnapshot(ctx context.Context, q database.Querie
 	own, err := s.store.MemberByAccount(ctx, q, activityID, principal.AccountID())
 	switch {
 	case err == nil:
+		// 被禁止使用該活動訪問資格的人，在玩家族目錄前同樣被擋（2043）：
+		// 這一族讀法使用的是「他在這場活動裡的成員身份」，管理視角不是一張豁免牌——
+		// 他要以管理身份看名冊，走的是 /admin 那側由伺服器級授予判定的通路。
+		if err := checkMemberActivityAccess(own); err != nil {
+			return memberDirectorySnapshot{}, err
+		}
 		viewer.MemberID = own.ID
 		viewer.FactionID = own.FactionID
 	case errors.Is(err, ErrMemberNotFound):

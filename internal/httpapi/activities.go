@@ -533,6 +533,11 @@ func (s *Server) writeActivityCommonFailures(w http.ResponseWriter, r *http.Requ
 	switch {
 	case errors.Is(err, activity.ErrActivityNotFound), errors.Is(err, activity.ErrNotFound):
 		writeError(w, r, CodeNotFound, http.StatusNotFound)
+	case errors.Is(err, activity.ErrMemberAccessRestricted):
+		// 「在此活動的訪問資格已被限制」一句話收斂玩家族全部通路（2043）：
+		// 自選、目錄、本人資料、標籤的現讀判定都落到這裡，不各寫一套；
+		// 管理族的 /admin 判定不產出這個結論，故不受影響。
+		writeError(w, r, CodeMemberAccessRestricted, http.StatusForbidden)
 	case errors.Is(err, identity.ErrPermissionDenied):
 		writeError(w, r, CodePermissionDenied, http.StatusForbidden)
 	case errors.Is(err, identity.ErrNotAuthenticated), errors.Is(err, identity.ErrInvalidPrincipal),

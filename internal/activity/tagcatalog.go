@@ -68,7 +68,11 @@ func (s *Service) PublicTagCatalog(ctx context.Context, principal identity.Princ
 		return nil, err
 	}
 	q := s.db.SQL()
-	if _, err := s.store.MemberByAccount(ctx, q, activityID, accountID); err != nil {
+	member, err := s.store.MemberByAccount(ctx, q, activityID, accountID)
+	if err != nil {
+		return nil, err
+	}
+	if err := checkMemberActivityAccess(member); err != nil {
 		return nil, err
 	}
 	rows, err := s.store.PublicTags(ctx, q, activityID)
@@ -96,7 +100,11 @@ func (s *Service) PublicTagDetail(ctx context.Context, principal identity.Princi
 		return PublicTagItem{}, err
 	}
 	q := s.db.SQL()
-	if _, err := s.store.MemberByAccount(ctx, q, activityID, accountID); err != nil {
+	member, err := s.store.MemberByAccount(ctx, q, activityID, accountID)
+	if err != nil {
+		return PublicTagItem{}, err
+	}
+	if err := checkMemberActivityAccess(member); err != nil {
 		return PublicTagItem{}, err
 	}
 	if tagID.IsNil() {

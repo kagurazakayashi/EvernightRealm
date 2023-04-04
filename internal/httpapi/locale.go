@@ -330,6 +330,12 @@ var errorMessages = map[ErrorCode]map[string]string{
 		LocaleEnUS: "Another custom player status in this activity already uses that name, so this operation did not run — the definition list gained no row, the existing definition was not changed, and no audit record was written. Choose a different name: the name is only a display value, and per-activity uniqueness is a guard for managers.",
 		LocaleJaJP: "この活動にはすでに同じ名前のカスタムプレイヤー状態があるため、今回の操作は実行されませんでした。定義一覧に行は増えず、既存の定義も変更されず、監査記録も残っていません。別の名前をお試しください。名前は表示用の値にすぎず、活動内の重複禁止は管理者のための予防線です。",
 	},
+	CodeMemberAccessRestricted: {
+		LocaleZhCN: "你在这一场活动里的访问资格已被管理人限制，本次请求没有执行，什么都没改动。它只针对这一场活动：你的全局登录与既有会话不受影响，其他活动照常可用——这不是账户停用。想确认被限制的是哪些项，读取自己的限制状态即可；要恢复访问资格，请联系这场活动的管理人。每一次请求都会按服务端现值重新判定，恢复后的下一次请求就是新结论。",
+		LocaleZhTW: "你在這一場活動裡的訪問資格已被管理人限制，本次請求沒有執行，什麼都沒改動。它只針對這一場活動：你的全域登入與既有會話不受影響，其他活動照常可用——這不是帳戶停用。想確認被限制的是哪些項，讀取自己的限制狀態即可；要恢復訪問資格，請聯絡這場活動的管理人。每一次請求都會按服務端現值重新判定，恢復後的下一次請求就是新結論。",
+		LocaleEnUS: "Your access to this activity has been restricted by a manager, so this request did not run and nothing was changed. The restriction covers this activity only: your global sign-in and existing sessions are untouched, and other activities remain available — this is not an account suspension. Read your own restriction state to see which items apply, and contact this activity's manager to restore access. Every request is re-evaluated against the server's current values, so the next request after a restore already reflects it.",
+		LocaleJaJP: "この活動へのアクセス資格が管理者により制限されているため、今回のリクエストは実行されず、何も変更されませんでした。制限はこの活動のみに関係します：全体のログインと既存のセッションは影響を受けず、他の活動は通常どおり利用できます。これはアカウント停止ではありません。制限されている項目は自分の制限状態の読み取りで確認できます。アクセス資格の回復はこの活動の管理者にご相談ください。すべてのリクエストでサーバー側の最新値により再判定されるため、回復後の次のリクエストがそのまま新結論になります。",
+	},
 }
 
 // messageFor 取得錯誤碼在指定語言的使用者訊息；語言未支援或訊息為空時回退 defaultLocale。

@@ -96,7 +96,12 @@ type myActivityItem struct {
 	MemberID          string `json:"member_id"`
 	Nickname          string `json:"nickname"`
 	FactionID         string `json:"faction_id"`
-	JoinedAt          string `json:"joined_at"`
+	// AccessRestricted 是本人那一行 restrict_login 的服務端現值投影（遷移 0019）。
+	// 清單照舊列這一場活動——他的成員身份是事實，藏起清單項不等於限制，只是讓它難找；
+	// 但該活動其餘 /player 讀寫都會撞 2043，界面靠這一格把「訪問已被限制」說在敲壁之前。
+	// 它是派生值：恆在回應、絕在請求（口徑同 accepts_new_members 與 selectable）。
+	AccessRestricted bool   `json:"access_restricted"`
+	JoinedAt         string `json:"joined_at"`
 }
 
 // myActivityListResponse 是本人活動清單讀法的回應本體（不分頁：一個人參加的活動是小表，
@@ -290,6 +295,7 @@ func myActivityRow(entry activity.MemberActivityEntry) myActivityItem {
 		MemberID:          entry.Member.ID.String(),
 		Nickname:          entry.Member.Nickname,
 		FactionID:         factionIDOrEmpty(entry.Member.FactionID),
+		AccessRestricted:  entry.Member.RestrictLogin,
 		JoinedAt:          timeutil.FormatUTC(entry.Member.JoinedAt),
 	}
 }

@@ -23,6 +23,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/kagurazakayashi/EvernightRealm/internal/database"
 	"github.com/kagurazakayashi/EvernightRealm/internal/idgen"
@@ -36,7 +37,10 @@ import (
 // 逐行蓋上（見 members.go）。倉儲不 JOIN accounts，否則「指向的帳戶行已被物理清理」
 // 這種形態會被 SQL 的 INNER 語意默默吞成一筆少掉的行，而它恰恰是需要如實說出來的事。
 const memberColumns = `id, activity_id, account_id, nickname, faction_id,
-		directory_visibility, business_status, business_status_custom_id, created_at, updated_at`
+		directory_visibility, business_status, business_status_custom_id,
+		restrict_login, restrict_chat, restrict_private_chat,
+		restrict_trade, restrict_transfer, restrict_item_use,
+		created_at, updated_at`
 
 // scanMemberRow 把一列 activity_members 讀成 Member（DisplayName／AccountStatus 留空，
 // 由服務層投影時蓋上）。
@@ -55,10 +59,15 @@ func scanMemberRow(rows interface{ Scan(dest ...any) error }) (Member, error) {
 		businessStatusText                    string
 		customStatusID                        sql.NullString
 		factionID                             sql.NullString
+		restrictLogin, restrictChat           int64
+		restrictPrivateChat, restrictTrade    int64
+		restrictTransfer, restrictItemUse     int64
 		joinedAt, updatedAt                   int64
 	)
 	if err := rows.Scan(&idText, &activityIDText, &accountIDText, &nickname,
 		&factionID, &visibilityText, &businessStatusText, &customStatusID,
+		&restrictLogin, &restrictChat, &restrictPrivateChat,
+		&restrictTrade, &restrictTransfer, &restrictItemUse,
 		&joinedAt, &updatedAt); err != nil {
 		return Member{}, fmt.Errorf("member: 解析成員行失敗: %w", err)
 	}
@@ -80,6 +89,29 @@ func scanMemberRow(rows interface{ Scan(dest ...any) error }) (Member, error) {
 		ID: id, ActivityID: activityID, AccountID: accountID, Nickname: nickname,
 		JoinedAt:  timeutil.FromMillis(joinedAt),
 		UpdatedAt: timeutil.FromMillis(updatedAt),
+	}
+	// 六枚限制旗標逐枚核實 0/1：CHECK 已把集合外寫法擋在庫外，讀到集合外取值屬
+	// 資料缺陷，不降級成「非零就算限制」——後者會把一次寫壞的行讀成一個合法結論。
+	for _, flag := range []struct {
+		key   MemberRestrictionKey
+		value int64
+		dest  *bool
+	}{
+		{RestrictionLogin, restrictLogin, &member.RestrictLogin},
+		{RestrictionChat, restrictChat, &member.RestrictChat},
+		{RestrictionPrivateChat, restrictPrivateChat, &member.RestrictPrivateChat},
+		{RestrictionTrade, restrictTrade, &member.RestrictTrade},
+		{RestrictionTransfer, restrictTransfer, &member.RestrictTransfer},
+		{RestrictionItemUse, restrictItemUse, &member.RestrictItemUse},
+	} {
+		switch flag.value {
+		case 0:
+		case 1:
+			*flag.dest = true
+		default:
+			return Member{}, fmt.Errorf("member: 成員行 %s 的限制 %q 取值 %d 不是 0 或 1",
+				idText, flag.key.String(), flag.value)
+		}
 	}
 	visibility, err := ParseDirectoryVisibility(visibilityText)
 	if err != nil {
@@ -403,6 +435,57 @@ func (s *Store) UpdateMemberNickname(ctx context.Context, q database.Querier,
 	affected, err := res.RowsAffected()
 	if err != nil {
 		return false, fmt.Errorf("member: 編輯成員暱稱後確認寫入筆數失敗: %w", err)
+	}
+	return affected == 1, nil
+}
+
+// UpdateMemberRestrictions 以比較-and-set 方式編輯一行成員被明確選中的那幾枚分項限制。
+//
+// 「只改明確選擇的項」成立在 SQL 形狀上：SET 子句裡只出現本次提交的 restrict_* 欄，
+// 沒被提交的限制欄連一個格子都沒有，於是「取消聊天順手取消私聊」在語句層無處發生；
+// 身分三欄、暱稱、陣營歸屬、目錄覆蓋、業務狀態與建立時刻同樣不出現（口徑同
+// UpdateMemberNickname 只碰暱稱一欄）。
+// 欄位名只能經 MemberRestrictionKey.columnName 派生（封閉集合），請求字串到不了拼接處。
+// 每一枚被提交的限制都把依據值寫進 WHERE：任一欄的現值已不是提交所依據的那份時
+// RowsAffected 是 0，整個編輯一個字都不落——並發落敗者不會「半套生效」。
+// 歸屬核實也寫在 WHERE 裡（activity_id）：跨活動拼接拿不到任何可探測的差異。
+func (s *Store) UpdateMemberRestrictions(ctx context.Context, q database.Querier,
+	id, activityID idgen.ID, changes []MemberRestrictionChange) (bool, error) {
+	if q == nil {
+		return false, errors.New("member: 需要可用的資料庫連線或交易")
+	}
+	if id.IsNil() || activityID.IsNil() {
+		return false, ErrMemberNotFound
+	}
+	if len(changes) == 0 {
+		return false, ErrInvalidRestrictionUpdate
+	}
+	set := make([]string, 0, len(changes))
+	values := make([]any, 0, len(changes)+len(changes)+3)
+	for _, change := range changes {
+		set = append(set, change.Key.columnName()+" = ?")
+		values = append(values, boolToInt64(change.Value))
+	}
+	var builder strings.Builder
+	builder.WriteString(`UPDATE activity_members
+		SET `)
+	builder.WriteString(strings.Join(set, ", "))
+	builder.WriteString(`, updated_at = ?
+		WHERE id = ? AND activity_id = ?`)
+	values = append(values, timeutil.ToMillis(s.clock.Now()), id.String(), activityID.String())
+	for _, change := range changes {
+		builder.WriteString(` AND `)
+		builder.WriteString(change.Key.columnName())
+		builder.WriteString(` = ?`)
+		values = append(values, boolToInt64(change.Expected))
+	}
+	res, err := q.ExecContext(ctx, builder.String(), values...)
+	if err != nil {
+		return false, fmt.Errorf("member: 編輯成員分項限制失敗: %w", err)
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("member: 編輯成員分項限制後確認寫入筆數失敗: %w", err)
 	}
 	return affected == 1, nil
 }

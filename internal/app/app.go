@@ -811,6 +811,10 @@ func run(ctx context.Context, releaseSignals func(), args []string, out io.Write
 		// 依賴欄位分開的理由同名冊與標籤：裝配與否各說各話，少注入一邊就少那一組端點
 		// （見 internal/httpapi/playerstatus.go 頭注）。
 		PlayerStatus: activityService,
+		// 玩家分項限制與活動訪問控制：同一個 *activity.Service 的限制通路
+		// （逐欄編輯與本人查閱各一條；訪問資格的現讀判定已接進玩家族其餘讀法，
+		// 不依賴這組端點是否裝配）。分欄理由同狀態與標籤：裝配與否各說各話。
+		MemberRestrictions: activityService,
 		// Root 初始化狀態的只讀來源：只查組態檔本身，不開任何寫入通路
 		// （初始化仍然只有 evernight-server init-root 這一條路）。
 		InitStatus: initStatusSource(cfg),

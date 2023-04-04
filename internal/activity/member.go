@@ -110,6 +110,17 @@ type Member struct {
 	// StatusAvailable 是這個狀態此刻是否仍可被選用：內建狀態恆為真；自訂狀態取定義的
 	// available 現值（定義讀不到時為假，介面據此顯示通用句而不是編一個名稱）。
 	StatusAvailable bool
+	// 六枚分項限制旗標（遷移 0019，出廠恆為假）：每一枚都是這一行的獨立事實，
+	// 各改各的——取消一項不順手取消另一項（見 memberrestriction.go 檔頭第一條規定）。
+	// RestrictLogin 禁止取得或繼續使用「這一場活動」的訪問資格；它不是帳戶停用，
+	// 不碰 accounts、不停全域會話、不動其他活動。其餘五項對應的業務尚未實現，
+	// 今日只被保存與如實顯示，判定介面在 memberrestrictions.go。
+	RestrictLogin       bool
+	RestrictChat        bool
+	RestrictPrivateChat bool
+	RestrictTrade       bool
+	RestrictTransfer    bool
+	RestrictItemUse     bool
 	// DisplayName 為該帳戶此刻的顯示名（經名冊讀法從 internal/account 蓋上，非本表欄位）。
 	// 空字串是事實的缺席：軟參照指向的行已被物理清理，介面據此顯示通用句而不編造名字。
 	DisplayName string

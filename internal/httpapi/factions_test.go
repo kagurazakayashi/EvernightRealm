@@ -165,7 +165,11 @@ func newFactionEnv(t *testing.T) *factionEnv {
 		// 實例：沒注入時 /admin/.../player-statuses 那一族根本不掛，斷言會變成在測 404
 		// 而不是在測準入（口徑同上面那幾欄）。
 		PlayerStatus: activityService,
-		Clock:        clock,
+		// 分項限制一族（管理側逐欄編輯與玩家側本人查閱）同樣注入這一個實例：
+		// 沒注入時 .../members/{id}/restrictions 與 /player/.../restrictions 根本不掛，
+		// 斷言會變成在測 404 而不是在測準入（口徑同上面那幾欄）。
+		MemberRestrictions: activityService,
+		Clock:              clock,
 	})
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
