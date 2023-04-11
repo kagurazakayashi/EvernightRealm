@@ -169,7 +169,10 @@ func newFactionEnv(t *testing.T) *factionEnv {
 		// 沒注入時 .../members/{id}/restrictions 與 /player/.../restrictions 根本不掛，
 		// 斷言會變成在測 404 而不是在測準入（口徑同上面那幾欄）。
 		MemberRestrictions: activityService,
-		Clock:              clock,
+		// 能力組合判定一族（管理矩陣讀寫、成員來源摘要、本人有效能力）同樣注入
+		// 這一個實例：沒注入時三條路徑根本不掛，斷言會變成在測 404 而不是在測准入。
+		Capabilities: activityService,
+		Clock:        clock,
 	})
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)

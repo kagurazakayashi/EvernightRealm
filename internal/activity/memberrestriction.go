@@ -147,10 +147,13 @@ var (
 // MemberCapabilityRestrictedError 把「被限制的是哪一枚能力」帶在型別上。
 //
 // 將來的業務通路據 Key 各發各的碼（一枚能力一枚語意），而不是共用一句「你做不了這件事」
-// 卻答不出被擋的是哪一項。errors.Is 對 ErrMemberCapabilityRestricted 仍然成立，
-// 於是只問「有沒有被擋」的呼叫端不必先知道鍵。
+// 卻答不出被擋的是哪一項。Sources 是並列的拒絕來源（identity／lifecycle／status／manual），
+// 呼叫端可以只問「有沒有被擋」，也可以按來源決定句子；errors.Is 對
+// ErrMemberCapabilityRestricted 仍然成立。
 type MemberCapabilityRestrictedError struct {
 	Key MemberRestrictionKey
+	// Sources 是這一刻拒絕該能力的全部來源（固定順序；至少一個）。
+	Sources []CapabilitySource
 }
 
 // Error 回傳領域句；句內不帶任何帳戶或成員標識（審計與日誌另有結構化欄位）。

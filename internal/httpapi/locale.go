@@ -336,6 +336,12 @@ var errorMessages = map[ErrorCode]map[string]string{
 		LocaleEnUS: "Your access to this activity has been restricted by a manager, so this request did not run and nothing was changed. The restriction covers this activity only: your global sign-in and existing sessions are untouched, and other activities remain available — this is not an account suspension. Read your own restriction state to see which items apply, and contact this activity's manager to restore access. Every request is re-evaluated against the server's current values, so the next request after a restore already reflects it.",
 		LocaleJaJP: "この活動へのアクセス資格が管理者により制限されているため、今回のリクエストは実行されず、何も変更されませんでした。制限はこの活動のみに関係します：全体のログインと既存のセッションは影響を受けず、他の活動は通常どおり利用できます。これはアカウント停止ではありません。制限されている項目は自分の制限状態の読み取りで確認できます。アクセス資格の回復はこの活動の管理者にご相談ください。すべてのリクエストでサーバー側の最新値により再判定されるため、回復後の次のリクエストがそのまま新結論になります。",
 	},
+	CodeMemberStatusRestricted: {
+		LocaleZhCN: "你在这一场活动里的访问资格被当前业务状态规则拒绝，本次请求没有执行，什么都没改动。它不是账户停用：你的全局登录、既有会话与其他活动都不受影响。想确认被拒绝的是哪些能力以及来源，读取自己的有效能力即可；业务状态由管理人维护，请联系这场活动的管理人。每一次请求都会按服务端现值重新判定，状态改变后的下一次请求就是新结论。",
+		LocaleZhTW: "你在這一場活動裡的訪問資格被目前業務狀態規則拒絕，本次請求沒有執行，什麼都沒改動。它不是帳戶停用：你的全域登入、既有會話與其他活動都不受影響。想確認被拒絕的是哪些能力以及來源，讀取自己的有效能力即可；業務狀態由管理人維護，請聯絡這場活動的管理人。每一次請求都會按服務端現值重新判定，狀態改變後的下一次請求就是新結論。",
+		LocaleEnUS: "Your access to this activity is denied by the current business-status rules, so this request did not run and nothing was changed. This is not an account suspension: your global sign-in, existing sessions and other activities are unaffected. Read your own effective capabilities to see which items are denied and which source applies; the status is maintained by a manager, so contact this activity's manager. Every request is re-evaluated against the server's current values, and the next request after a status change already reflects it.",
+		LocaleJaJP: "この活動へのアクセス資格は現在の業務状態ルールにより拒否されたため、今回のリクエストは実行されず、何も変更されませんでした。これはアカウント停止ではありません：全体のログイン、既存のセッション、他の活動には影響しません。拒否された能力とその出所は、自分の有効な能力の読み取りで確認できます。業務状態は管理者が維持するため、この活動の管理者にご相談ください。すべてのリクエストでサーバー側の最新値により再判定されるため、状態変更後の次のリクエストがそのまま新結論になります。",
+	},
 }
 
 // messageFor 取得錯誤碼在指定語言的使用者訊息；語言未支援或訊息為空時回退 defaultLocale。

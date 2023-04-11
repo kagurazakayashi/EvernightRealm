@@ -171,6 +171,12 @@ type Deps struct {
 	// 分欄理由同狀態與標籤：裝配與否各說各話；注意「擋」不依賴這組端點——玩家族其餘
 	// 通路的訪問判定在服務層現讀，與本依賴是否注入無關（見 memberrestrictions.go 頭注）。
 	MemberRestrictions MemberRestrictionUseCase
+	// Capabilities 為「狀態規則與手動限制的組合判定」用例的入口（internal/app 注入同一個
+	// *activity.Service 的能力通路）。為 nil 表示本執行檔不掛這組端點：路徑、回退清單
+	// 與錯誤面都和未掛載時逐字相同，少掉的是管理側的規則讀寫、成員來源摘要與本人摘要三條。
+	// 注意「擋」不依賴這組端點——玩家族其餘通路的訪問判定在服務層現讀，
+	// 與本依賴是否裝配無關（口徑同 MemberRestrictions）。
+	Capabilities CapabilityUseCase
 }
 
 // Server 為 HTTP 服務層。
@@ -264,6 +270,10 @@ type Server struct {
 	// .../members/{member_id}/restrictions 與 /player/activities/{activity_id}/restrictions
 	// 兩條路徑根本不掛。訪問資格的擋不取決於這一欄：判定在服務層，端點只負責編輯與查閱。
 	memberRestrictions MemberRestrictionUseCase
+	// capabilities 為「狀態規則與手動限制的組合判定」用例入口（管理規則讀寫、
+	// 管理來源摘要與本人摘要；可為 nil）；nil 時 capabilityEndpoints 回空清單，
+	// 三條路徑根本不掛。/player 首段是否屬於 API 仍只看「有沒有端點真的掛上」這一處來源。
+	capabilities CapabilityUseCase
 }
 
 // New 以組態、版本字串與外部依賴建立 HTTP 服務層。
@@ -335,6 +345,9 @@ func New(cfg *config.Config, version string, deps Deps) *Server {
 		// 分項限制用例為 nil 時一個端點都不掛（見 memberRestrictionsEndpoints）：
 		// 「裝配了什麼就服務什麼」在這一層沒有分支。
 		memberRestrictions: deps.MemberRestrictions,
+		// 能力組合判定用例為 nil 時一個端點都不掛（見 capabilityEndpoints）：
+		// 「裝配了什麼就服務什麼」在這一層沒有分支。
+		capabilities: deps.Capabilities,
 	}
 	s.httpSrv = &http.Server{
 		Addr:    cfg.Server.Listen,

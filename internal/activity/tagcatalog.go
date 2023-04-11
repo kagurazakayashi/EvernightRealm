@@ -72,7 +72,7 @@ func (s *Service) PublicTagCatalog(ctx context.Context, principal identity.Princ
 	if err != nil {
 		return nil, err
 	}
-	if err := checkMemberActivityAccess(member); err != nil {
+	if err := s.checkMemberActivityAccess(ctx, q, member); err != nil {
 		return nil, err
 	}
 	rows, err := s.store.PublicTags(ctx, q, activityID)
@@ -104,7 +104,7 @@ func (s *Service) PublicTagDetail(ctx context.Context, principal identity.Princi
 	if err != nil {
 		return PublicTagItem{}, err
 	}
-	if err := checkMemberActivityAccess(member); err != nil {
+	if err := s.checkMemberActivityAccess(ctx, q, member); err != nil {
 		return PublicTagItem{}, err
 	}
 	if tagID.IsNil() {

@@ -104,7 +104,7 @@ func (s *Service) MyFactionSelection(ctx context.Context,
 	}
 	// 訪問判定排在讀到自己的行之後、湊候選清單之前：被限制的人對這一族的回答
 	// 只有一句話（2043），而查無與跨活動仍然先收斂成 1001 那句不可分辨的話。
-	if err := checkMemberActivityAccess(member); err != nil {
+	if err := s.checkMemberActivityAccess(ctx, q, member); err != nil {
 		return FactionSelectionView{}, err
 	}
 	a, err := s.readActivity(ctx, q, member.ActivityID)
@@ -174,7 +174,7 @@ func (s *Service) SelectOwnFaction(ctx context.Context, principal identity.Princ
 		}
 		// 訪問資格與其餘規則同在這一筆交易內現讀：單寫者串行下，
 		// 「剛被設成禁止登入」與「這次自選」不會各拿一份舊快照（口徑同時機判定與停用核實）。
-		if err := checkMemberActivityAccess(before); err != nil {
+		if err := s.checkMemberActivityAccess(tctx, tx, before); err != nil {
 			return err
 		}
 		if err := ensureFactionSelectTiming(a); err != nil {

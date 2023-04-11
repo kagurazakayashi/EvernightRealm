@@ -538,6 +538,10 @@ func (s *Server) writeActivityCommonFailures(w http.ResponseWriter, r *http.Requ
 		// 自選、目錄、本人資料、標籤的現讀判定都落到這裡，不各寫一套；
 		// 管理族的 /admin 判定不產出這個結論，故不受影響。
 		writeError(w, r, CodeMemberAccessRestricted, http.StatusForbidden)
+	case errors.Is(err, activity.ErrMemberStatusRestricted):
+		// 狀態規則拒絕 login 是另一句話（2044）：手動限制仍走 2043，
+		// 兩者同時存在時服務層先回手動那一句；本人的能力摘要並列兩個來源。
+		writeError(w, r, CodeMemberStatusRestricted, http.StatusForbidden)
 	case errors.Is(err, identity.ErrPermissionDenied):
 		writeError(w, r, CodePermissionDenied, http.StatusForbidden)
 	case errors.Is(err, identity.ErrNotAuthenticated), errors.Is(err, identity.ErrInvalidPrincipal),

@@ -815,6 +815,10 @@ func run(ctx context.Context, releaseSignals func(), args []string, out io.Write
 		// （逐欄編輯與本人查閱各一條；訪問資格的現讀判定已接進玩家族其餘讀法，
 		// 不依賴這組端點是否裝配）。分欄理由同狀態與標籤：裝配與否各說各話。
 		MemberRestrictions: activityService,
+		// 狀態規則與手動限制的組合判定：同一個 *activity.Service 的能力通路
+		// （管理側矩陣讀寫與來源摘要、本人有效能力各一條；玩家族既有通路的
+		// 訪問判定已接進服務層，不依賴這組端點是否裝配）。分欄理由同狀態與限制。
+		Capabilities: activityService,
 		// Root 初始化狀態的只讀來源：只查組態檔本身，不開任何寫入通路
 		// （初始化仍然只有 evernight-server init-root 這一條路）。
 		InitStatus: initStatusSource(cfg),

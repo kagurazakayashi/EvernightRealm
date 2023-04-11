@@ -52,13 +52,22 @@ func (s *Service) EnsureMemberActivityAccess(ctx context.Context, q database.Que
 	return s.EnsureMemberCapability(ctx, q, activityID, accountID, RestrictionLogin)
 }
 
-// EnsureMemberCapability 是六項分項限制的統一能力判定介面。
+// EnsureMemberCapability 是六項分項限制與狀態規則的統一能力判定介面。
 //
-// 限制檢查與事務邊界：本步已接通的只有 login（玩家族各讀法與自選寫入在
-// 自己的連線或交易內現讀本判定）；其餘五枚今日沒有任何呼叫端——聊天、私聊、
-// 交易、轉賬與使用物品的業務都還沒有實現，這裡交付的是判定介面與領域測試，
-// 不是「業務已被保護」的證據。將來的每一條業務通路要在自己的寫入交易內呼叫本函式，
-// 並為被擋的那一句發自己的碼（今日無端點，故不發碼，口徑同「沒有端點就不發機器錯誤碼」）。
+// 判定在同一次現讀裡合併四個來源，任何一個拒絕即拒絕：
+//   - identity：成員行讀不到（原樣上拋 ErrMemberNotFound）或成員指向的帳戶此刻
+//     不是可用的普通／訪戶身份；
+//   - lifecycle：活動停止或歸檔時拒絕五項業務能力，login 不受它影響（仍可查看）；
+//   - status：當前業務狀態的能力矩陣（每個活動一份，現讀，無快取）；
+//   - manual：成員行上同名的分項限制旗標。
+//
+// login 的對外順序：身份失效先答（前置拒絕），其後是已批准的手動先於狀態
+// （2043 先於 2044）；兩者同時存在時回 2043，能力摘要仍並列列出兩個來源。
+// 其餘五項回帶鍵與來源的型別錯誤，將來的業務通路據自己的語意發碼——
+// 今日沒有端點，故不發碼。
+//
+// 將來的每一條業務通路必須在自己的寫入交易內呼叫本函式（q 傳那個 *database.Tx），
+// 讓「檢查時的現值」與「隨後那筆寫入」看見同一個快照。
 func (s *Service) EnsureMemberCapability(ctx context.Context, q database.Querier,
 	activityID, accountID idgen.ID, key MemberRestrictionKey) (Member, error) {
 	if !key.valid() {
@@ -69,6 +78,36 @@ func (s *Service) EnsureMemberCapability(ctx context.Context, q database.Querier
 	if err != nil {
 		return Member{}, err
 	}
+	a, err := s.readActivity(ctx, q, activityID)
+	if err != nil {
+		return Member{}, err
+	}
+	rules, err := s.store.CapabilityRuleSet(ctx, q, activityID)
+	if err != nil {
+		return Member{}, err
+	}
+	if !member.BusinessStatus.valid() {
+		return Member{}, fmt.Errorf("capability: 成員 %s 的業務狀態 %q 不在內建集合內",
+			member.ID.String(), member.BusinessStatus.String())
+	}
+
+	identityDenied := false
+	if acct, err := s.accounts.ByID(ctx, q, accountID); err != nil {
+		if !errors.Is(err, account.ErrNotFound) {
+			return Member{}, err
+		}
+		identityDenied = true
+	} else {
+		switch acct.Type {
+		case account.TypeStandard, account.TypeGuest:
+		default:
+			identityDenied = true
+		}
+		if acct.Status != account.StatusActive {
+			identityDenied = true
+		}
+	}
+
 	restricted, ok := member.RestrictionValue(key)
 	if !ok {
 		// RestrictionValue 的 ok 只可能因封閉集合漂移而出假；這裡如實報錯，
@@ -76,23 +115,60 @@ func (s *Service) EnsureMemberCapability(ctx context.Context, q database.Querier
 		return Member{}, fmt.Errorf("%w：限制鍵 %q 在領域層讀不到對應欄位",
 			ErrInvalidRestrictionUpdate, string(key))
 	}
-	if restricted {
-		if key == RestrictionLogin {
-			return Member{}, ErrMemberAccessRestricted
-		}
-		return Member{}, &MemberCapabilityRestrictedError{Key: key}
+	statusDenied := rules.Denied(member.BusinessStatus, key)
+	lifecycleDenied := key != RestrictionLogin && !a.Status.AllowsBusinessWrites()
+
+	sources := make([]CapabilitySource, 0, len(capabilitySourceOrder))
+	if identityDenied {
+		sources = append(sources, CapabilitySourceIdentity)
 	}
-	return member, nil
+	if lifecycleDenied {
+		sources = append(sources, CapabilitySourceLifecycle)
+	}
+	if statusDenied {
+		sources = append(sources, CapabilitySourceStatus)
+	}
+	if restricted {
+		sources = append(sources, CapabilitySourceManual)
+	}
+	if len(sources) == 0 {
+		return member, nil
+	}
+	if key == RestrictionLogin {
+		switch {
+		case identityDenied:
+			// 身份資格是前置拒絕：帳戶失效時先答這一句，不把它說成某一項業務限制。
+			return Member{}, ErrMemberIdentityInvalid
+		case restricted:
+			return Member{}, ErrMemberAccessRestricted
+		case statusDenied:
+			return Member{}, ErrMemberStatusRestricted
+		}
+	}
+	return Member{}, &MemberCapabilityRestrictedError{Key: key, Sources: sources}
 }
 
-// checkMemberActivityAccess 把一行剛現讀的成員換成訪問結論。
+// checkMemberActivityAccess 把一行剛現讀的成員換成活動訪問結論。
 //
-// 玩家族的所有讀法與寫入都在自己那條現讀之後問這一句，
-// EnsureMemberActivityAccess 讀回行之後也是同一句——「誰判定訪問資格」沒有一個第二形態，
-// 而判定輸入永遠是庫中現值，不是請求交來的任何一格。
-func checkMemberActivityAccess(member Member) error {
+// 玩家族的所有讀法與寫入都在自己那條現讀之後問這一句；判定輸入永遠是
+// 庫中現值，不是請求交來的任何一格。訪問資格只看兩件事：手動 restrict_login
+// 與當前業務狀態規則裡的 login 那一格。生命週期不拒絕查看（停止與歸檔仍可讀），
+// 身份資格由會話與成員行本身負責（讀不到成員行時先收斂 ErrMemberNotFound）。
+//
+// 手動先於狀態是已批准的對外顺序：兩者同時存在時回 2043，能力摘要仍並列兩個來源；
+// 解除手動後若狀態仍拒絕，下一筆請求回 2044——不會出現「已解凍」的假話。
+func (s *Service) checkMemberActivityAccess(ctx context.Context, q database.Querier,
+	member Member) error {
 	if member.RestrictLogin {
+		// 手動限制先答：它是已發布的 2043，且不必為一個已被手動擋下的人再讀矩陣。
 		return ErrMemberAccessRestricted
+	}
+	rules, err := s.store.CapabilityRuleSet(ctx, q, member.ActivityID)
+	if err != nil {
+		return err
+	}
+	if rules.Denied(member.BusinessStatus, RestrictionLogin) {
+		return ErrMemberStatusRestricted
 	}
 	return nil
 }

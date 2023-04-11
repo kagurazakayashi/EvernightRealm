@@ -127,7 +127,12 @@ func (s *Server) apiRoutes() []apiRoute {
 	// 兩個首段都已被上面幾行帶入 API，因此不新增首段、只多掛兩條路徑。與狀態那組分開注入
 	// 的理由同前——同一個服務實例、兩套准入邊界；而「禁止登入」對其餘玩家通路的擋
 	// 不依賴這兩條端點存在：判定在服務層的既有讀法內，裝配邊界只圈住編輯與查閱。
-	return append(routes, s.memberRestrictionsEndpoints()...)
+	// 狀態能力規則與組合判定一族（管理側矩陣讀寫、成員來源摘要、本人有效能力三條）
+	// 由自己那個依賴決定有無：/admin 與 /player 首段都已被上面幾行帶入 API，
+	// 因此不新增首段、只多掛三條路徑。與限制那組分開注入的理由同前——
+	// 同一個服務實例、兩套准入邊界；而「擋」不依賴這組端點。
+	routes = append(routes, s.memberRestrictionsEndpoints()...)
+	return append(routes, s.capabilityEndpoints()...)
 }
 
 // apiFirstSegments 從登記清單導出各端點的路徑首段集合。
